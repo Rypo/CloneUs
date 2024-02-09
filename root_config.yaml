@@ -1,0 +1,99 @@
+notes: |- # Notes about your run.
+  author tags as roles replacing "user"/"assistant". Bumped r/alpha. 
+train_loss: 
+eval_loss: 
+sample_output: 
+# model_id: mistralai/Mistral-7B-v0.1
+# model_id: mistralai/Mistral-7B-Instruct-v0.2
+# model_id: NousResearch/Llama-2-7b-hf
+# model_id: NousResearch/Llama-2-13b-hf
+# model_id: TheBloke/Llama-2-13B-GPTQ
+# model_id: teknium/OpenHermes-2.5-Mistral-7B
+# model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+model_id: NousResearch/Nous-Hermes-2-SOLAR-10.7B
+
+model_type: LlamaForCausalLM # MistralForCausalLM
+instruct_model: true
+
+flashattn_lib: unsloth # huggingface
+attn_implementation: flash_attention_2 # flash_attention_2, sdpa, eagar
+
+padding_side: left # right
+
+chunk_size: 4096
+batch_size: 8
+gradient_accumulation_steps: 1
+
+use_sft_trainer: false
+group_by_length: true
+
+num_epochs: 3
+learning_rate: 0.0002 
+lr_scheduler: cosine # constant_with_warmup
+custom_scheduler:  # warmup_const_cosine
+
+dataset:
+  name: chunk4h # chunk135h
+  train_jsonl:
+  eval_jsonl:
+  hours_between_sessions: 4 # [1, 3, 5]
+  min_session_length: 3
+  allow_truncation: false
+  chatlog_csv: 'data/raw/YOUR_DISCORD_CHAT_FILE.csv' # created from calling scripts/build.py with your DiscordChatExporter JSON export
+
+tag_sep: "\n" # MUST BE "\n" when chat_ml
+postfix: "</X/>" # NOT USED when using chat_ml format.
+author_tag: "{author} ({fname})" # "[USER:{author}, NAME:{fname}]" #"[{author}, {fname}]:"
+custom_chat_template: "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
+
+prompt:
+  append_msg: false # true when using prompt with a model that doesn't have a system tag
+  name_mapping: # Will be filled during scripts/train.py
+  template: |-
+    Uncensored Discord server chat.
+    Topic: offbeat.
+  # template: |-
+  #  Simulate a conversation between members in a discord server. Their name=usernames are {name_mapping}.
+  #  Your Task: {task}
+  task: #|-
+  # Reply as one of the members, mirroring their unique personality and writing style as closely as you can.
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.0 # Use 0 for unsloth optimizations to take effect
+lora_target_linear: true
+lora_fan_in_fan_out:
+lora_target_modules:
+  - gate_proj
+  - down_proj
+  - up_proj
+  - q_proj
+  - v_proj
+  - k_proj
+  - o_proj
+  # - embed_tokens
+  # - lm_head
+
+optimizer: paged_adamw_32bit
+weight_decay: 0.0 # 0.001
+warmup_steps: 0
+warmup_ratio: 0.03
+max_grad_norm: 0.3
+neftune_noise_alpha: #5
+
+gradient_checkpointing: true
+bf16: true
+fp16: false
+tf32: true
+
+special_tokens:
+  bos_token: "<s>"
+  eos_token: "<|im_end|>" # "</s>"
+  unk_token: "<unk>"
+  pad_token: "<unk>"
+
+pad_vocab_to:
+custom_tokens:
+
+resume_from_checkpoint: 
+logging_steps: 0.01
+save_steps: 500
