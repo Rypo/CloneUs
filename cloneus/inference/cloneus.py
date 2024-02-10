@@ -24,6 +24,7 @@ from transformers import (
 import transformers
 from transformers.generation.utils import GenerationMode
 
+from unsloth import FastLanguageModel
 
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig
 
@@ -171,8 +172,11 @@ class Cloneus:
         
         #if self.model is None or dtype != self.dtype or attn_implementation != self.attn_implementation:
         self.model, self.tokenizer = load.load_any_inference(self.model_dir, dtype=self.dtype, attn_implementation=self.attn_implementation)
+        # TODO: debug -- FastLanguageModel.for_inference(self.model)
+        #FastLanguageModel.for_inference(self.model)
         #self.model, self.tokenizer = minfer.load_unmerged_lowrsc(self.model_dir, dtype=None, attn_implementation='sdpa')
-        
+        self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
+
         self._is_instruct_model = self.tokenizer.chat_template is not None
         self.has_sysprompt = self.tokenizer.use_default_system_prompt
         self._use_sysprompt = self.has_sysprompt and not self.config.prompt.append_msg
@@ -561,16 +565,13 @@ class Cloneus:
         trunc_input_text = self.tokenizer.batch_decode(inputs.input_ids)[0]
         #print(inputs.keys())
         #output = self.model.generate(inputs.input_ids.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach()#.cpu()
-        neg_inp = None # self.neg_inpids(prompt_author_seedtext[0])
+        # neg_inp = self.neg_inpids(prompt_author_seedtext[0])
         
-        output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=neg_inp).detach()
+        output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
         out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.has_custom_tokens))
 
-        #out_text = self.ytm.decode(out_text)
-        #trunc_input_text = self.tokenizer.decode(inputs.input_ids)
-        # return trunc_input_text, out_text.strip(), input_len, output_len
         return trunc_input_text, out_text, input_len, output_len
     
     
@@ -644,64 +645,61 @@ class Cloneus:
         return input_text, model_output, input_length, output_length
 
 
-
-    @torch.inference_mode()
-    def base_generate(self, input_text:str, sys_prompt:str=None):
-        adapters = self.model.active_adapters()
-        self.model.disable_adapters()
-        chat_template = self.tokenizer.chat_template
-        self.tokenizer.chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    def base_instr_to_text(self, chat_history: list[str], sys_prompt:str=None):
+        rolecycle = itertools.cycle(['user','assistant'])
         chat_content = []
-        
+
         if sys_prompt is not None and self.has_sysprompt:
             chat_content.append({"role": "system", "content": sys_prompt})
 
-        chat_content.append({"role": 'user', "content": input_text})
+        for message in chat_history:
+            chat_content.append({"role": next(rolecycle), "content": message})
+
+        trunc_input_text = self.base_tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
+
         print('chat_content:',chat_content)
-        
-        trunc_input_text = self.tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
         print(f'trunc_input_text: {trunc_input_text!r}',)
         
-        inputs = self.tokenizer(trunc_input_text, return_tensors="pt", return_length=True)
+        return trunc_input_text
+
+    @torch.inference_mode()
+    def base_generate(self, input_text:str|list[str], sys_prompt:str=None) -> tuple[str, str, int, int]:        
+        adapters = self.model.active_adapters()
+        self.model.disable_adapters()
+
+        chat_history = [input_text] if isinstance(input_text, str) else input_text
+        trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
+        
+        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True)
         input_len = inputs.pop('length')[0].item()
         
         output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
-        out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.has_custom_tokens))
+        out_text = self.base_tokenizer.decode(out_tokens, skip_special_tokens=True)
         
         self.model.set_adapter(adapters)
-        self.tokenizer.chat_template = chat_template
+        
         return trunc_input_text, out_text, input_len, output_len
     
 
 
     @torch.inference_mode()
-    def base_stream_generate(self, input_text:str, sys_prompt:str=None):
+    def base_stream_generate(self, input_text:str|list[str], sys_prompt:str=None):
+        
         adapters = self.model.active_adapters()
         self.model.disable_adapters()
 
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
-        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=(not self.has_custom_tokens))
+        streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
-        chat_template = self.tokenizer.chat_template
-        self.tokenizer.chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
-        chat_content = []
-        
-        if sys_prompt is not None and self.has_sysprompt:
-            chat_content.append({"role": "system", "content": sys_prompt})
+        chat_history = [input_text] if isinstance(input_text, str) else input_text
+        trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
+        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
 
-        chat_content.append({"role": 'user', "content": input_text})
-        print(chat_content)
-        
-        trunc_input_text = self.tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
-        
-        
-        inputs = self.tokenizer(trunc_input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
         input_len = inputs.pop('length')[0].item()
 
-        neg_inp=None
-        genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=neg_inp)
+        genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
         thread = Thread(target=self.model.generate, kwargs=genkwargs)
         thread.start()
         generated_text = ""
@@ -709,8 +707,7 @@ class Cloneus:
             generated_text += new_text
             yield new_text
         
-        output_len = self.tokenizer(generated_text, return_length=True).length
+        output_len = self.base_tokenizer(generated_text, return_length=True).length
 
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
         self.model.set_adapter(adapters)
-        self.tokenizer.chat_template = chat_template
