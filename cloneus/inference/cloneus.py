@@ -88,7 +88,9 @@ def batchsafe_tokenizer(tokenizer):
     pad_tokenid = tokenizer.pad_token_id
     
     tokenizer.padding_side  = 'left'
-    tokenizer.pad_token_id = tokenizer.eos_token_id
+    # for non-chat_ml models, we set pad=unk, but batch needs pad=eos to work properly
+    if tokenizer.pad_token_id == tokenizer.unk_token_id:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     try:
         yield tokenizer
     finally:
@@ -101,7 +103,7 @@ class Cloneus:
         self.config = self._config_init(model_dir, ckpt_subdir, gconfig_fname=gconfig_fname, **kwargs)
         self.ckpt_subdir = ckpt_subdir
         self.model = None
-        self.tokenizer= None
+        self.tokenizer = None
         self.ytm = youtube.YouTubeManager()
         #self.gen_config, self._author_gen_config = self.load_genconf(gconfig_fname)
                 
@@ -144,7 +146,7 @@ class Cloneus:
 
         #self.guidance_phrases=dict.fromkeys(userutils.author_display_names)
         print(self.dtype, self.attn_implementation)
-        if gconfig_fname is not None:
+        if gconfig_fname is not None or not hasattr(self,'gen_config'):
             self.gen_config, self._author_gen_config = self.load_genconf(gconfig_fname)
 
         return config
@@ -172,8 +174,6 @@ class Cloneus:
         
         #if self.model is None or dtype != self.dtype or attn_implementation != self.attn_implementation:
         self.model, self.tokenizer = load.load_any_inference(self.model_dir, dtype=self.dtype, attn_implementation=self.attn_implementation)
-        # TODO: debug -- FastLanguageModel.for_inference(self.model)
-        #FastLanguageModel.for_inference(self.model)
         #self.model, self.tokenizer = minfer.load_unmerged_lowrsc(self.model_dir, dtype=None, attn_implementation='sdpa')
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
 
@@ -204,9 +204,11 @@ class Cloneus:
 
 
     def load_genconf(self, gconfig_fname=None):
-        if gconfig_fname is None or not (gconf_path := Path(self.model_dir)/gconfig_fname).exists():
+        if gconfig_fname is None:
             gconfig_fname = 'generation_config.json'
 
+        gconf_path = Path(self.model_dir)/gconfig_fname
+        if not gconf_path.exists():
             print(f'No GenConfig found at: {gconf_path}')
         
         try:
@@ -470,7 +472,7 @@ class Cloneus:
         trunc_input_text += self.author_tag.format(author='#DUMMY', lauthor='#DUMMY', fname='#NAME').split('#DUMMY',1)[0]
         inputs = self.tokenizer(trunc_input_text, return_tensors="pt")
 
-
+        
         output = self.model.generate(**inputs.to(0), generation_config=self._author_gen_config, stopping_criteria=self.stop_criteria, 
                                      output_scores=True, return_dict_in_generate=True)
         
@@ -496,60 +498,47 @@ class Cloneus:
 
         
     @torch.inference_mode()
-    def _batched_helper(self, inputs, input_len, true_batch_generate=False):
+    def _batched_helper(self, msg_batch, true_batch_generate=False):
         t0 = time.perf_counter()
 
         if true_batch_generate:
+            # BUG IMPORTANT: There is an issue with padding token. Whenever it is inserted, it makes those responses bad
+            # I verified that ONLY when pad token is used, then it goes wrong.
+            with batchsafe_tokenizer(self.tokenizer) as tokenizer:
+                inputs = tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True)
+            
+            input_len = inputs.pop('length')[0].item()
             outputs = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach()
+            
             output_texts = self.tokenizer.batch_decode(outputs[:,input_len:], skip_special_tokens=True)
         else:
-            # TODO: if not doing the whole batch, no point in incuring the 'penalty' for adding pad tokens to begining
+            # if not doing the whole batch, no point in incuring the 'penalty' for adding pad tokens to begining
             # better to just do tokenization on the fly
-            inps=inputs.to(0)
-            outputs  = []
-            for i in range(inps.input_ids.shape[0]):
-                outputs.append(self.model.generate(input_ids=inps.input_ids[[i]], attention_mask=inps.attention_mask[[i]], 
-                                        generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach())
-                                        
+            output_texts  = []
+
+            for inptext in msg_batch:
+                inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True)
+                input_len = inputs.pop('length')[0].item()
+                output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
+                output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
             
-            output_texts = self.tokenizer.batch_decode([o[0,input_len:] for o in outputs], skip_special_tokens=True)
-        
         print(f'TOTAL BATCHED RUN TIME: {time.perf_counter()-t0}')
         #print('Raw Batch Outputs:\n', self.tokenizer.batch_decode(outputs, skip_special_tokens=False))
         
-        return output_texts
-        
-
-    def _batch_process(self, trunc_context: str, prompt_authors: list[str], prompt_seedtext: str):
-        if prompt_seedtext is None:
-            prompt_seedtext = ''
-        #trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
-        # IFF using ' ' as tag_sep, should NOT trail with it
-        #msg_batch = [self.append_author_seedtext(trunc_context, (author, prompt_seedtext)) for author in prompt_authors]
-        author_prompts = [self.apply_template(author, prompt_seedtext, self.tag_sep, postfix='').strip(' ') for author in prompt_authors]
-        msg_batch = [trunc_context + auth_prompt for auth_prompt in author_prompts]
-
-        # BUG IMPORTANT: There is an issue with padding token. Whenever it is inserted, it makes those responses bad
-        # I verified that ONLY when pad token is used, then it goes wrong.
-
-        with batchsafe_tokenizer(self.tokenizer) as tokenizer:
-            inputs = tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True)
-
-        
-        return inputs, author_prompts
+        # use last input_len for all. Shouldn't differ by more than a few tokens as long as author_tags are reasonable
+        return output_texts,input_len
+    
 
     @torch.inference_mode()
     def batch_generate(self, author_messages: list[tuple[str,str]], prompt_authors: list[str], prompt_seedtext: str) -> tuple[str, list[str], list[str], int, list[int]]:
         trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
-        inputs, author_prompts = self._batch_process(trunc_context, prompt_authors, prompt_seedtext)
-        input_len = inputs.pop('length')[0].item()
+        if prompt_seedtext is None: prompt_seedtext = ''
+        # IFF using ' ' as tag_sep, should NOT trail with it
+        author_prompts = [self.apply_template(author, prompt_seedtext, self.tag_sep, postfix='').strip(' ') for author in prompt_authors]
 
-        true_batched = True # (self.gen_alias in ['cs','contrastive_search'])
-        output_texts = self._batched_helper(inputs, input_len, true_batch_generate=true_batched)
-        # stopping_criteria cannot be '\n\n' because it will cut all generation short when ANY hit \n\n
-        # UNLESS: last_tokens = input_ids[:,-2:], but may have implications        
+        true_batched = (self.gen_alias == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
+        output_texts,input_len = self._batched_helper([trunc_context+ap for ap in author_prompts], true_batch_generate=true_batched)
         
-        # out_texts = [ot.split(self.postfix)[0].strip() for ot in output_texts]
         out_texts = [ot.split(self.postfix)[0] for ot in output_texts]
         output_lens = self.tokenizer(out_texts, add_special_tokens=False, return_length=True)['length']
 
@@ -559,12 +548,11 @@ class Cloneus:
     def generate(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]) -> tuple[str, str, int, int]:
         trunc_input_text = self.to_text_input(author_messages, prompt_author_seedtext)
         
-        inputs = self.tokenizer(trunc_input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
+        inputs = self.tokenizer(trunc_input_text, return_tensors="pt", return_length=True)
         input_len = inputs.pop('length')[0].item()
 
         trunc_input_text = self.tokenizer.batch_decode(inputs.input_ids)[0]
-        #print(inputs.keys())
-        #output = self.model.generate(inputs.input_ids.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach()#.cpu()
+
         # neg_inp = self.neg_inpids(prompt_author_seedtext[0])
         
         output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
