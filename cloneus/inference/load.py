@@ -32,12 +32,13 @@ from transformers import (
     TextIteratorStreamer
 )
 import transformers
-from transformers.generation.utils import GenerationMode
-
 
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig
 
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
+
+from unsloth import FastLanguageModel
+
 from cloneus.data import roles, dataset
 from cloneus.plugins import youtube as youtube
 
@@ -205,6 +206,23 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implem
 
     return model, tokenizer
 
+
+def load_unsloth(checkpoint_dirpath):
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    warnings.warn('As of patch 2024.2, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
+    
+    # can't use unsloths tokenizer without overiding chat_template, padding side, etc.
+    model, _tknzr = FastLanguageModel.from_pretrained(
+        model_name = checkpoint_dirpath,
+        max_seq_length = tokenizer.model_max_length,
+        dtype = None,
+        load_in_4bit = True,
+    )
+    FastLanguageModel.for_inference(model)
+
+    return model, tokenizer
+
+
 @cleanup
 def load_any_inference(model_savedir, **kwargs):
     '''Attempt to load any type of model based on model dir structure
@@ -285,7 +303,7 @@ def load_unmerged(checkpoint_dirpath, quant_config=None, dtype=torch.bfloat16, a
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16
         )
-        transformers.LlamaForCausalLM
+        
     
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
 
