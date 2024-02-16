@@ -5,29 +5,32 @@ import cloneus.core.paths as cpaths
 
 USERS_FILEPATH = cpaths.ROOT_DIR/'config/users.json'
 
+try:
+    with open(USERS_FILEPATH,'r') as f:
+        USER_DATA: dict = json.load(f)
+except FileNotFoundError as e:
+    print('users.json Not Found! Call scripts/build.py before running.')
+    raise e
 
 def _load_author_helpers():
-    try:
-        with open(USERS_FILEPATH,'r') as f:
-            userdata = json.load(f)
-    except FileNotFoundError as e:
-        print('users.json Not Found! Call scripts/build.py before running.')
-        raise e
-
     author_display_names = []
     author_to_fname = {} # May have nulls if no firstName
     initial_to_author = {} # may have duplicate drops if no authorInitial
+    author_to_id = {}
     
-    for u in userdata['USERS']:
+    for u in USER_DATA['USERS']:
         author_display_names.append(u['displayName'])
         author_to_fname[u['displayName']] = u['firstName']
+        author_to_id[u['displayName']] = u['id']
+
         initial = u['authorInitial'] if u['authorInitial'] else u['username'][0]
         initial_to_author[initial] = u['displayName']
-
-    return author_display_names, author_to_fname, initial_to_author
+        
+    return author_display_names, author_to_fname, author_to_id, initial_to_author
 
 # Consts
-author_display_names, author_to_fname, initial_to_author = _load_author_helpers()
+author_display_names, author_to_fname, author_to_id, initial_to_author = _load_author_helpers()
+BOT_NAME = USER_DATA['BOT']['displayName']
 
 
 def format_author_tag(user_display_name:str, author_tag:str):
