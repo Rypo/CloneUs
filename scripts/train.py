@@ -52,7 +52,7 @@ def main():
     # Decent example for HfArgumentParser
     # https://github.com/huggingface/trl/blob/main/examples/scripts/sft.py
     
-    cfg = OmegaConf.load(cpaths.ROOT_DIR/'root_config.yaml')
+    cfg = OmegaConf.load(cpaths.ROOT_DIR/'config'/'train_config.yaml')
     
     custom_token_map = tokenization.author_special_tokens(cfg.custom_tokens, pad_vocab_to=cfg.pad_vocab_to) if cfg.custom_tokens else None
 

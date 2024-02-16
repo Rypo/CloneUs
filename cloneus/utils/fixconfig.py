@@ -39,7 +39,7 @@ def empty_cfg(cfg):
     return cfg
 
 def get_blankcfg(full=True):
-    fcfg = OmegaConf.load(cpaths.ROOT_DIR/'root_config.yaml')
+    fcfg = OmegaConf.load(cpaths.ROOT_DIR/'config'/'train_config.yaml')
     full_config = empty_cfg(fcfg.copy())
     
     if full:
