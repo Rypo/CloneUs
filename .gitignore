@@ -17,9 +17,8 @@ server/res
 
 
 # Ignore data files but keep structure
-data/**
-# !data/**/
-#!data/**/.gitkeep
+/data/*
+!data/discord
 config/users.json
 # Dev files
 nbs
