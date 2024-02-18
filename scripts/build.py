@@ -6,10 +6,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import cloneus.core.paths as cpaths
-
-
-USERS_FILEPATH = cpaths.ROOT_DIR/'config/users.json'
+# can't import cloneus.core.paths until after users.json is created
+ROOT_DIR = Path(__file__).parent.parent
+USERS_FILEPATH = ROOT_DIR/'config/users.json'
 
 def get_args():
     parser = argparse.ArgumentParser(description='Setup the initial files needed to run the rest of the program.')

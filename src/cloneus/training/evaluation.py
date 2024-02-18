@@ -17,15 +17,6 @@ from cloneus.inference import genconfig
 from cloneus import Cloneus
 
 
-with open(cpaths.DATA_DIR/'testfiles/test_questions.txt', 'r') as f:
-    TEST_QUESTIONS = f.read().splitlines()
-
-with open(cpaths.DATA_DIR/'testfiles/sample_conversations/evalset_convo.json','r') as f:
-    EVALSET_SAMPLE: list[tuple[str,str]] = [(i['user'],i['content']) for i in json.load(f)]
-
-with open(cpaths.DATA_DIR/'testfiles/sample_conversations/testset_convo.json','r') as f:
-    TESTSET_SAMPLE: list[tuple[str,str]] = [(i['user'],i['content']) for i in json.load(f)]
-
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -36,8 +27,10 @@ def seed_everything(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
-def get_test_questions(n:int|None = 1, best_only=False):
-    test_qs = [q.strip('*').replace('\\n','\n') for q in TEST_QUESTIONS if (q.endswith('*') or not best_only)]
+def get_test_questions(questions_filepath:str|Path, n:int|None = 1, best_only=False):
+    with open(questions_filepath, 'r') as f:
+        test_questions = f.read().splitlines()
+    test_qs = [q.strip('*').replace('\\n','\n') for q in test_questions if (q.endswith('*') or not best_only)]
     if n is None:
         return test_qs
     random.shuffle(test_qs)
@@ -114,7 +107,7 @@ def textborder(center_text, sym='-', out_n=64, cent_n=0):
     return outstr
 
 
-def eval_model(model_path, test_qs=None, outfile='test_samples.log', gmodes:list[str]=None, question_author:str = None, response_authors='rest'):
+def eval_model(model_path, questions_filepath, outfile='test_samples.log', gmodes:list[str]=None, question_author:str = None, response_authors='rest'):
     if (cpts:=list(Path(model_path).glob('*checkpoint*'))):
         model_path = cpts[0]
 
@@ -122,8 +115,7 @@ def eval_model(model_path, test_qs=None, outfile='test_samples.log', gmodes:list
     clo.load_model()
     checkpoints = sorted([p.name for p in clo.mdir_comps.basedir_path.glob('*checkpoint*')], key=lambda t: int(t.split('-')[1]))
     
-    if test_qs is None:
-        test_qs = get_test_questions(None, True)
+    test_qs = get_test_questions(questions_filepath, None, True)
     
     if gmodes is None:
         gmodes = ['cs','ms']
