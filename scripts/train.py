@@ -21,13 +21,11 @@ from peft import LoraConfig
 
 
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
-from cloneus.data import roles
-
 
 import cloneus.training.trainer as mtrain
 import cloneus.training.model as mllm
 import cloneus.training.evaluation as meval
-from cloneus.data import dataset, tokenization
+from cloneus.data import dataset, tokenization, roles
 from cloneus.core import paths as cpaths
 
 def safe_train(trainer:mtrain.Trainer, checkpoint_path=None):
@@ -41,10 +39,11 @@ def safe_train(trainer:mtrain.Trainer, checkpoint_path=None):
         if trainer.state.global_step:
             mtrain.create_resumable_save(trainer)
 
-def write_first_batches(trainer):
-    with open(cpaths.ROOT_DIR/'_tmp'/'tmpview_evalbatch.txt', 'w') as f:
+def write_first_batches(trainer, batchsample_dir='_tmp'):
+    (cpaths.ROOT_DIR/batchsample_dir).mkdir(exist_ok=True)
+    with open(cpaths.ROOT_DIR/batchsample_dir/'sample_evalbatch.txt', 'w') as f:
         f.writelines(mtrain.get_batch(trainer, train=False))
-    with open(cpaths.ROOT_DIR/'_tmp'/'tmpview_trainbatch.txt', 'w') as f:
+    with open(cpaths.ROOT_DIR/batchsample_dir/'sample_trainbatch.txt', 'w') as f:
         f.writelines(mtrain.get_batch(trainer, train=True))
 
 
@@ -140,19 +139,14 @@ def main():
         #torch_compile=True,
     )
 
+    if 'fname' in cfg.author_tag:
+        # Check that all users have assigned firstName if using "fname" in tag
+        for dispname, fname in roles.author_to_fname.items():
+            if fname is None:
+                raise KeyError(f'users.json missing firstName for {dispname!r}. Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
 
-    # oconf = OmegaConf.create(dict(
-    #     ctx_len = cfg.chunk_size, 
-    #     attn_implementation = cfg.attn_implementation, 
-    #     tag_sep=cfg.tag_sep,
-    #     postfix=cfg.postfix, 
-    #     author_tag=cfg.author_tag,
-    #     has_custom_tokens=(custom_token_map is not None),
-    #     dtype='bfloat16' if cfg.bf16 else 'float16',
-    #     prompt=cfg.prompt,
-    #     notes=cfg.notes,
-    #     ),
-    # )
+        
+
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(custom_token_map is not None)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
@@ -176,10 +170,7 @@ def main():
         cfg.prompt.name_mapping = name_mapping
         fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
         cfg.fprompt = fprompt
-        #oconf.prompt = cfg.prompt
-        
 
-        #oconf.custom_chat_template = cfg.custom_chat_template
 
         if cfg.custom_chat_template:
             dset = dataset.author_role_dataset(data_file_path, tokenizer, cfg, cfg.custom_chat_template)
@@ -237,7 +228,7 @@ def main():
 
     #oconf['base_dir'] = args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    write_first_batches(trainer)
+    write_first_batches(trainer, batchsample_dir='_tmp')
 
     if custom_token_map:
         tokenization.save_embeddings(model, args.output_dir)
@@ -258,5 +249,3 @@ def main():
 if __name__ == "__main__":
     load_dotenv()
     args = main()
-
-    meval.eval_model(args.output_dir, None, outfile='test_samples.log', gmodes=['cs','ms'])

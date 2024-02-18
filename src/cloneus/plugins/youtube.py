@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from cloneus.core import paths as cpaths
 
 
-YOUTUBE_DATA_DIR = cpaths.DATA_DIR / 'interim/youtube'
+YOUTUBE_DATA_DIR = cpaths.DATA_DIR / 'youtube'
 
 # # https://stackoverflow.com/questions/3717115/regular-expression-for-youtube-links
 RE_YOUTUBE_URL_ID = re.compile(r'(?P<url>(?:https?://)?(?:www\.|m\.)?youtu(?:\.be/|be.com/\S*(?:watch|embed|shorts)(?:(?:(?=/[-a-zA-Z0-9_]{11,}(?!\S))/)|(?:\S*v=|v/)))(?P<video_id>[-a-zA-Z0-9_]{11,})\S*)', re.I)
@@ -222,7 +222,8 @@ def parse_template_string(template_string: str):
     
 class YouTubeManager:
     def __init__(self, video_data_file='video_data.jsonl', search_data_file='search_data.jsonl', invalid_ids_file='invalid_ids.txt', allow_fetch=True):
-        
+        if not os.getenv('YOUTUBE_API_KEY'):
+            raise KeyError('Missing Environment var: "YOUTUBE_API_KEY"')
         yt = gbuild('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
         
         self.ytv = yt.videos()
@@ -239,6 +240,7 @@ class YouTubeManager:
 
 
     def _build_initial_index(self):
+        YOUTUBE_DATA_DIR.mkdir(parents=True, exist_ok=True)
         raw_vid_index = self.read_video_data(result_type='lookup')
 
         for video_items in raw_vid_index:

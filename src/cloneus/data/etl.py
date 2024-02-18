@@ -51,26 +51,28 @@ def preprocess_df(chat_csv: str, video_datafile='video_data.jsonl', hours_betwee
     #df_gsc['Content'] = df_gsc.Content.str.replace(RE_ATTACHMENTS, 'attachments/\g<1>', regex=True)
     #df_gsc['Content'] = df_gsc['Content'].fillna(df_gsc['Attachments'])
 
-    df_chat['Date'] = pd.to_datetime(df_chat['Date'], format='%m/%d/%Y %I:%M %p')
+    # BUG: Not converting to dt object? 
+    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, infer_datetime_format=True)# format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
 
     # strip out all discord image urls
     df_chat['Content'] = df_chat['Content'].str.replace('(https://cdn.discordapp.com\S+)','', regex=True).replace('',None) 
     df_chat = df_chat.dropna(subset='Content').reset_index(drop=True)
-    
+
     #df_chat = _targeted_chat_filter(df_chat)
     
     id2display, cloneus_bot_id = ids_to_displaynames()
-    df_chat['user'] = df_chat['AuthorID'].map(id2display)
+    df_chat['user'] = df_chat['AuthorId'].map(id2display)
     
     # Drop any messages from users not in the users.json (too few messages or from a different bot) 
     df_chat = df_chat.dropna(subset='user').reset_index(drop=True)
     
     is_command_call = df_chat['Content'].str.startswith(cmd_prefixes)
-    is_cloneus_bot = df_chat['AuthorID'] == cloneus_bot_id
+    is_cloneus_bot = df_chat['AuthorId'] == cloneus_bot_id
 
     # use the first message by bot to denote potentially unsafe training data
-    df_chat['pre_ai'] = df_chat.index < df_chat[is_cloneus_bot].index[0]
-
+    # df_chat['pre_ai'] = df_chat.index < df_chat[is_cloneus_bot].index[0]
+    df_chat['pre_ai'] = df_chat.index < df_chat.index[-256]
+    # TODO: parameter for eval split
     
     # drop Cloneus messages and Command calls
     df_chat = df_chat[~is_command_call & ~is_cloneus_bot]
@@ -79,10 +81,13 @@ def preprocess_df(chat_csv: str, video_datafile='video_data.jsonl', hours_betwee
     # replace 2+ newlines with 1 newline, since we may use \n\n to separate messages
     df_chat['text'] = df_chat['Content'].str.replace(r'\n{2,}','\n', regex=True)
    
-    # Want this to be AFTER filtering to avoid YouTube API calls on excluded content
-    ytm = youtube.YouTubeManager(video_datafile)
-    # Transform all youtube URLs into custom metadata tag for better LLM comprehension
-    df_chat.loc[:, 'text'] = df_chat['text'].apply(ytm.encode, allow_fetch=False)
+    try:
+        # Want this to be AFTER filtering to avoid YouTube API calls on excluded content
+        ytm = youtube.YouTubeManager(video_datafile)
+        # Transform all youtube URLs into custom metadata tag for better LLM comprehension
+        df_chat.loc[:, 'text'] = df_chat['text'].apply(ytm.encode, allow_fetch=False)
+    except KeyError as e:
+        print('.env missing: "YOUTUBE_API_KEY". YouTube video links will not encoded.')
     # this will drop ~< 500 samples with invalid YouTube links as the only source of text. Verified that these are indeed not valid links
     df_chat = df_chat[df_chat['text'] != ''].reset_index(drop=True)
 
