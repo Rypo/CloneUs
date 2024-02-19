@@ -597,14 +597,22 @@ class Cloneus:
 
        
         trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
-        inputs, author_prompts = self._batch_process(trunc_context, prompt_authors, prompt_seedtext)
+        if prompt_seedtext is None: prompt_seedtext = ''
+        # IFF using ' ' as tag_sep, should NOT trail with it
+        author_prompts = [self.apply_template(author, prompt_seedtext, self.tag_sep, postfix='').strip(' ') for author in prompt_authors]
+        #inputs, author_prompts = self._batch_process(trunc_context, prompt_authors, prompt_seedtext)
         #inputs, trunc_context, author_prompts = self._batch_process(author_messages, prompt_authors, prompt_seedtext)
-        input_len = inputs.pop('length')[0].item()
-        self._last_streamed_batch_values.update(input_text=trunc_context, author_prompts=author_prompts, input_len=input_len)
+        msg_batch = [trunc_context+ap for ap in author_prompts]
+        #input_len = inputs.pop('length')[0].item()
+        
 
-        inps=inputs.to(0)
-        for i in range(inps.input_ids.shape[0]):
-            genkwargs = dict(input_ids=inps.input_ids[[i]], attention_mask=inps.attention_mask[[i]], 
+        #inps=inputs.to(0)
+
+        for i, inptext in enumerate(msg_batch):
+            inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True)
+            input_len = inputs.pop('length')[0].item()
+            #genkwargs = dict(input_ids=inps.input_ids[[i]], attention_mask=inps.attention_mask[[i]], 
+            genkwargs = dict(**inputs.to(0),
                              generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria)
             thread = Thread(target=self.model.generate, kwargs=genkwargs)
             thread.start()
@@ -619,7 +627,7 @@ class Cloneus:
             self._last_streamed_batch_values['output_lens'] += output_len
             
             #print(output_len)
-
+        self._last_streamed_batch_values.update(input_text=trunc_context, author_prompts=author_prompts, input_len=input_len)
         #self._last_streamed_values.update({'input_text':trunc_context, 'output_texts': generated_text, 'input_len': input_len, 'output_len': output_len})
 
     def get_last_streamed(self, batch=False):
