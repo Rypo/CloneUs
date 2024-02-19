@@ -16,19 +16,16 @@ from discord.ext import commands
 
 import numpy as np
 import torch
-from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, DiffusionPipeline, StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
+from diffusers import AutoPipelineForText2Image, AutoPipelineForImage2Image, DiffusionPipeline, StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline, DPMSolverMultistepScheduler
 from diffusers.utils import load_image, make_image_grid
 from DeepCache import DeepCacheSDHelper
-
-# import server.settings as settings
 from PIL import Image
 
-from ..config import settings
-#from ...client import bot
-from ..cmd import flags as cmd_flags, transformers as cmd_tfms
-from ..utils.globthread import async_wrap_thread, stop_global_thread
-from ..views import redrawui
-from ..run import BotUs
+from cloneus import cpaths
+import config.settings as settings
+from cmds import flags as cmd_flags, transformers as cmd_tfms
+from utils.globthread import async_wrap_thread, stop_global_thread
+from views import redrawui
 
 bot_logger = settings.logging.getLogger('bot')
 model_logger = settings.logging.getLogger('model')

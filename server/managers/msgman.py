@@ -4,7 +4,7 @@ from collections import  defaultdict
 import discord
 from discord.ext import commands
 
-from server.utils import text as text_utils
+from utils import text as text_utils
 
 
 

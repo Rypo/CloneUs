@@ -6,8 +6,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands 
 
-from ..config import settings
-from ..views import redrawui
+import config.settings as settings
+from views import redrawui
 
 
 class Utility(commands.Cog):
@@ -20,7 +20,6 @@ class Utility(commands.Cog):
     async def ping(self, ctx):
         """A simple command that returns latency."""
         await ctx.send(f'Pong! {round(self.bot.latency * 1000)}ms')
-
 
     @commands.command()
     async def roll(self, ctx, dice: str):

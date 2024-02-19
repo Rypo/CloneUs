@@ -4,7 +4,7 @@ from pathlib import Path
 import more_itertools
 from omegaconf import OmegaConf
 
-from ..config import settings
+import config.settings as settings
 
 # def gb_part(candidates, part, part_max=5):
 #     return dict(more_itertools.groupby_transform(candidates, lambda c: c.parts[part], None, (lambda ncands: gb_part(ncands, part+1) if part < part_max else list(ncands))))

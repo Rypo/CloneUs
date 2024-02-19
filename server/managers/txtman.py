@@ -11,10 +11,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from ..config import settings
-from ..utils import text as text_utils, io as io_utils
+import config.settings as settings
+from utils import text as text_utils, io as io_utils
 
-from ..utils.globthread import async_wrap_thread
+from utils.globthread import async_wrap_thread
 
 from cloneus import Cloneus
 from cloneus.data import roles

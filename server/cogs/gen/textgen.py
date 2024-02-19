@@ -19,22 +19,22 @@ import torch
 
 from cloneus.data import roles
 
-from server.config import settings
-from server.utils import text as text_utils, io as io_utils
-from server.utils.command import check_up
+from config import settings
+from utils import text as text_utils, io as io_utils
+from utils.command import check_up
 
-from server.utils.globthread import async_wrap_thread, stop_global_thread
+from utils.globthread import async_wrap_thread, stop_global_thread
 
-from server.views import contextview as cview
-from server.cmd import (
+from views import contextview as cview
+from cmds import (
     flags as cmd_flags, 
     transformers as cmd_tfms, 
     choices as cmd_choices
 )
-from server.managers.txtman import CloneusManager
-from server.managers.msgman import MessageManager
+from managers.txtman import CloneusManager
+from managers.msgman import MessageManager
 
-from server.run import BotUs
+from run import BotUs
 
 from .gencfg import SetConfig
 from .initials import InitialsMixin
@@ -57,8 +57,8 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
 
         # very close between these two.
         #self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_udovkqg/checkpoint-3500'
-        self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_ovugdkq/checkpoint-4500'
-    
+        # self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_ovugdkq/checkpoint-4500'
+        self.init_model = settings.RUNS_DIR/'mistral-inst-OpenHermes2.5/chunk135h/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_uvkodgq/checkpoint-2500'
     @property
     def youtube_quota(self):
         active_usage = self.clomgr.yt_session_quota
@@ -124,7 +124,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
     
     async def _react_repeat_one(self, reaction: discord.Reaction):
         try:
-            ctx = self.bot.get_context(reaction.message)
+            ctx = await self.bot.get_context(reaction.message)
             await self.redo(ctx, reaction.message)
         except ValueError:
             print('Message not in context')

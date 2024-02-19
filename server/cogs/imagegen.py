@@ -21,14 +21,14 @@ from diffusers.utils import load_image, make_image_grid
 
 from PIL import Image
 
-from server.managers import imgman
-from server.config import settings
+from managers import imgman
+import config.settings as settings
 
-from server.cmd import transformers as cmd_tfms
-from server.utils.command import check_up
-from server.utils.globthread import stop_global_thread
-from server.views import redrawui
-from server.run import BotUs
+from cmds import transformers as cmd_tfms
+from utils.command import check_up
+from utils.globthread import stop_global_thread
+from views import redrawui
+from run import BotUs
 
 bot_logger = settings.logging.getLogger('bot')
 model_logger = settings.logging.getLogger('model')

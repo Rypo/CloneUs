@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from server.config import settings
+import config.settings as settings
 
 from contextlib import asynccontextmanager
 
@@ -57,11 +57,11 @@ class BotUs(commands.Bot):
         for ext_file in settings.SERVER_ROOT.joinpath(extdir).glob(DYN_GLOB):
             if ext_file.stem != '__init__':
                 if state=='on':
-                    await self.load_extension(f'server.{extdir}.{ext_file.stem}')
+                    await self.load_extension(f'{extdir}.{ext_file.stem}')
                 elif state=='off':
-                    await self.unload_extension(f'server.{extdir}.{ext_file.stem}')
+                    await self.unload_extension(f'{extdir}.{ext_file.stem}')
                 elif state=='reload':
-                    await self.reload_extension(f'server.{extdir}.{ext_file.stem}')
+                    await self.reload_extension(f'{extdir}.{ext_file.stem}')
                 else:
                     raise ValueError('Unknown state:', state)
 

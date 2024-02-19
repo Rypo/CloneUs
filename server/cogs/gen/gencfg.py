@@ -6,16 +6,16 @@ from omegaconf import OmegaConf
 
 from cloneus.data import roles
 
-from server.config import settings
 
-from server.cmd import (
+import config.settings as settings
+from cmds import (
     flags as cmd_flags, 
     transformers as cmd_tfms, 
     choices as cmd_choices
 )
 
-from server.managers.txtman import CloneusManager
-from server.managers.msgman import MessageManager
+from managers.txtman import CloneusManager
+from managers.msgman import MessageManager
 
 
 

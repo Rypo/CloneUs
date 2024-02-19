@@ -16,15 +16,13 @@ import torch
 
 from cloneus.data import roles
 
-from server.config import settings
+import config.settings as settings
 
-from server.utils import  io as io_utils
-from server.utils.globthread import async_wrap_thread, stop_global_thread
-#from ..views.contextview import PagedChangelogView, MessageContextView
-from server.views import contextview as cview
+from utils import io as io_utils, globthread
+from views import contextview as cview
 
-from server.managers.txtman import CloneusManager
-from server.managers.msgman import MessageManager
+from managers.txtman import CloneusManager
+from managers.msgman import MessageManager
 
 from .gen.textgen import TextGen
 
@@ -88,6 +86,7 @@ class AICore(commands.Cog):
         await self.bot.wait_until_ready()
         #await self.bot.add_cog(TextGen(self.bot, pstore=self.pstore, clomgr=self.clomgr, msgmgr=self.msgmgr), override=True) #load_nowait=self._load_nowait
         await self.bot.add_cog(self.cog_textgen, override=True) #load_nowait=self._load_nowait
+        release_memory()
         
         self.autoloader.start()
         self.cleaner.start()
@@ -101,7 +100,7 @@ class AICore(commands.Cog):
         #self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         await self.bot.remove_cog('TextGen')
         
-        stop_global_thread()
+        globthread.stop_global_thread()
 
 
     @tasks.loop(minutes=1.0)
@@ -236,7 +235,7 @@ class AICore(commands.Cog):
             ('Message Context', len(self.msgmgr.get_mcache(ctx)), f' / {self.msgmgr.message_cache_limit}'), # Note: this show the _unmerged_ length.
             #('Messages bot cached', len(self.bot.cached_messages)),
             ('','---',''),
-            *self.cog_textgen.argsettings(ctx)
+            *self.cog_textgen.argsettings()
         ]
         msg = '\n'.join(f'{label}: **{desc}**{post}' if label else desc for label, desc, post in statuses)
         await ctx.send(msg)
