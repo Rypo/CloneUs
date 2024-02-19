@@ -6,8 +6,7 @@ from dataclasses import dataclass
 
 import discord
 
-from cloneus.data import roles
-
+import config.settings as settings
 
 RE_USER_TAG = re.compile(r'^\[\w+\]') # Line starts with [authorDisplayName] will NOT match a space
 RE_EMOJI_RAW = re.compile(r'<a?(:\w+:)\d+>')
@@ -31,12 +30,9 @@ def find_emoji(emoji_name: str, emojis: list[discord.Emoji]) -> (discord.Emoji|s
 def fix_mentions(message_str:str, bot):
     if '@' in message_str:
         for m in re.findall(r'(@\w+)', message_str):
-            if m not in ['@everyone', '@here']:
-                #usr = settings.USERS.get(m.strip('@').lower()) # this lower should stay because the USERS dict is indexed by lowercase names
-                
-                if (usr_id := roles.author_to_id.get(m)) is not None:
-                    # if the user is a known user, replace it with a mention.
-                    message_str = message_str.replace(m, bot.get_user(usr_id).mention)
+            if m and m not in ['@everyone', '@here']:
+                if usr := bot.get_guild(settings.GUILDS_ID_INT).get_member_named(m.strip('@')):
+                    message_str = message_str.replace(m, usr.mention)
 
     return message_str
 
