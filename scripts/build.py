@@ -66,10 +66,10 @@ def create_usersfile(df_msgs: pd.DataFrame, msg_threshold:int = 100, exclude_bot
     with open(USERS_FILEPATH, 'w') as f:
         json.dump(users, f, indent=2)
         print('Created users file at:', str(USERS_FILEPATH))
-        print('*'*100)
+        print('='*100)
         print("(required) DON'T FORGET: You NEED to manually update the config/users.json file with your bot's info.")
         print("(recommended) Update user.jsons with each user's first name and a unique initial")
-        print('*'*100)
+        print('-'*100)
     
 def to_chatcsv(df_msgs: pd.DataFrame, out_csvfile: str|Path):
     df_chatcsv = df_msgs[['author.id','author.name','timestamp','content','attachments','reactions']].copy()
@@ -94,7 +94,9 @@ def check_overwrite(test_path:str|Path) -> bool:
 
 if __name__ == '__main__':
     args = get_args()
-
+    if (ROOT_DIR/'.env_example').exists() and not (ROOT_DIR/'.env').exists():
+        (ROOT_DIR/'.env_example').rename(ROOT_DIR/'.env')
+    
     df_msgs = read_chatjson(args.chat_file)
 
     if check_overwrite(USERS_FILEPATH):
