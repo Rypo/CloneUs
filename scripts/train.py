@@ -46,6 +46,12 @@ def write_first_batches(trainer, batchsample_dir='_tmp'):
     with open(cpaths.ROOT_DIR/batchsample_dir/'sample_trainbatch.txt', 'w') as f:
         f.writelines(mtrain.get_batch(trainer, train=True))
 
+def verify_config(cfg):
+    if 'fname' in cfg.author_tag:
+        # Check that all users have assigned firstName if using "fname" in tag
+        for dispname, fname in roles.author_to_fname.items():
+            if fname is None:
+                raise KeyError(f'users.json missing firstName for {dispname!r}. Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
 
 def main():
     # Decent example for HfArgumentParser
@@ -64,10 +70,11 @@ def main():
         'NousResearch/Llama-2-13b-hf':'llama2-13b-i4', 
         'TheBloke/Llama-2-13B-GPTQ':'llama2-13b-gptq',
         'TinyLlama/TinyLlama-1.1B-Chat-v1.0':'tinyllama1b-chat-v1',
-        'NousResearch/Nous-Hermes-2-SOLAR-10.7B':'solar-10b-inst-hermes2'
+        'NousResearch/Nous-Hermes-2-SOLAR-10.7B':'solar-10b-inst-hermes2',
+        # Add aliases for new models here
     }
     
-    model_name = model_map[cfg.model_id]
+    model_name = model_map.get(cfg.model_id, cfg.model_id.split('/')[-1])  
     base_outdir = cpaths.RUNS_DIR/f'{model_name}/{cfg.dataset.name}'
     
     if 'gptq' in model_name:
@@ -139,14 +146,13 @@ def main():
         #torch_compile=True,
     )
 
-    if 'fname' in cfg.author_tag:
-        # Check that all users have assigned firstName if using "fname" in tag
-        for dispname, fname in roles.author_to_fname.items():
-            if fname is None:
-                raise KeyError(f'users.json missing firstName for {dispname!r}. Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
+    verify_config(cfg)
 
         
-
+    if cfg.dataset.name == 'chunkh': # append hours_between_session
+        hbs = cfg.dataset.hours_between_session
+        cfg.dataset.name += str(hbs) if isinstance(hbs, int) else ''.join(map(str,hbs))
+        
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(custom_token_map is not None)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
@@ -156,9 +162,6 @@ def main():
     data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
 
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:
-        # REMEMBER: these are FIXED 4096 (- prompt length for instruct)
-        # instruct_spc_eos_auth_train.jsonl', # ' ', '</s>' ,'[{author}]:',
-        # text_spc_eosnl_authfname_train.jsonl', # ' ', '</s>\n', '[{author} ({fname})]:' 
         dset = dataset.dataset_tc_files(tokenizer, maxlen=4096, train_jsonl=cfg.train_jsonl, eval_jsonl=cfg.eval_jsonl) 
     elif cfg.dataset.name == 'ungrouped_eos':
         dset = dataset.dataset_ungrouped(data_file_path, tokenizer, cfg, text_only=False)
@@ -166,7 +169,7 @@ def main():
         dset = dataset.dataset_all_chunks(data_file_path, tokenizer, cfg)
 
     elif cfg.instruct_model:
-        name_mapping = '\n'.join([cfg.author_tag.format(author=k, fname=v) for k,v in roles.author_to_fname.items()])
+        name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
         cfg.prompt.name_mapping = name_mapping
         fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
         cfg.fprompt = fprompt
@@ -226,7 +229,6 @@ def main():
     else:
         trainer = mtrain.get_trainer(model, dset, tokenizer, args, callbacks=callbacks)#, collator_pad_multiple=8) # TODO: reenable?
 
-    #oconf['base_dir'] = args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
     write_first_batches(trainer, batchsample_dir='_tmp')
 
@@ -237,8 +239,7 @@ def main():
     cfg.update(train_loss=trainer.state.log_history[-2].get('train_loss'), eval_loss=trainer.state.log_history[-1].get('eval_loss'))
 
     OmegaConf.save(cfg, os.path.join(args.output_dir, 'config.yaml'))
-    #OmegaConf.save(cfg, os.path.join(args.output_dir, 'full_config.yaml'))
-    #OmegaConf.save(oconf, os.path.join(args.output_dir, 'config.yaml'))
+
 
     if args.save_strategy == 'steps':
         mtrain.save_last_step(trainer)

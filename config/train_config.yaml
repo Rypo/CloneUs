@@ -1,5 +1,5 @@
 notes: |- # Notes about your run.
-  author tags as roles replacing "user"/"assistant". Bumped r/alpha. 
+  CloneUs Demo Config. 
 train_loss: 
 eval_loss: 
 sample_output: 
@@ -8,21 +8,22 @@ sample_output:
 # model_id: NousResearch/Llama-2-7b-hf
 # model_id: NousResearch/Llama-2-13b-hf
 # model_id: TheBloke/Llama-2-13B-GPTQ
-# model_id: teknium/OpenHermes-2.5-Mistral-7B
+model_id: teknium/OpenHermes-2.5-Mistral-7B
 # model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-model_id: NousResearch/Nous-Hermes-2-SOLAR-10.7B
+# model_id: NousResearch/Nous-Hermes-2-SOLAR-10.7B
 
-model_type: LlamaForCausalLM # MistralForCausalLM
+model_type: MistralForCausalLM # LlamaForCausalLM
 instruct_model: true
 
 flashattn_lib: unsloth # huggingface
 attn_implementation: flash_attention_2 # flash_attention_2, sdpa, eagar
 
-padding_side: left # right
+padding_side: right # left
 
-chunk_size: 4096
-batch_size: 8
-gradient_accumulation_steps: 1
+# Upper token limit on chunk size. Spillover will be placed in a new group.
+chunk_size: 8192
+batch_size: 4
+gradient_accumulation_steps: 2
 
 use_sft_trainer: false
 group_by_length: true
@@ -33,17 +34,25 @@ lr_scheduler: cosine # constant_with_warmup
 custom_scheduler:  # warmup_const_cosine
 
 dataset:
-  name: chunk4h # chunk135h
+  name: chunkh # chunkh135
   train_jsonl:
   eval_jsonl:
+  # hours of silence before we start a new chat chunk. Can be a list to use multiple cutoffs.
   hours_between_sessions: 4 # [1, 3, 5]
+  # Minimum number of messages in a chat chunk. Any chunks smaller will be forcibly regrouped.
   min_session_length: 3
   allow_truncation: false
-  chatlog_csv: 'data/raw/YOUR_DISCORD_CHAT_FILE.csv' # created from calling scripts/build.py with your DiscordChatExporter JSON export
+  chatlog_csv: 'data/discord/YOUR_DISCORD_CHAT_FILE.csv' # created from calling scripts/build.py with your DiscordChatExporter JSON export
 
-tag_sep: "\n" # MUST BE "\n" when chat_ml
-postfix: "</X/>" # NOT USED when using chat_ml format.
-author_tag: "{author} ({fname})" # "[USER:{author}, NAME:{fname}]" #"[{author}, {fname}]:"
+# Separator between author_tag and start of text
+tag_sep: "\n" # MUST be "\n" when chat_ml
+# Separator between end of text and the next author_tag
+postfix: "</X/>" # NOT USED when using chat_ml format. For others, "</s>\n" works well.
+# For chat_ml format, "{author} ({fname})" works well. 
+# For non-chat_ml format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]" or "[{author}, {fname}]:"
+# fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)
+author_tag: "{author}" # "{author} ({fname})" -- highly recommend using fname if you know everyone's first name
+# Same as default except remove 'assistant' from add_generation_prompt
 custom_chat_template: "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
 
 prompt:
@@ -52,6 +61,7 @@ prompt:
   template: |-
     Uncensored Discord server chat.
     Topic: offbeat.
+    Participants: {name_mapping}
   # template: |-
   #  Simulate a conversation between members in a discord server. Their name=usernames are {name_mapping}.
   #  Your Task: {task}
