@@ -113,7 +113,7 @@ def dataset_timechunk(chat_csv, tokenizer, cfg, text_only=False):
     hours_between_sessions=cfg.dataset.hours_between_sessions
     min_session_length=cfg.dataset.min_session_length
     
-    df_all = etl.create_df_all(chat_csv, tag_sep, postfix, author_tag, hours_between_sessions, min_session_length)
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv),  tag_sep, postfix, author_tag, hours_between_sessions, min_session_length, eval_frac=0.005)
         
     df_train = df_all[df_all.split=='train'].groupby('chat_session',as_index=False)['formatted_text'].agg(''.join)
     df_eval = df_all[df_all.split=='eval'].groupby('chat_session',as_index=False)['formatted_text'].agg(''.join)
@@ -134,9 +134,6 @@ def dataset_timechunk(chat_csv, tokenizer, cfg, text_only=False):
     return ds_timechunk
 
 
-
-
-# TODO: finish
 
 def split_over(fchatformat:list[str], max_len:int, tokenizer, formatted_system: str, special_tokens_counted=True):
     r'''Takes a list of messages with ALL formatting <|im_start|>, [INST], </s>\n ... etc. 
@@ -181,7 +178,9 @@ def author_role_dataset(chat_csv, tokenizer, cfg, custom_chat_template=None):
     
 
     # https://old.reddit.com/r/LocalLLaMA/comments/1aiz6zu/roleplaying_system_prompts/
-    df_all = etl.create_df_all(chat_csv, cfg.tag_sep, postfix='not_used', author_tag=role_tag, hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length)
+    
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), cfg.tag_sep, postfix='not_used', author_tag=role_tag, 
+                                    hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=0.005)
     
     # use max_len-2 in split threshold to account for <s> </s> tokens in final tokenization
     ds_chatml = group_chatml_format(df_all, tokenizer, max_len=max_len, role_tag=role_tag, fprompt=fprompt, custom_chat_template=custom_chat_template)
@@ -256,8 +255,10 @@ def dataset_ungrouped(chat_csv, tokenizer, cfg, text_only=False):
     postfix=cfg.postfix
     author_tag=cfg.author_tag
     min_session_length=cfg.dataset.min_session_length
-    df_proc = etl.preprocess_df(chat_csv)
-    df_all = etl.create_dftext(df_proc, tag_sep=tag_sep, postfix=postfix, author_tag=author_tag, min_session_length=min_session_length).drop(columns=['chat_session']) 
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), tag_sep, postfix=postfix, author_tag=author_tag, 
+                                    hours_between_sessions=4, min_session_length=min_session_length, eval_frac=0.005).drop(columns=['chat_session']) 
+    #df_proc = etl.preprocess_df(chat_csv)
+    #df_all = etl.create_dftext(df_proc, tag_sep=tag_sep, postfix=postfix, author_tag=author_tag, min_session_length=min_session_length).drop(columns=['chat_session']) 
     #df_all = create_dftext(chat_csv, tag_sep=tag_sep, postfix=postfix, author_tag=author_tag, hours_between_sessions=4 ).drop(columns=['chat_session']) 
     
     ds_ungrouped = datasets.DatasetDict({
@@ -270,10 +271,11 @@ def dataset_ungrouped(chat_csv, tokenizer, cfg, text_only=False):
     return ds_ungrouped
 
 def dataset_df_all(chat_csv, tokenizer, maxlen=1024, tag_sep=' ', postfix='\n\n'):
-    df_all = etl.create_dftext(chat_csv, tag_sep=tag_sep, postfix=postfix)
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), tag_sep=tag_sep, postfix=postfix, author_tag='[USER:{author}]', hours_between_sessions=4, min_session_length=1, eval_frac=0.005)
+    # df_all = etl.create_dftext(chat_csv, tag_sep=tag_sep, postfix=postfix)
     
-    df_train = df_all[df_all.split=='train'].drop(columns=['pre_ai','split', 'user_sequence']).reset_index(drop=True).copy()
-    df_eval = df_all[df_all.split=='eval'].drop(columns=['pre_ai','split', 'user_sequence']).reset_index(drop=True).copy()
+    df_train = df_all[df_all.split=='train'].drop(columns=['pre_bot','split', 'user_sequence']).reset_index(drop=True).copy()
+    df_eval = df_all[df_all.split=='eval'].drop(columns=['pre_bot','split', 'user_sequence']).reset_index(drop=True).copy()
     
     ds_raw_msgs = datasets.DatasetDict({
         'train': datasets.Dataset.from_pandas(df_train, split='train', preserve_index=False),
@@ -292,8 +294,7 @@ def dataset_all_chunks(chat_csv, tokenizer, cfg):
     min_session_length=cfg.dataset.min_session_length
     
     
-    df_proc = etl.preprocess_df(chat_csv)
-    df_all = etl.create_dftext(df_proc, tag_sep=tag_sep, postfix=postfix, author_tag=author_tag,  min_session_length=min_session_length).drop(columns=['chat_session']) 
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv),  tag_sep=tag_sep, postfix=postfix, author_tag=author_tag,  min_session_length=min_session_length, eval_frac=0.005).drop(columns=['chat_session']) 
     #df_all = create_dftext(chat_csv, tag_sep=tag_sep, postfix=postfix)
     
     df_train = df_all[df_all.split=='train'].drop(columns=['split', 'text']).reset_index(drop=True).copy()
@@ -316,29 +317,3 @@ def dataset_all_chunks(chat_csv, tokenizer, cfg):
     # ds_raw_msgs = ds_raw_msgs.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, max_length=maxlen, truncation=True), batched=True)
     
     return ds_chunks
-
-
-
-def dataset_padraw(tokenizer, max_length=128, data_files="data/gschat_text.txt"):
-    ds_padraw = datasets.load_dataset("text", data_files=data_files)
-
-    def tokenize(element, ctx_len=max_length):
-        outputs = tokenizer(
-            element["text"],
-            truncation=True,
-            padding='max_length',
-            max_length=max_length,
-            return_overflowing_tokens=True,
-            return_length=True,
-        )
-        input_batch = []
-        for length, input_ids in zip(outputs["length"], outputs["input_ids"]):
-            if length == ctx_len:
-                input_batch.append(input_ids)
-        return {"input_ids": input_batch}
-
-
-    # ds_raw = ds_raw.map(lambda s: tokenizer(s['text']), batched=True)
-    ds_padraw = ds_padraw.map(tokenize, batched=True, remove_columns=ds_padraw["train"].column_names)
-
-    return ds_padraw
