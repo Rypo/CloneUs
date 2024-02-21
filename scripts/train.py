@@ -1,25 +1,11 @@
 import gc
 import os
-import json
-import random
-import datetime
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
+
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
-
 import torch
-import datasets
-import tokenizers
-
 from transformers import GPTQConfig,BitsAndBytesConfig
-
 from peft import LoraConfig
-
-
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
 import cloneus.training.trainer as mtrain
@@ -51,7 +37,7 @@ def verify_config(cfg):
         # Check that all users have assigned firstName if using "fname" in tag
         for dispname, fname in roles.author_to_fname.items():
             if fname is None:
-                raise KeyError(f'users.json missing firstName for {dispname!r}. Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
+                raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
 
 def main():
     # Decent example for HfArgumentParser

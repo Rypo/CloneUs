@@ -50,8 +50,8 @@ def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
     #df_gsc['Attachments'] = df_gsc.Attachments.apply(cleanup_url).str.replace(RE_ATTACHMENTS, r'attachments/\g<1>',regex=True)
     #df_gsc['Content'] = df_gsc.Content.str.replace(RE_ATTACHMENTS, 'attachments/\g<1>', regex=True)
     #df_gsc['Content'] = df_gsc['Content'].fillna(df_gsc['Attachments'])
-
-    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True)# format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
+    # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
+    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='ISO8601')
 
     # strip out all discord image urls
     df_chat['Content'] = df_chat['Content'].str.replace('(https://cdn.discordapp.com\S+)','', regex=True).replace('',None) 
