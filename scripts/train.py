@@ -136,7 +136,7 @@ def main():
 
         
     if cfg.dataset.name == 'chunkh': # append hours_between_session
-        hbs = cfg.dataset.hours_between_session
+        hbs = cfg.dataset.hours_between_sessions
         cfg.dataset.name += str(hbs) if isinstance(hbs, int) else ''.join(map(str,hbs))
         
     cfg.ctx_len = cfg.chunk_size
@@ -199,7 +199,7 @@ def main():
             
 
     if tokenizer.padding_side != 'left':
-        print('WARNING. PADDING_SIDE = RIGHT. You know what you doing?')
+        print('WARNING. padding_side = right. You know what you doing?')
 
     if cfg.custom_chat_template:
         print('Using custom chat template')
@@ -222,8 +222,12 @@ def main():
         tokenization.save_embeddings(model, args.output_dir)
 
     safe_train(trainer, cfg.resume_from_checkpoint)
-    cfg.update(train_loss=trainer.state.log_history[-2].get('train_loss'), eval_loss=trainer.state.log_history[-1].get('eval_loss'))
-
+    
+    try:
+        cfg.update(train_loss=trainer.state.log_history[-2].get('train_loss'), eval_loss=trainer.state.log_history[-1].get('eval_loss'))
+    except IndexError as e:
+        print(e)
+    
     OmegaConf.save(cfg, os.path.join(args.output_dir, 'config.yaml'))
 
 
