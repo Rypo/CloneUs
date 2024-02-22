@@ -3,10 +3,10 @@ import re
 import json
 import random
 import typing
-import logging
-import datetime
-from logging.config import dictConfig
 from pathlib import Path
+import logging
+from logging.config import dictConfig
+
 import discord
 
 from omegaconf import OmegaConf
@@ -39,6 +39,20 @@ BOT_TOKEN = os.getenv(PFX+'BOT_TOKEN')
 GUILDS_ID_INT = int(os.getenv(PFX+'GUILDS_ID'))
 GUILDS_ID = discord.Object(id=GUILDS_ID_INT)
 CHANNEL_ID = int(os.getenv(PFX+'CHANNEL_ID'))
+
+def _init_dirs():
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+TRAINED_MODELS = [
+    RUNS_DIR/'path/to/your/model_checkpoint-999',
+    #e.g.: RUNS_DIR/'mistral-inst-OpenHermes2.5/chunkh4/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_gvkuqdo/checkpoint-500',
+]
+
+ACTIVE_MODEL = TRAINED_MODELS[-1] # RUNS_DIR/'mistral-inst-OpenHermes2.5/chunk135h/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_uvkodgq/checkpoint-2500'
+
+
+
 
 
 BOT_PRESENCE = {
@@ -130,9 +144,10 @@ LOGGING_CONFIG = {
 }
 
 def move_logs_lts(*logfilesnames):
+    '''Move last run's logs to a daily and merge all file'''
     for logfile in logfilesnames:
         mlogs: Path = LOGS_DIR/logfile
-        mlogs.suffix
+        
         if mlogs.exists():
             plogs = mlogs.read_text()
 

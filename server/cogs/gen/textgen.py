@@ -19,7 +19,7 @@ import torch
 
 from cloneus.data import roles
 
-from config import settings
+import config.settings as settings
 from utils import text as text_utils, io as io_utils
 from utils.command import check_up
 
@@ -54,11 +54,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         self.ctx_menu = app_commands.ContextMenu(name='🔂 Redo (Text)', callback=self._cm_redo,)
         self.bot.tree.add_command(self.ctx_menu, override=True)
 
-
-        # very close between these two.
-        #self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_udovkqg/checkpoint-3500'
-        # self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_ovugdkq/checkpoint-4500'
-        self.init_model = settings.RUNS_DIR/'mistral-inst-OpenHermes2.5/chunk135h/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_uvkodgq/checkpoint-2500'
+        self.init_model = settings.ACTIVE_MODEL
     @property
     def youtube_quota(self):
         active_usage = self.clomgr.yt_session_quota

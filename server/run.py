@@ -126,5 +126,6 @@ def main():
     bot.run(settings.BOT_TOKEN)
 
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
+    settings._init_dirs()
     main()
