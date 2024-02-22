@@ -14,7 +14,9 @@ wandb
 server/logs
 server/appcmds
 server/res
-
+server/cogs/_*
+# state store
+server/config/persistent_storage.yaml
 
 # Ignore data files but keep structure
 /data/*
