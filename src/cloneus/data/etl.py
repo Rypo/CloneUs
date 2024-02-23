@@ -1,6 +1,7 @@
 import json
 import urllib
 import typing
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -94,7 +95,6 @@ def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
     # - https://www.reddit.com/r/discordapp/comments/9u2tdz/whats_the_new_cutoff_time_for_separating_messages/
     df_chat['user_sequence'] = (((df_chat['user'] != df_chat['user'].shift(1)) | (df_chat['time_gap']>(7*60))).cumsum())
     #df_chat['chat_session'] = (df_chat['time_gap'] >= (hours_between_sessions*60*60)).cumsum() # 4hr time gap between sessions
-    
 
     return df_chat
 
@@ -104,6 +104,7 @@ def expand_sessions(chat_session: pd.Series, min_session_length=1):
     # Could be avoided if -= 1, but +=1 aligns better with the assumption we take that 4hr break = new topic session
     # but if we have __4hr_break__ [TEXT] __4hr_break__ then seems more likely that text should be mapped forward instead of backward
     n_small_session = min_session_length-1 # skip loop and return unless > 1
+    sess_sizes = []
     while n_small_session > 0:
         under_len = chat_session.value_counts() < min_session_length
         small_sessions = under_len[under_len].index
@@ -111,28 +112,37 @@ def expand_sessions(chat_session: pd.Series, min_session_length=1):
         chat_session = chat_session.where(~chat_session.isin(small_sessions), other = chat_session + 1)
         
         n_small_session = small_sessions.shape[0]
-        print(n_small_session)
+        sess_sizes.append(n_small_session)
+    if sess_sizes:    
+        print('sessions < min_session_length:',' -> '.join(map(str,sess_sizes)))
+    return chat_session
+
+
+def expand_and_split(df_chats:pd.DataFrame, hours_between_sessions:int=4, min_session_length:int=1):
+    te_sessions = (df_chats['time_gap'] >= (hours_between_sessions*60*60)).cumsum()
+    #train_chat_session = expand_sessions((df_chats.loc[df_chats.split=='train', 'time_gap'] >= (hours_between_sessions*60*60)).cumsum(), min_session_length=min_session_length)
+    #eval_chat_session += (train_chat_session.max()+1) 
+    train_chat_session = expand_sessions(te_sessions[df_chats.split=='train'], min_session_length=min_session_length)
+    eval_chat_session = expand_sessions(te_sessions[df_chats.split=='eval'], min_session_length=min_session_length) + 1 # need +1 to force break 1st group
+    
+    assert train_chat_session.max() < eval_chat_session.min(), 'Possible data leak. Train chat_session overlaps eval chat_session'
+    chat_session = pd.concat([train_chat_session, eval_chat_session])
     
     return chat_session
 
-def expand_and_split(df_chats:pd.DataFrame, hours_between_sessions:int=4, min_session_length:int=1, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
-    df_chats = df_chats.copy() # copy is needed so that sessions are not overwritten
-    
-    df_chats['chat_session'] = (df_chats['time_gap'] >= (hours_between_sessions*60*60)).cumsum() # first time is a redo
-    df_chats['chat_session'] = expand_sessions(df_chats['chat_session'], min_session_length=min_session_length)
-    
+
+def assign_split(df_chat,  eval_frac: (float|typing.Literal['after_bot']) = 0.005):
     if eval_frac=='after_bot':
-        df_chats['split'] = df_chats['pre_bot'].apply(lambda x: 'train' if x else 'eval')
+        df_chat['split'] = df_chat['pre_bot'].apply(lambda x: 'train' if x else 'eval')
     else:
         # Use the last eval_frac chat groups for eval
-        neval = int(df_chats['chat_session'].nunique()*eval_frac)
-        eval_sessions = df_chats['chat_session'].unique()[-neval:]
+        n_eval = int(df_chat.shape[0]*eval_frac)
+        eval_start_date = df_chat.iloc[-n_eval].Date
         
-        df_chats['split'] = df_chats['chat_session'].isin(eval_sessions).apply(lambda x: 'eval' if x else 'train')
+        df_chat['split'] = (df_chat.Date < eval_start_date).apply(lambda x: 'train' if x else 'eval')
+        print(f'Using messages after {eval_start_date} for eval set. n_messages = {n_eval}')
     
-    df_chats['chat_session']+=int(hours_between_sessions*1e9) # collisions possible if > 1bill groups, but I mean...
-    
-    return df_chats
+    return df_chat
 
 def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_tag:str, hours_between_sessions:(int|list[int]) = 4, min_session_length:int=1, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
     """Prepares data for use in hf dataset. Creates a formatted text col, merges user messages, and assigns train, eval split.
@@ -166,20 +176,22 @@ def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_t
     # BUG until 2023-11-29 was df_proc.text instead of df_all
     df_chats['formatted_text'] = df_chats['tag_prefix'] + df_chats['text'] + postfix 
     
+    df_chats = assign_split(df_chats, eval_frac)
     if isinstance(hours_between_sessions, (int,float)):
-        hours_between_sessions = [hours_between_sessions]
-
-    # FIXME: (HIGH PRIORITY) - Data leak
-    # There is a high chance of train/eval cross contamination when regrouping
-    # The greater the difference between min-max hours_between_sessions, higher the chance of leak
-    # also the higher the min_session_length
-    dfs = []
-    for hours in hours_between_sessions:
-        dfs.append(expand_and_split(df_chats, hours, min_session_length, eval_frac))
+        df_chats['chat_session'] = expand_and_split(df_chats, hours_between_sessions, min_session_length)
+        return df_chats
     
-    df_all = pd.concat(dfs)    
+    chatgrps = {h: expand_and_split(df_chats, h, min_session_length) for h in hours_between_sessions}
+    
+    for h1,h2 in itertools.combinations(hours_between_sessions, 2):
+        print(f'({h1}h, {h2}h) - duplicate grouped items:',(chatgrps[h1]==chatgrps[h2]).sum())
+        # Not the number of identical groups, number of items assigned same group at that index
+        # TODO: Duplicate groups would be more useful to know
+        # TODO: Need to know if dupe groups in eval at least. With so few items, could give a wildly misleading eval loss.
+    
+    # collisions possible if > 1 bill groups, but I mean...
+    return pd.concat([df_chats.assign(chat_session=chatgrps[h] + int(h*1e9)) for h in hours_between_sessions]) 
 
-    return df_all
 
 
 
