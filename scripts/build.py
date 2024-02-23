@@ -67,14 +67,14 @@ def create_usersfile(df_msgs: pd.DataFrame, msg_threshold:int = 100, exclude_bot
         json.dump(users, f, indent=2)
         print('Created users file at:', str(USERS_FILEPATH))
         print('='*100)
-        print("(required) DON'T FORGET: You NEED to manually update the config/users.json file with your bot's info.")
-        print("(recommended) Update user.jsons with each user's first name and a unique initial")
+        print("(required) Update config/users.json file with your bot's info.")
+        print("(recommended) Update config/users.json with each user's first name and a unique initial")
         print('-'*100)
     
 def to_chatcsv(df_msgs: pd.DataFrame, out_csvfile: str|Path):
     df_chatcsv = df_msgs[['author.id','author.name','timestamp','content','attachments','reactions']].copy()
     df_chatcsv.rename(columns=dict(zip(df_chatcsv.columns, ['AuthorId','Author','Date','Content','Attachments','Reactions'])), inplace=True)
-    df_chatcsv.loc[:,['Attachments','Reactions']] = df_chatcsv[['Attachments','Reactions']].applymap(lambda v: np.nan if isinstance(v,list) and not v else v)
+    df_chatcsv.loc[:,['Attachments','Reactions']] = df_chatcsv[['Attachments','Reactions']].map(lambda v: np.nan if isinstance(v,list) and not v else v)
     df_chatcsv.to_csv(out_csvfile, index=False)
     print('Created Message csv file:', out_csvfile)        
 
