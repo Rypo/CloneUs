@@ -98,7 +98,7 @@ def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
 
     return df_chat
 
-def expand_sessions(chat_session: pd.Series, min_session_length=1):
+def expand_sessions(chat_session: pd.Series, min_session_length:int=1):
     '''Forward Merge session groups that have less than `min_session_msgs` items'''
     # NOTE: this could inf loop, if last entry is it's own single session
     # Could be avoided if -= 1, but +=1 aligns better with the assumption we take that 4hr break = new topic session
@@ -118,7 +118,7 @@ def expand_sessions(chat_session: pd.Series, min_session_length=1):
     return chat_session
 
 
-def expand_and_split(df_chats:pd.DataFrame, hours_between_sessions:int=4, min_session_length:int=1):
+def delineate_sessions(df_chats:pd.DataFrame, hours_between_sessions:int=4, min_session_length:int=1) -> pd.Series:
     te_sessions = (df_chats['time_gap'] >= (hours_between_sessions*60*60)).cumsum()
     #train_chat_session = expand_sessions((df_chats.loc[df_chats.split=='train', 'time_gap'] >= (hours_between_sessions*60*60)).cumsum(), min_session_length=min_session_length)
     #eval_chat_session += (train_chat_session.max()+1) 
@@ -131,7 +131,7 @@ def expand_and_split(df_chats:pd.DataFrame, hours_between_sessions:int=4, min_se
     return chat_session
 
 
-def assign_split(df_chat,  eval_frac: (float|typing.Literal['after_bot']) = 0.005):
+def assign_split(df_chat:pd.DataFrame, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
     if eval_frac=='after_bot':
         df_chat['split'] = df_chat['pre_bot'].apply(lambda x: 'train' if x else 'eval')
     else:
@@ -163,7 +163,6 @@ def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_t
 
     Returns:
         pd.DataFrame: A DataFrame with the formatted text and session splits for training and evaluation.
-
     """
     df_chats = df_proc.groupby('user_sequence', as_index=False)[
         ['user', 'Date', 'time_gap', 'text','pre_bot']].agg(
@@ -178,16 +177,15 @@ def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_t
     
     df_chats = assign_split(df_chats, eval_frac)
     if isinstance(hours_between_sessions, (int,float)):
-        df_chats['chat_session'] = expand_and_split(df_chats, hours_between_sessions, min_session_length)
+        df_chats['chat_session'] = delineate_sessions(df_chats, hours_between_sessions, min_session_length)
         return df_chats
     
-    chatgrps = {h: expand_and_split(df_chats, h, min_session_length) for h in hours_between_sessions}
+    chatgrps = {h: delineate_sessions(df_chats, h, min_session_length) for h in hours_between_sessions}
     
     for h1,h2 in itertools.combinations(hours_between_sessions, 2):
         print(f'({h1}h, {h2}h) - duplicate grouped items:',(chatgrps[h1]==chatgrps[h2]).sum())
         # Not the number of identical groups, number of items assigned same group at that index
         # TODO: Duplicate groups would be more useful to know
-        # TODO: Need to know if dupe groups in eval at least. With so few items, could give a wildly misleading eval loss.
     
     # collisions possible if > 1 bill groups, but I mean...
     return pd.concat([df_chats.assign(chat_session=chatgrps[h] + int(h*1e9)) for h in hours_between_sessions]) 

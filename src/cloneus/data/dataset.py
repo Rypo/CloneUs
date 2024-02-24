@@ -1,16 +1,13 @@
-import os
-import json
-
-import random
-import datetime
+import typing
 import itertools
-from typing import Dict
+
 
 import more_itertools
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 import datasets
+from transformers import PreTrainedTokenizerFast
 
 from ..plugins import youtube as youtube
 #from ..core import paths as rpaths
@@ -113,14 +110,12 @@ def dataset_timechunk(chat_csv, tokenizer, cfg, text_only=False):
     hours_between_sessions=cfg.dataset.hours_between_sessions
     min_session_length=cfg.dataset.min_session_length
     
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv),  tag_sep, postfix, author_tag, hours_between_sessions, min_session_length, eval_frac=0.005)
-        
-    df_train = df_all[df_all.split=='train'].groupby('chat_session',as_index=False)['formatted_text'].agg(''.join)
-    df_eval = df_all[df_all.split=='eval'].groupby('chat_session',as_index=False)['formatted_text'].agg(''.join)
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), tag_sep, postfix, author_tag, hours_between_sessions, min_session_length, eval_frac=0.005)
+    df_concat = df_all.groupby(['split','chat_session'])['formatted_text'].agg(''.join).drop_duplicates()
     
     # TODO: maybe split on longest chat pause instead of arbitrary length.
-    df_train = resplit_overflow(df_train, tokenizer, maxlen=maxlen, postfix=postfix)
-    df_eval = resplit_overflow(df_eval, tokenizer, maxlen=maxlen, postfix=postfix)
+    df_train = resplit_overflow(df_concat['train'].reset_index(), tokenizer, maxlen=maxlen, postfix=postfix)
+    df_eval = resplit_overflow(df_concat['eval'].reset_index(), tokenizer, maxlen=maxlen, postfix=postfix)
 
     ds_timechunk = datasets.DatasetDict({
         'train': datasets.Dataset.from_pandas(df_train.drop(columns=['chat_session','toklen']).rename(columns={'formatted_text':'text'}), split='train', preserve_index=False),
@@ -146,7 +141,7 @@ def split_over(fchatformat:list[str], max_len:int, tokenizer, formatted_system: 
      for cb in more_itertools.constrained_batches(fchatformat, max_len, get_len=lambda t: tokenizer(t, return_length=True, add_special_tokens=special_tokens_counted)['length'][0])]
 
 
-def group_chatml_format(df_all:pd.DataFrame, tokenizer, max_len:int, role_tag:str, fprompt:str, custom_chat_template:str=None) -> pd.Series:
+def group_chatml_format(df_all:pd.DataFrame, tokenizer:PreTrainedTokenizerFast, max_len:int, role_tag:str, fprompt:str, custom_chat_template:str=None) -> pd.Series:
     # NOTE: This can only work with chat_ml format
     if custom_chat_template is None:
         # Same as chat_ml but removed "assistant\n" from add_generation_prompt
@@ -159,8 +154,8 @@ def group_chatml_format(df_all:pd.DataFrame, tokenizer, max_len:int, role_tag:st
     df_rolechat = df_all[['role','text','split','chat_session']].rename(columns={'text':'content'}).copy()
 
     df_rolechat['chatfmt'] = df_rolechat[['role','content']].apply(lambda x: tokenizer.apply_chat_template([dict(x)], custom_chat_template, tokenize=False), axis=1)
-    # insert formatted system message as first item in formatted message list groups  
-    ds_session_syschats = df_rolechat.groupby(['split','chat_session'])['chatfmt'].agg(lambda x: [formatted_system,*list(x)])
+    # insert formatted system message as first item in formatted message list groups. Drop duplicates created if list of hours_between_sessions 
+    ds_session_syschats = df_rolechat.groupby(['split','chat_session'])['chatfmt'].agg(lambda x: [formatted_system,*list(x)]).drop_duplicates()
     # Explode out overlength lists, drop chat_session index as it's no longer needed
     ds_syschats = ds_session_syschats.apply(split_over, max_len=max_len, tokenizer=tokenizer, formatted_system=formatted_system).explode().droplevel(1)
 
