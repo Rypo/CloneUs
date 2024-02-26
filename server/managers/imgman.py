@@ -120,6 +120,8 @@ class FastImageGenManager:
         self.is_ready = False
         self.dc_enabled = False
         self.model_name = 'sdxl_turbo'
+        self.guidance_scale = 0.0
+        self.img_size = (512,512)
     
     @async_wrap_thread
     def load_pipeline(self):
@@ -159,7 +161,7 @@ class FastImageGenManager:
     @torch.inference_mode()
     def pipeline(self, prompt, num_inference_steps, strength=0.3, image=None, **kwargs):
         if image is None:
-            out_image = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=0.0, **kwargs).images[0]
+            out_image = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=self.guidance_scale, **kwargs).images[0]
         else:
             if strength>0:
                 if num_inference_steps*strength < 1:
@@ -167,7 +169,7 @@ class FastImageGenManager:
                     print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
                     num_inference_steps = steps
                     
-                out_image = self.basei2i(prompt=prompt, image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=0.0, **kwargs).images[0]
+                out_image = self.basei2i(prompt=prompt, image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=self.guidance_scale, **kwargs).images[0]
             else:
                 out_image=image
         return out_image
@@ -181,9 +183,33 @@ class FastImageGenManager:
     def regenerate_image(self, image:Image.Image, prompt:str, steps=4, strength=0.3, neg_prompt=None, guidance=None, stage_mix=None, refine_strength=None, **kwargs) -> Image.Image:
         print('regenerate_image size:',image.size)
         strength = cmd_tfms.percent_transform(strength)
-        out_image = self.pipeline(prompt=prompt, num_inference_steps=steps, image=image.resize((512,512)), strength=strength, **kwargs)
+        out_image = self.pipeline(prompt=prompt, num_inference_steps=steps, image=image.resize(self.img_size), strength=strength, **kwargs)
         return out_image
+
+class MedImageGenManager(FastImageGenManager):
+    def __init__(self):
+        self.is_compiled = False
+        self.is_ready = False
+        self.dc_enabled = False
+        self.model_name = 'dreamshaper_turbo'
+        self.guidance_scale = 2.0
+        self.img_size = (1024,1024)
     
+    @async_wrap_thread
+    def load_pipeline(self):
+        self.base: StableDiffusionXLPipeline = AutoPipelineForText2Image.from_pretrained(
+            'lykon/dreamshaper-xl-v2-turbo', # 4-8 steps, cfg=2.0, # https://civitai.com/models/112902?modelVersionId=333449
+            torch_dtype=torch.bfloat16,
+            variant="fp16", 
+            use_safetensors=True, 
+            add_watermarker=False, 
+            #device_map="auto",
+        )
+        self.base.scheduler = DPMSolverMultistepScheduler.from_config(self.base.scheduler.config)
+        self.base.to("cuda")
+        self.basei2i = AutoPipelineForImage2Image.from_pipe(self.base, torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False,).to("cuda")
+        self.is_ready = True
+
 class ImageGenManager:
     def __init__(self):
         self.is_ready = False

@@ -97,7 +97,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     
     def __init__(self, bot: BotUs):
         self.bot = bot
-        self.igen = imgman.ImageGenManager()
+        #self.igen = imgman.ImageGenManager()
+        self.igen = imgman.MedImageGenManager()
         self.ctx_menu = app_commands.ContextMenu(name='🎨 Redraw (Image)', callback=self._cm_redraw,)
         self.bot.tree.add_command(self.ctx_menu)
         
@@ -210,7 +211,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         
         await self.bot.change_presence(**settings.BOT_PRESENCE['draw'])
 
-        model_alias = 'Turbo SDXL (fast)' if self.igen.model_name == 'sdxl_turbo' else 'SDXL (big)'
+        model_aliasmap = {'sdxl_turbo': 'Turbo SDXL (fast)' , 'sdxl':'SDXL (big)', 'dreamshaper_turbo': 'DreamShaper XL2 Turbo (Med)'}
+        model_alias = model_aliasmap[self.igen.model_name]
         complete_msg = f'{model_alias} all fired up'
         return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
         
@@ -223,12 +225,15 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         await ctx.send('Drawing disabled.')
             
     @commands.hybrid_command(name='artist')
-    @app_commands.choices(model=[app_commands.Choice(name='SDXL (big)', value='sdxl'), app_commands.Choice(name='Turbo SDXL (fast)', value='sdxl_turbo')])
+    @app_commands.choices(model=[app_commands.Choice(name='SDXL (big)', value='sdxl'), 
+                                 app_commands.Choice(name='Turbo SDXL (fast)', value='sdxl_turbo'), 
+                                 app_commands.Choice(name='DreamShaper XL2 Turbo (Med)', value='dreamshaper_turbo')])
     async def artist(self, ctx: commands.Context, model: app_commands.Choice[str]):
         '''Unloads the image generation model'''
         if self.igen.model_name != model.value:
             await self.igen.unload_pipeline()
-            self.igen = imgman.FastImageGenManager() if model.value == 'sdxl_turbo' else imgman.ImageGenManager()
+            model_map = {'sdxl_turbo': imgman.FastImageGenManager(), 'sdxl':imgman.ImageGenManager(), 'dreamshaper_turbo': imgman.MedImageGenManager()}
+            self.igen = model_map[model.value]
             return await self.imgup(ctx)
         elif not self.igen.is_ready:
             return await self.imgup(ctx)
@@ -295,7 +300,9 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         """
         
         if steps is None:
-            steps = 2 if self.igen.model_name == 'sdxl_turbo' else 40
+            step_defaults = {'sdxl_turbo': 2, 'sdxl':40, 'dreamshaper_turbo':8}
+            steps = step_defaults[self.igen.model_name]
+            #steps = 2 if self.igen.model_name == 'sdxl_turbo' else 40
 
         await ctx.defer()
         await asyncio.sleep(1)
@@ -337,7 +344,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         image = load_image(image_url).convert('RGB')
         
         if steps is None:
-            steps = 4 if self.igen.model_name == 'sdxl_turbo' else 50
+            step_defaults = {'sdxl_turbo': 4, 'sdxl':50, 'dreamshaper_turbo':8}
+            steps = step_defaults[self.igen.model_name]
         
         await ctx.defer()
         await asyncio.sleep(1)
