@@ -22,6 +22,7 @@ class MessageManager:
         #self.check_vram_every = 5
         #self.last_perc_vram_used = 0.0
         #self.message_add_count = 0
+        self.last_caches = {}
         self.default_channel: discord.TextChannel = None
         
 
@@ -78,6 +79,7 @@ class MessageManager:
         self.get_mcache(message).remove(message)
     
     def clear_mcache(self, message_cache: typing.Literal['default','base','all']|discord.TextChannel):
+        self.last_caches = {'default': self.get_mcache(self.default_channel.id).copy(), 'base': self.base_message_cache.copy()}
         if isinstance(message_cache, discord.TextChannel):
             return self.message_caches[message_cache.id].clear()
             
@@ -89,7 +91,11 @@ class MessageManager:
         elif message_cache == 'default':
             self.get_mcache(self.default_channel.id).clear()
         
-        
+    def restore_caches(self):
+        if self.last_caches:
+            self.set_mcache(self.default_channel.id, self.last_caches['default'])
+            self.base_message_cache = self.last_caches['base']
+            self.last_caches = {}
 
     def trim_context(self, message_cache, limit=None):
         #self.message_add_count+=1

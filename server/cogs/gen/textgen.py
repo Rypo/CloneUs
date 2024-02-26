@@ -55,6 +55,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         self.bot.tree.add_command(self.ctx_menu, override=True)
 
         self.init_model = settings.ACTIVE_MODEL
+
     @property
     def youtube_quota(self):
         active_usage = self.clomgr.yt_session_quota
@@ -130,7 +131,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         if not user.bot:
             if reaction.message.author == self.bot.user:
                 if str(reaction.emoji) == '👎':
-                    await self._react_repeat_one(reaction)
+                    await self._react_thumb_down(reaction)
                 elif str(reaction.emoji) == '🔂':
                     await self._react_repeat_one(reaction)
                     
@@ -300,6 +301,17 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         
         await ctx.send(msg)
     
+    @commands.command(name='unclear')
+    async def unclear(self, ctx: commands.Context):
+        '''Restore all messages removed from the last !clear'''
+        
+        if not self.msgmgr.last_caches:
+            return await ctx.send('Nothing to restore. Chats never cleared.')
+
+        self.msgmgr.restore_caches()
+        
+        await ctx.send('All chats restored.')
+
     @commands.command(name='badbot', aliases=['bb'])
     async def badbot(self, ctx: commands.Context):
         '''Deletes the bot's most recent message and removes from context.'''
