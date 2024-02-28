@@ -183,27 +183,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             version: The model that said that line
         """
 
-        genmap = {
-            'gen1':settings.RUNS_DIR/'llama2-7b-i4/chunk_nl/cnk1024-constant-wu0.03-lora_a32_r128_d0.1_koqv/checkpoint-1257/',
-            'gen4':settings.RUNS_DIR/'mistral-7b-i4/chunk_nl/cnk8192-constant-wu0.03-lora_a32_r128_d0.1_koqv/checkpoint-342/',
-            'gen5':settings.RUNS_DIR/'mistral-7b-i4/chunk_nl/cnk2048-constant_with_warmup-wu0.05-lora_a16_r64_d0.1_koqv/checkpoint-1160/',
-            'gen6':settings.RUNS_DIR/'mistral-7b-i4/chunk_nl/cnk4096-warmup_const_cosine-wu0.05-lora_a16_r256_d0.1_qv/checkpoint-575/',
-            'gen7':settings.RUNS_DIR/'mistral-7b-i4/chunk4h_eos/cnk4096-warmup_const_cosine-wu0.05-lora_a16_r16_d0.5_kvqdLhgEtuo/checkpoint-2541',
-            'gen8':settings.RUNS_DIR/'mistral-7b-i4/chunk4h_eos/cnk4096-cosine-lora_a16_r32_d0.5_udqkogvLhEt/checkpoint-1269',
-            'gen9':settings.RUNS_DIR/'mistral-7b-i4/chunk4h_eos/cnk8192-cosine-wu0.0-lora_a64_r32_d0.5_dgqvoku/checkpoint-726/',
-            'gen10':settings.RUNS_DIR/'mistral-7b-i4/ungrouped_eos/cnk8192-cosine-wu10-lora_a64_r32_d0.5_oguvqkd/checkpoint-156/',
-            'gen11':settings.RUNS_DIR/'mistral-inst-v01-7b-i4/chunk4h_eos/cnk8192-cosine-wu10-lora_a64_r32_d0.5_ougvqdk/checkpoint-967/',
-            'gen12':settings.RUNS_DIR/'mistral-inst-OpenHermes2.5/chunk6h_sft/cnk8192-cosine-wu10-lora_a64_r32_d0.0_dvokqug/checkpoint-117/',
-            'gen13':settings.RUNS_DIR/'mistral-7b-i4/chunk4h/cnk4096-warmup_const_cosine-wu0.05-lora_a16_r16_d0.0_kogvduq/checkpoint-1023',
-            #14 same ??? (was empty, not sure)
-            'gen15':settings.RUNS_DIR/'mistral-7b-i4/chunk135h/cnk4096-cosine-wu0.03-lora_a16_r8_d0.0_udkogqv/checkpoint-3500',
-            # gen16 = skip week
-            'gen17':settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk124h/cnk4096-cosine-wu0.03-lora_a16_r8_d0.0_oqgvduk/checkpoint-2860',
-            'gen18':settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-constant_with_warmup-wu0.03-lora_a32_r16_d0.0_dukqogv/checkpoint-2634',
-            #19 same
-            'gen20':settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_ovugdkq/checkpoint-4500',
-            'gen21':self.init_model 
-         }
+        genmap = {m['name']: settings.RUNS_DIR/m['ckpt'] for m in settings.TRAINED_MODELS} 
         await ctx.defer()
         await self.clomgr.load(genmap[version.value], gconfig_fname='best_generation_config.json')
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')

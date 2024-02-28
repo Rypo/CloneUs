@@ -53,8 +53,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         self.pstore = pstore #io_utils.PersistentStorage()
         self.ctx_menu = app_commands.ContextMenu(name='🔂 Redo (Text)', callback=self._cm_redo,)
         self.bot.tree.add_command(self.ctx_menu, override=True)
-
-        self.init_model = settings.ACTIVE_MODEL
+        self.init_model = settings.ACTIVE_MODEL_CKPT
 
     @property
     def youtube_quota(self):

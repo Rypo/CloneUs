@@ -42,14 +42,15 @@ CHANNEL_ID = int(os.getenv(PFX+'CHANNEL_ID'))
 
 def _init_dirs():
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    RES_DIR.mkdir(parents=True, exist_ok=True)
 
+def _read_models(models_file='models.json'):
+    with open(CONFIG_DIR/models_file, 'r') as f:
+        trained_models = json.load(f)
+    return trained_models
 
-TRAINED_MODELS = [
-    RUNS_DIR/'path/to/your/model_checkpoint-999',
-    #e.g.: RUNS_DIR/'mistral-inst-OpenHermes2.5/chunkh4/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_gvkuqdo/checkpoint-500',
-]
-
-ACTIVE_MODEL = TRAINED_MODELS[-1] # RUNS_DIR/'mistral-inst-OpenHermes2.5/chunk135h/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_uvkodgq/checkpoint-2500'
+TRAINED_MODELS = _read_models(models_file='models.json')
+ACTIVE_MODEL_CKPT = RUNS_DIR/TRAINED_MODELS[-1]["ckpt"] # Use the last added model by default
 
 
 

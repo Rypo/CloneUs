@@ -1,0 +1,13 @@
+[
+    {
+        "name": "gen1",
+        "desc": "<Replace with a user-friendly memorable description of your model>",
+        "ckpt": "relativepath/to/your/model_checkpoint-999"
+    },
+    {
+        "name": "example2",
+        "desc": "Example trained model with relative path",
+        "ckpt": "mistral-inst-OpenHermes2.5/chunkh4/cnk8192-cosine-wu0.03-lora_a32_r16_d0.0_gvkuqdo/checkpoint-500"
+    }
+
+]
