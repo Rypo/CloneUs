@@ -2,6 +2,7 @@ import os
 import re
 #import json
 import random
+import warnings
 from dataclasses import dataclass, field
 import ujson as json
 import more_itertools
@@ -221,26 +222,37 @@ def parse_template_string(template_string: str):
 
     
 class YouTubeManager:
-    def __init__(self, video_data_file='video_data.jsonl', search_data_file='search_data.jsonl', invalid_ids_file='invalid_ids.txt', allow_fetch=True):
-        if not os.getenv('YOUTUBE_API_KEY'):
-            raise KeyError('Missing Environment var: "YOUTUBE_API_KEY"')
-        yt = gbuild('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
-        
-        self.ytv = yt.videos()
-        self.yts = yt.search()
-        self.video_data_filepath = YOUTUBE_DATA_DIR.joinpath(video_data_file)
-        self.search_data_filepath = YOUTUBE_DATA_DIR.joinpath(search_data_file)
-        self.invalid_ids_filepath = YOUTUBE_DATA_DIR.joinpath(invalid_ids_file)
+    def __init__(self, video_data_file='video_data.jsonl', search_data_file='search_data.jsonl', invalid_ids_file='invalid_ids.txt', allow_fetch=True, enabled=True):
+        self.enabled = enabled
         self.allow_fetch = allow_fetch
-        self.video_index = YouTubeVideoCollection()
-        self.invalid_ids = self.read_invalid_ids()
         self.quota_usage = 0
 
-        self._build_initial_index()
+        if not os.getenv('YOUTUBE_API_KEY'):
+            if self.enabled:
+                self.enabled = False
+                warnings.warn('"YOUTUBE_API_KEY" Environment variable not set. YouTube links will not be encoded.', RuntimeWarning)
+        
+        if self.enabled:
+            yt = gbuild('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
+            
+            self.ytv = yt.videos()
+            self.yts = yt.search()
+        
+            self.video_data_filepath = YOUTUBE_DATA_DIR.joinpath(video_data_file)
+            self.search_data_filepath = YOUTUBE_DATA_DIR.joinpath(search_data_file)
+            self.invalid_ids_filepath = YOUTUBE_DATA_DIR.joinpath(invalid_ids_file)    
+            
+            self.video_index = YouTubeVideoCollection()
+            self._build_initial_index()
+
+            self.invalid_ids = self.read_invalid_ids()
 
 
     def _build_initial_index(self):
         YOUTUBE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.video_data_filepath.touch()
+        self.search_data_filepath.touch()
+        self.invalid_ids_filepath.touch()
         raw_vid_index = self.read_video_data(result_type='lookup')
 
         for video_items in raw_vid_index:
@@ -301,12 +313,16 @@ class YouTubeManager:
         return vidx
     
     def encode(self, text, allow_fetch=None):
+        if not self.enabled:
+            return text
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
         if 'youtu' in text.lower():
             text = RE_YOUTUBE_URL_ID.sub(lambda m: self._encode_re_helper(m, allow_fetch=allow_fetch), text)
         return text
 
     def decode(self, text, allow_fetch=None, return_matchdict=False):
+        if not self.enabled:
+            return text
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
         if '<youtube' in text:
             text = RE_YT_TEMPLATE.sub(lambda m: self._decode_re_helper(m, allow_fetch=allow_fetch), text)

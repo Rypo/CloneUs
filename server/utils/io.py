@@ -59,6 +59,11 @@ def find_checkpoints(model_basedir: Path, rel_to=None, md_format=True, wrapcodeb
 class PersistentStorage:
     def __init__(self, pstore_file=None) -> None:
         self.pstore_file = pstore_file if pstore_file is not None else settings.CONFIG_DIR/'persistent_storage.yaml'
+        try:
+            self.persistent_storage = OmegaConf.load(self.pstore_file)
+        except FileNotFoundError:
+            self.persistent_storage = {self.edate: {'youtube_quota': 0, 'changelog_shown': False}}
+            self.save()
         self.edate = f"entry_{datetime.datetime.now().strftime('%Y_%m_%d')}"
         self.persistent_storage = OmegaConf.load(self.pstore_file)
         self.today_store = self.load()

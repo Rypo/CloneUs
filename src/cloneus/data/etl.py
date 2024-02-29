@@ -77,16 +77,12 @@ def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
     # replace 2+ newlines with 1 newline, since we may use \n\n to separate messages
     df_chat['text'] = df_chat['Content'].str.replace(r'\n{2,}','\n', regex=True)
    
-    try:
-        # Want this to be AFTER filtering to avoid YouTube API calls on excluded content
-        ytm = youtube.YouTubeManager(allow_fetch=True)
-        # Transform all youtube URLs into custom metadata tag for better LLM comprehension
-        df_chat.loc[:, 'text'] = df_chat['text'].apply(ytm.encode)
-    except KeyError as e:
-        print('.env missing: "YOUTUBE_API_KEY". YouTube video links will not encoded.')
+    # Want this to be AFTER filtering to avoid YouTube API calls on excluded content
+    ytm = youtube.YouTubeManager(allow_fetch=True)
+    # Transform all youtube URLs into custom metadata tag for better LLM comprehension
+    df_chat.loc[:, 'text'] = df_chat['text'].apply(ytm.encode)
     # this will drop ~< 500 samples with invalid YouTube links as the only source of text. Verified that these are indeed not valid links
     df_chat = df_chat[df_chat['text'] != ''].reset_index(drop=True)
-
 
     # TODO: Consider what to do about extremely long chat streaks (e.g. 367 consectutive messages by a user on 2023-01-19)
     # TODO: Consider implications of assigning sequence/sessions after filtering vs before filtering
@@ -188,7 +184,7 @@ def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_t
         # TODO: Duplicate groups would be more useful to know
     
     # collisions possible if > 1 bill groups, but I mean...
-    return pd.concat([df_chats.assign(chat_session=chatgrps[h] + int(h*1e9)) for h in hours_between_sessions]) 
+    return pd.concat([df_chats.assign(chat_session=chatgrps[h] + int(h*1e9)).copy() for h in hours_between_sessions]) 
 
 
 

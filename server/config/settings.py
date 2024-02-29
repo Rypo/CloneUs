@@ -41,7 +41,7 @@ GUILDS_ID = discord.Object(id=GUILDS_ID_INT)
 CHANNEL_ID = int(os.getenv(PFX+'CHANNEL_ID'))
 
 def _init_dirs():
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    (LOGS_DIR/'daily').mkdir(parents=True, exist_ok=True)
     RES_DIR.mkdir(parents=True, exist_ok=True)
 
 def _read_models(models_file='models.json'):
@@ -160,7 +160,7 @@ def move_logs_lts(*logfilesnames):
             with open(mlogs.parent.joinpath(f'all_{logfile}'), 'a') as f:
                 f.write(plogs)
 
-move_logs_lts("model.log", "cmds.log", "event.log")
-
-dictConfig(LOGGING_CONFIG)
+def setup_logging():
+    move_logs_lts("model.log", "cmds.log", "event.log")
+    dictConfig(LOGGING_CONFIG)
 

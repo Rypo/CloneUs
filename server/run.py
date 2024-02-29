@@ -153,4 +153,5 @@ def main():
 
 if __name__ == '__main__':
     settings._init_dirs()
+    settings.setup_logging()
     main()
