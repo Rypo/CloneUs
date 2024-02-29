@@ -89,7 +89,7 @@ def load_full_model(checkpoint_path, full_model_path, model_id=None, flash=False
         model_id = peft_config.base_model_name_or_path
 
     if 'gptq' in model_id.lower():
-        quant_config = GPTQConfig(bits=4, disable_exllama=True) # , use_cuda_fp16=True
+        quant_config = GPTQConfig(bits=4, use_exllama=False) # , use_cuda_fp16=True
     else: 
         quant_config = bnb_readme_config(os.path.join(checkpoint_path,'README.md'))
         #BitsAndBytesConfig.from_dict(OmegaConf.load('config/model/bnb_default.yaml'))
@@ -274,7 +274,6 @@ def load_unmerged_customtoks(tokenizer, checkpoint_dirpath,  quant_config, dtype
         model_id,
         low_cpu_mem_usage=True,
         quantization_config=quant_config,
-        load_in_4bit=True,
         device_map="auto",
         # CANNOT USE: use_safetensors=True, since I stopped saving the full model
         torch_dtype=dtype,
@@ -314,7 +313,6 @@ def load_unmerged(checkpoint_dirpath, quant_config=None, dtype=torch.bfloat16, a
         checkpoint_dirpath,
         low_cpu_mem_usage=True,
         quantization_config=quant_config,
-        load_in_4bit=True,
         device_map="auto",
         # CANNOT USE: use_safetensors=True, since I stopped saving the full model
         torch_dtype=dtype,
@@ -391,7 +389,6 @@ def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_im
         merged_savedir,
         low_cpu_mem_usage=True,
         quantization_config=quant_config,
-        load_in_4bit=True,
         device_map="auto",
         use_safetensors=True,
         torch_dtype=dtype,

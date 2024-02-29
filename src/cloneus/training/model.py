@@ -46,7 +46,7 @@ def get_model(model_id, peft_config: LoraConfig, quant_config=None, tokenizer=No
     # BitsAndBytesConfig int-4 config
     if quant_config is None:
         if 'gptq' in model_id.lower():
-            quant_config = GPTQConfig(bits=4, disable_exllama=True)
+            quant_config = GPTQConfig(bits=4, use_exllama=False)
         else:
             quant_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -57,13 +57,9 @@ def get_model(model_id, peft_config: LoraConfig, quant_config=None, tokenizer=No
 
     # Load model and tokenizer
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, #,'pytorch_model.bin'), 
+        model_id,
         quantization_config=quant_config, 
         use_cache=False, 
-        load_in_4bit=True,
-        # use_cache=False, 
-        #device_map="auto",
-        #device_map={"":0},
         attn_implementation=attn_implementation,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
