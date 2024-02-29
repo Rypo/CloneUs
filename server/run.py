@@ -41,6 +41,20 @@ class BotUs(commands.Bot):
         self.tree.copy_global_to(guild=settings.GUILDS_ID)
         await self.tree.sync(guild=settings.GUILDS_ID)
 
+    async def sync(self, guild:discord.Guild, spec: typing.Literal["~", "*", "^"] = None):
+        # https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#sync-command-example
+        if spec == "~":
+            synced = await self.tree.sync(guild=guild)
+        elif spec == "*":
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+        elif spec == "^":
+            self.tree.clear_commands(guild=guild)
+            await self.tree.sync(guild=guild)
+            synced = []
+        else:
+            synced = await self.tree.sync()
+        return synced
 
     @asynccontextmanager
     async def writing_status(self, presence_busy:str='busy', presense_done:str='ready'):        
@@ -122,6 +136,17 @@ def main():
         await bot.toggle_extensions('cogs', 'reload')
         os.environ.pop('EAGER_LOAD')
 
+
+    @bot.command(name='sync')
+    @commands.guild_only()
+    @commands.is_owner()
+    async def sync_treecmds(ctx: commands.Context, spec: typing.Literal["~", "*", "^"] = None) -> None:
+        
+        synced = await bot.sync(ctx.guild, spec=spec)
+        
+        synced_md = '\n- ' + '\n- '.join([s.name for s in synced])
+        await ctx.send(f"Synced {len(synced)} commands {'globally' if spec is None else 'to the current guild.'}{synced_md}")
+        return
     
     bot.run(settings.BOT_TOKEN)
 
