@@ -61,7 +61,7 @@ def main():
     }
     
     model_name = model_map.get(cfg.model_id, cfg.model_id.split('/')[-1])  
-    base_outdir = cpaths.RUNS_DIR/f'{model_name}/{cfg.dataset.name}'
+    
     
     if 'gptq' in model_name:
         # https://huggingface.co/docs/optimum/llm_quantization/usage_guides/quantization
@@ -82,6 +82,8 @@ def main():
         bias="none",
         task_type="CAUSAL_LM",
         inference_mode = False,
+        use_rslora=cfg.lora_use_rslora,
+        #loftq_config=
     )
     if custom_token_map: 
         # this should now be handled automatically as of peft 0.8.0
@@ -101,6 +103,15 @@ def main():
     
     num_custom_tokens = tokenizer.add_special_tokens(custom_token_map) if custom_token_map else None
 
+
+    verify_config(cfg)
+
+        
+    if cfg.dataset.name == 'chunkh': # append hours_between_session
+        hbs = cfg.dataset.hours_between_sessions
+        cfg.dataset.name += str(hbs) if isinstance(hbs, int) else ''.join(map(str,hbs))
+    
+    base_outdir = cpaths.RUNS_DIR/f'{model_name}/{cfg.dataset.name}'
     args = mtrain.create_args(
         base_outdir,
         peft_config,
@@ -132,13 +143,7 @@ def main():
         #torch_compile=True,
     )
 
-    verify_config(cfg)
 
-        
-    if cfg.dataset.name == 'chunkh': # append hours_between_session
-        hbs = cfg.dataset.hours_between_sessions
-        cfg.dataset.name += str(hbs) if isinstance(hbs, int) else ''.join(map(str,hbs))
-        
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(custom_token_map is not None)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
@@ -178,7 +183,6 @@ def main():
                                            custom_tokens_map=custom_token_map, attn_implementation=cfg.attn_implementation, lora_target_linear=cfg.lora_target_linear)
         
     elif cfg.flashattn_lib=='unsloth':
-        
         print('before:',peft_config)
         model, tokenizer = mllm.get_unsloth(cfg.model_id, peft_config, max_seq_length=cfg.chunk_size)
         if cfg.padding_side and cfg.padding_side != tokenizer.padding_side:
@@ -188,7 +192,7 @@ def main():
         if tokenizer.pad_token_id == tokenizer.eos_token_id:
             print('WARNING. PAD = EOS. Overriding.')
             tokenizer.pad_token_id = tokenizer.unk_token_id
-
+        
         # TODO: look into ~4-7gb higher vRAM usage after changing padding_side=right -> padding_side=left
         # https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side
         

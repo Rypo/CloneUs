@@ -36,6 +36,8 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, dtype=to
         use_gradient_checkpointing = True,
         random_state = 3407,
         max_seq_length = max_seq_length,
+        use_rslora=peft_config.use_rslora,
+        loftq_config=peft_config.loftq_config,
     )
     model.config.pretraining_tp = 1  # should already be =1,  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/configuration_llama.py#L79
     return model, tokenizer

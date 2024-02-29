@@ -70,6 +70,7 @@ prompt:
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.0 # Use 0 for unsloth optimizations to take effect
+lora_use_rslora: false # More important for high r (>32) -- https://arxiv.org/abs/2312.03732
 lora_target_linear: true
 lora_fan_in_fan_out:
 lora_target_modules:
