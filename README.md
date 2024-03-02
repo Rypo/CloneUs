@@ -11,7 +11,6 @@ Specifically, it demonstrates LoRA finetuning for a multi-role, multi-turn chatb
 - Customizable data chunking and chat windowing to help make the most of your data
 - YouTube metadata parsing for richer chat context
 
-
 ## Getting Started
 ### System Requirements
 - Nvidia GPU, Ampere or later (30xx, 40xx) 
@@ -25,7 +24,7 @@ Specifically, it demonstrates LoRA finetuning for a multi-role, multi-turn chatb
 ### Setup
 1. Create an environment and install base requirements. (Use `mamba` in place of `conda` if installed)
 ```bash
-conda create -n cloneus python=3.10
+conda create -n cloneus python=3.10 packaging ninja -c conda-forge
 conda activate cloneus
 conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
 conda install xformers -c xformers
@@ -46,6 +45,19 @@ pip install -e ".[discord]" # For no server, `pip install -e .`. For quant metho
 1. edit `config/train_config.yaml` 
    - Update `chatlog_csv` to point to `data/discord/<YOUR_CHAT_EXPORT>.csv` created by `build.py`
    - If you want your bot to know first names, change `author_tag` to include "fname" (e.g. `"{author} ({fname})"`) and make sure you've included first names in your `config/users.json` 
-2. `scripts/train.py`
+2. Run `python scripts/train.py`
 
-### Running the Discord server
+### Running the Discord Bot
+- Update the `.env` with your `BOT_TOKEN`, `GUILDS_ID`, and `CHANNEL_ID` (and/or the `DEV_*` equivalents for a testing server) if you haven't already.
+- Several commands depend on `authorInitial` being populated in `config/users.json`. Add an uncased unique character or char+digit(s) for each user. Avoid reserved chars {i,m,p,x} unless including a digit.
+  - If you do not set these, they will assigned for you using first names if set, otherwise display names.
+
+1. Add your trained model to `server/config/models.json`. Use the relative path to your trained checkpoint (e.g. `mistral.../chunk.../cnk8192-.../checkpoint-500`)
+2. Run `python server/run.py` or `TESTING=1 python server/run.py` to run the testing server.
+
+
+## Roadmap
+- Generalize for applications beyond Discord
+- Optional server hosting for trained models/discord bot
+- RAG for YouTube links
+- Dedicated per person LoRA training
