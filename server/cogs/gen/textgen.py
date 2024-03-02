@@ -413,7 +413,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         author_candidates = None
         
         if author_initials:
-            author_candidates = [roles.initial_to_author[i] for i in author_initials.lower()]
+            author_candidates = [roles.initial_to_author[i] for i in author_initials]
 
             if len(author_candidates) == 1:
                 return await self.anybot(ctx, author_candidates[0], seed_text=seed_text, _needsdefer=False)
@@ -426,7 +426,8 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         if self.auto_reply_mode in ['rbest','irbest','urand','top']:
             next_author = await self.clomgr.predict_author(message_cache, self.auto_reply_mode, self.auto_reply_candidates)
         else: 
-            next_author = roles.initial_to_author[self.auto_reply_mode[0]]
+            # <author_initial>bot. e.g.: j1bot, abot, qbot, d11bot
+            next_author = roles.initial_to_author[self.auto_reply_mode.replace('bot','')]
     
         ctx = await self.bot.get_context(message_cache[-1])
         await self.anybot(ctx, next_author, seed_text=None)

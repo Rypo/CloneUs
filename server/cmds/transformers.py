@@ -20,11 +20,11 @@ class WordListTransformer(app_commands.Transformer):
 
 class AuthorInitialsTransformer(app_commands.Transformer):
     '''Check that all chars an author initial and return lower case str'''
-    all_author_initials: str = ''.join(roles.initial_to_author.keys()).lower()
-    async def transform(self, interaction: discord.Interaction, author_initials: str) -> str:
-        if author_initials and any(c.lower() not in self.all_author_initials for c in author_initials):
+    all_author_initials: str = list(roles.initial_to_author.keys())
+    async def transform(self, interaction: discord.Interaction, author_initials: str) -> list[str]:
+        if author_initials and not all(i.lower() in self.all_author_initials for i in roles.parse_initials(author_initials)):
             raise commands.BadArgument(f'all characters should be one of {self.all_author_initials!r}')
-        return author_initials.lower()
+        return roles.parse_initials(author_initials)
 
 
 class PercentTransformer(app_commands.Transformer):

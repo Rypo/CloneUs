@@ -110,7 +110,7 @@ class Cloneus:
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         self._last_streamed_batch_values = {'input_text':'','author_prompts':[], 'output_texts':[], 'input_len': -1, 'output_lens': []}
 
-        self.filler_message = (random.choice([roles.initial_to_author[ch] for ch in 'ra']),'ye')
+        self.filler_message = (random.choice(roles.author_display_names), 'ye')
         #self.gen_config=None
         
 

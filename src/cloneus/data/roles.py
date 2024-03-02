@@ -1,40 +1,83 @@
+import re
 import json
-import pandas as pd
+from collections import defaultdict
 
 import cloneus.core.paths as cpaths
 
 USERS_FILEPATH = cpaths.ROOT_DIR/'config/users.json'
 
-try:
-    with open(USERS_FILEPATH,'r') as f:
-        USER_DATA: dict = json.load(f)
-except FileNotFoundError as e:
-    print('users.json Not Found! Call scripts/build.py before running.')
-    raise e
+def _read_userdata():
+    try:
+        with open(USERS_FILEPATH,'r') as f:
+            USER_DATA: dict = json.load(f)
+            return USER_DATA
+    except FileNotFoundError as e:
+        print('users.json Not Found! Call scripts/build.py before running.')
+        raise e
 
 def _load_author_helpers():
+    USER_DATA = _read_userdata()
     author_display_names = []
     author_to_fname = {} # May have nulls if no firstName
     initial_to_author = {} # may have duplicate drops if no authorInitial
     author_to_id = {}
     
     for u in USER_DATA['USERS']:
-        author_display_names.append(u['displayName'])
-        author_to_fname[u['displayName']] = u['firstName']
-        author_to_id[u['displayName']] = u['id']
+        author = u['displayName']
+        author_display_names.append(author)
+        author_to_fname[author] = u['firstName']
+        author_to_id[author] = u['id']
 
-        initial = u['authorInitial'] if u['authorInitial'] else u['username'][0]
-        initial_to_author[initial] = u['displayName']
-        
-    return author_display_names, author_to_fname, author_to_id, initial_to_author
+        if u['authorInitial']:
+            initial_to_author[u['authorInitial'].lower()] = author
+    
+    # If initials are not provided, assign using first names if available
+    # Otherwise, use display names for initials
+    # TODO: allow partial initial assignment. 
+
+    if not initial_to_author:
+        fnames = list(author_to_fname.values())
+        if all(fnames):
+            initial_to_author = default_initials(fnames)
+        else:
+            initial_to_author = default_initials(author_display_names)
+
+    return USER_DATA, author_display_names, author_to_fname, author_to_id, initial_to_author
 
 # Consts
-author_display_names, author_to_fname, author_to_id, initial_to_author = _load_author_helpers()
+USER_DATA, author_display_names, author_to_fname, author_to_id, initial_to_author = _load_author_helpers()
 BOT_NAME = USER_DATA['BOT']['displayName']
 
 
 def format_author_tag(user_display_name:str, author_tag:str):
     return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=author_to_fname.get(user_display_name,user_display_name))
+
+def check_author_initials():
+    if initial_to_author:
+        assert len(set([i.lower() for i in initial_to_author])-set(['i','m','p','x'])) == len(author_display_names), 'Each user must be assigned a unique, case-insensitive initial ∉ {"i","m","p","x"} or char+num(s).'
+
+def parse_initials(initials_seq:str, return_dispname=False):
+    '''aBC|A,b,c|a B c -> [a,b,c]. a2b1c1d11 -> [a2,b1,c1,d11]'''
+    initials = re.findall(r'([a-z]\d*)[, ]?', initials_seq, re.I)
+    if not return_dispname:
+        return [i.lower() for i in initials]
+    return [initial_to_author[i] for i in initials]
+    
+
+def default_initials(names:list[str]):
+    snames = sorted(names, key=str.lower)
+    initials = [name[0] for name in snames]
+    if len(set(initials)) == len(snames):
+        return dict(zip(initials, snames))
+    
+    dd = defaultdict(lambda: 1)
+    uinitials = []
+
+    for c in initials:
+        uinitials.append(f'{c}{dd[c]}')
+        dd[c]+=1
+    
+    return dict(zip(uinitials, snames))
 
 
 def get_name_map():

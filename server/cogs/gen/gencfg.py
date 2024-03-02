@@ -150,11 +150,11 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         
         if author_initials:
             if len(author_initials)==1:
-                self.auto_reply_mode = author_initials+'bot'
+                self.auto_reply_mode = author_initials[0]+'bot'
                 return await ctx.send(f"Auto reply mode enabled. Auto {self.auto_reply_mode} rollin' out")
                         
             self.auto_reply_candidates = [roles.initial_to_author[i] for i in author_initials]
-            self._display_initials = ','.join(author_initials.lower())
+            self._display_initials = ','.join(author_initials)
 
         
         if self.auto_reply_mode == 'off':
@@ -183,7 +183,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             version: The model that said that line
         """
 
-        genmap = {m['name']: settings.RUNS_DIR/m['ckpt'] for m in settings.TRAINED_MODELS} 
+        genmap = {m['name']: settings.RUNS_DIR/m['ckpt'].split('runs/full/')[-1] for m in settings.TRAINED_MODELS} 
         await ctx.defer()
         await self.clomgr.load(genmap[version.value], gconfig_fname='best_generation_config.json')
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')

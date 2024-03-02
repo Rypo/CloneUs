@@ -1,14 +1,17 @@
 import os
 import typing
 import asyncio
+from contextlib import asynccontextmanager
 #import uvloop
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cloneus.data import roles
+
 import config.settings as settings
 
-from contextlib import asynccontextmanager
+
 
 DESC = '''A bot that fills in when your friends go AWOL (and other things).
 
@@ -154,4 +157,5 @@ def main():
 if __name__ == '__main__':
     settings._init_dirs()
     settings.setup_logging()
+    roles.check_author_initials()
     main()
