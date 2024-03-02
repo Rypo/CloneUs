@@ -96,32 +96,47 @@ def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
 
 def expand_sessions(chat_session: pd.Series, min_session_length:int=1):
     '''Forward Merge session groups that have less than `min_session_msgs` items'''
-    # NOTE: this could inf loop, if last entry is it's own single session
-    # Could be avoided if -= 1, but +=1 aligns better with the assumption we take that 4hr break = new topic session
-    # but if we have __4hr_break__ [TEXT] __4hr_break__ then seems more likely that text should be mapped forward instead of backward
-    n_small_session = min_session_length-1 # skip loop and return unless > 1
+    if min_session_length<=1:
+        # skip loop and return unless > 1
+        return chat_session
+
+    # just need a number large enough to not exit early during prev_n_smsess comparison
+    n_small_session = chat_session.shape[0]+1
     sess_sizes = []
+    prev_n_smsess = n_small_session
+    sess_max = chat_session.max()
+    sess_min = chat_session.min()
     while n_small_session > 0:
         under_len = chat_session.value_counts() < min_session_length
         small_sessions = under_len[under_len].index
-        
-        chat_session = chat_session.where(~chat_session.isin(small_sessions), other = chat_session + 1)
-        
         n_small_session = small_sessions.shape[0]
+        # Avoid inf loop: 
+        # sess-= 1 if didn't reduce the number of small sessions, 
+        # +=1 is default case since it aligns better with the assumption we take that 4hr break = new topic session
+        # but if we have __4hr_break__ [TEXT] __4hr_break__ then seems more likely that text should be mapped forward instead of backward
+        if prev_n_smsess == n_small_session:
+            chat_session = chat_session.where(~chat_session.isin(small_sessions), other = (chat_session-1).clip(sess_min, sess_max))
+        else:
+            chat_session = chat_session.where(~chat_session.isin(small_sessions), other = (chat_session+1).clip(sess_min, sess_max))
+        
+        prev_n_smsess = n_small_session
         sess_sizes.append(n_small_session)
+        
     if sess_sizes:    
         print('sessions < min_session_length:',' -> '.join(map(str,sess_sizes)))
     return chat_session
 
 
 def delineate_sessions(df_chats:pd.DataFrame, hours_between_sessions:int=4, min_session_length:int=1) -> pd.Series:
-    te_sessions = (df_chats['time_gap'] >= (hours_between_sessions*60*60)).cumsum()
-    #train_chat_session = expand_sessions((df_chats.loc[df_chats.split=='train', 'time_gap'] >= (hours_between_sessions*60*60)).cumsum(), min_session_length=min_session_length)
-    #eval_chat_session += (train_chat_session.max()+1) 
-    train_chat_session = expand_sessions(te_sessions[df_chats.split=='train'], min_session_length=min_session_length)
-    eval_chat_session = expand_sessions(te_sessions[df_chats.split=='eval'], min_session_length=min_session_length) + 1 # need +1 to force break 1st group
+    #te_sessions = (df_chats['time_gap'] >= (hours_between_sessions*60*60)).cumsum()
+    train_chat_session = expand_sessions((df_chats.loc[df_chats.split=='train', 'time_gap'] >= (hours_between_sessions*60*60)).cumsum(), min_session_length=min_session_length)
+    eval_chat_session = expand_sessions((df_chats.loc[df_chats.split=='eval', 'time_gap'] >= (hours_between_sessions*60*60)).cumsum(), min_session_length=min_session_length)
+    # max+1 to avoid collisions since 0 will be min of eval
+    eval_chat_session += train_chat_session.max()+1
+    #train_chat_session = expand_sessions(te_sessions[df_chats.split=='train'].copy(), min_session_length=min_session_length)
+    #eval_chat_session = expand_sessions(te_sessions[df_chats.split=='eval'].copy(), min_session_length=min_session_length) + 1 # need +1 to force break 1st group
     
-    assert train_chat_session.max() < eval_chat_session.min(), 'Possible data leak. Train chat_session overlaps eval chat_session'
+    #assert train_chat_session.max() < eval_chat_session.min(), 'Possible data leak. Train chat_session overlaps eval chat_session'
     chat_session = pd.concat([train_chat_session, eval_chat_session])
     
     return chat_session
