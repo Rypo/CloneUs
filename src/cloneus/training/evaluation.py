@@ -107,7 +107,7 @@ def textborder(center_text, sym='-', out_n=64, cent_n=0):
     return outstr
 
 
-def eval_model(model_path, questions_filepath, outfile='test_samples.log', gmodes:list[str]=None, question_author:str = None, response_authors='rest'):
+def eval_model(model_path, questions_filepath, outfile='test_samples.log', gmodes:list[str]=None, question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
     if (cpts:=list(Path(model_path).glob('*checkpoint*'))):
         model_path = cpts[0]
 
@@ -125,32 +125,36 @@ def eval_model(model_path, questions_filepath, outfile='test_samples.log', gmode
     
     if response_authors == 'rest':
         author_list = [a for a in roles.author_display_names if a!=question_author]
-    
-    #for c in checkpoints:
-    #    rai.model.load_adapter(rai.mdir_comps.basedir_path/c, adapter_name=c)
+    elif response_authors == 'all':
+        author_list = roles.author_display_names
+    elif isinstance(response_authors, list):
+        author_list = response_authors
         
-    # TODO: fix order so checkpoints don't need to be repeatedly reloaded. 
+    
     outfile = clo.mdir_comps.basedir_path/outfile
     with open(outfile, 'w') as f:
-        for gmode in gmodes:
-            clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
-            f.write(textborder(gmode.upper() +': '+ str(clo.get_genconf(True)), '-', 176, 0))
+        gc_inps_outs = {}
+        for c in tqdm(checkpoints): 
+            clo.switch_model(clo.mdir_comps.basedir_path, c)
 
-            for tq in tqdm(test_qs):
-                # TODO: can instruct models disregard postfix? Is it a splitting dependency? I dont remember.
-                #ftq = mot.apply_template(question_author, tq, mot.tag_sep, mot.postfix) 
+            for gmode in gmodes:
+                clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
+                gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconf(True)), '-', 176, 0)
+                inps_outs = gc_inps_outs.setdefault(gconf_line, {})
                 
-                
-                for i,c in enumerate(checkpoints): 
+                for tq in tqdm(test_qs, leave=False):
                     seed_everything(42)
-                    #print('CHECKPOINT:',c)
-                    #rai.model.set_adapter(c)
-                    clo.switch_model(clo.mdir_comps.basedir_path, c)
-                    clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
-                    
+
                     input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, tq)], author_list, '')
                     outputs='\n'.join([atag+'⋙'+repr(text) for atag,text in zip(author_prompts,out_texts)])
-                    if i==0:
-                        f.write(textborder('INPUT: '+ repr(input_text), '=', 88, 0))
-                    f.write(f'CHECKPOINT: {c}\n{outputs}\n')
                     
+                    input_line = textborder('INPUT: '+ repr(input_text), '=', 88, 0)
+                    ckpt_output = f'CHECKPOINT: {c}\n{outputs}\n'
+                    
+                    inps_outs.setdefault(input_line, []).append(ckpt_output)
+        
+        for gc, inpo in gc_inps_outs.items():
+            f.write(gc)
+            for k,v in inpo.items():    
+                f.write(k)
+                f.writelines(v)
