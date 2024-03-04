@@ -2,6 +2,7 @@ import os
 import json
 import random
 import typing
+import itertools
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -158,3 +159,39 @@ def eval_model(model_path, questions_filepath, outfile='test_samples.log', gmode
             for k,v in inpo.items():    
                 f.write(k)
                 f.writelines(v)
+
+
+def eval_params(model_path, pgrid, test_qs, outfile='test_params.log', question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
+    if (cpts:=list(Path(model_path).glob('*checkpoint*'))):
+        model_path = cpts[0]
+    
+    clo = Cloneus(model_path)
+    clo.load_model()
+    
+    if question_author is None:
+        question_author = roles.author_display_names[0]
+    
+    if response_authors == 'rest':
+        author_list = [a for a in roles.author_display_names if a!=question_author]
+    elif response_authors == 'all':
+        author_list = roles.author_display_names
+    elif isinstance(response_authors, list):
+        author_list = response_authors
+
+    spgrid = dict(sorted(pgrid.items(), key=lambda kv: len(kv[1])))
+    param_sets = [dict(zip(spgrid, pvals)) for pvals in itertools.product(*spgrid.values())]
+    print(f'Evaluating {len(param_sets)} parameter combinations')
+    
+    outfile = clo.mdir_comps.basedir_path/outfile
+    with open(outfile, 'w') as f:
+        for tq in test_qs:
+            input_text, _, _, _, _ = clo.batch_generate([(question_author, tq)], author_list, '')
+            f.write(textborder('INPUT: '+ repr(input_text), '=', 88, 0))
+            for pset in param_sets:
+                f.write('\n'+ json.dumps(pset))
+                delt=clo.set_genconf(**pset)
+                seed_everything(42)
+            
+                input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, tq)], author_list, '')
+                outputs='\n'.join([repr(atag+'⋙'+text) for atag,text in zip(author_prompts,out_texts)])
+                f.write('\n'+outputs+'\n')
