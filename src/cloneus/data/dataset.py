@@ -109,8 +109,9 @@ def dataset_timechunk(chat_csv, tokenizer, cfg, text_only=False):
     author_tag=cfg.author_tag
     hours_between_sessions=cfg.dataset.hours_between_sessions
     min_session_length=cfg.dataset.min_session_length
+    eval_frac = cfg.dataset.eval_frac
     
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), tag_sep, postfix, author_tag, hours_between_sessions, min_session_length, eval_frac=0.005)
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), tag_sep, postfix, author_tag, hours_between_sessions, min_session_length, eval_frac=eval_frac)
     df_concat = df_all.groupby(['split','chat_session'])['formatted_text'].agg(''.join).drop_duplicates()
     
     # TODO: maybe split on longest chat pause instead of arbitrary length.
@@ -170,19 +171,19 @@ def author_role_dataset(chat_csv, tokenizer, cfg, custom_chat_template=None):
     prompt_length = tokenizer(fprompt, return_length=True).length[0]
 
     max_len-=prompt_length
-    
+    eval_frac = cfg.dataset.eval_frac
 
     # https://old.reddit.com/r/LocalLLaMA/comments/1aiz6zu/roleplaying_system_prompts/
     
     df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), cfg.tag_sep, postfix='not_used', author_tag=role_tag, 
-                                    hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=0.005)
+                                    hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=eval_frac)
     
     # use max_len-2 in split threshold to account for <s> </s> tokens in final tokenization
     ds_chatml = group_chatml_format(df_all, tokenizer, max_len=max_len, role_tag=role_tag, fprompt=fprompt, custom_chat_template=custom_chat_template)
 
     ds_timechunk_chatml = datasets.DatasetDict({
-        'train': datasets.Dataset.from_pandas(ds_chatml['train'].to_frame(name='text'), split='train', preserve_index=False),
-        'validation': datasets.Dataset.from_pandas(ds_chatml['eval'].to_frame(name='text'), split='validation', preserve_index=False),
+        'train': datasets.Dataset.from_pandas(ds_chatml['train'].to_frame(name='text').reset_index(drop=True).copy(), split='train', preserve_index=False),
+        'validation': datasets.Dataset.from_pandas(ds_chatml['eval'].to_frame(name='text').reset_index(drop=True).copy(), split='validation', preserve_index=False),
     })
 
     ds_timechunk_chatml = ds_timechunk_chatml.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, return_length=True, truncation=False), batched=True)
@@ -250,8 +251,9 @@ def dataset_ungrouped(chat_csv, tokenizer, cfg, text_only=False):
     postfix=cfg.postfix
     author_tag=cfg.author_tag
     min_session_length=cfg.dataset.min_session_length
+    eval_frac = cfg.dataset.eval_frac
     df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), tag_sep, postfix=postfix, author_tag=author_tag, 
-                                    hours_between_sessions=4, min_session_length=min_session_length, eval_frac=0.005).drop(columns=['chat_session']) 
+                                    hours_between_sessions=4, min_session_length=min_session_length, eval_frac=eval_frac).drop(columns=['chat_session']) 
     #df_proc = etl.preprocess_df(chat_csv)
     #df_all = etl.create_dftext(df_proc, tag_sep=tag_sep, postfix=postfix, author_tag=author_tag, min_session_length=min_session_length).drop(columns=['chat_session']) 
     #df_all = create_dftext(chat_csv, tag_sep=tag_sep, postfix=postfix, author_tag=author_tag, hours_between_sessions=4 ).drop(columns=['chat_session']) 
@@ -287,9 +289,9 @@ def dataset_all_chunks(chat_csv, tokenizer, cfg):
     postfix=cfg.postfix
     author_tag=cfg.author_tag
     min_session_length=cfg.dataset.min_session_length
+    eval_frac = cfg.dataset.eval_frac
     
-    
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv),  tag_sep=tag_sep, postfix=postfix, author_tag=author_tag,  min_session_length=min_session_length, eval_frac=0.005).drop(columns=['chat_session']) 
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv),  tag_sep=tag_sep, postfix=postfix, author_tag=author_tag,  min_session_length=min_session_length, eval_frac=eval_frac).drop(columns=['chat_session']) 
     #df_all = create_dftext(chat_csv, tag_sep=tag_sep, postfix=postfix)
     
     df_train = df_all[df_all.split=='train'].drop(columns=['split', 'text']).reset_index(drop=True).copy()

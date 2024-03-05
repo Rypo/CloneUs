@@ -43,6 +43,7 @@ dataset:
   min_session_length: 3
   allow_truncation: false
   chatlog_csv: 'data/discord/YOUR_DISCORD_CHAT_FILE.csv' # created from calling scripts/build.py with your DiscordChatExporter JSON export
+  eval_frac: 0.005 # or 'after_bot' to use all messages after the first time your bot sent a message in chat. 
 
 # Separator between author_tag and start of text
 tag_sep: "\n" # MUST be "\n" when chat_ml
