@@ -24,7 +24,7 @@ from PIL import Image
 from managers import imgman
 import config.settings as settings
 
-from cmds import transformers as cmd_tfms
+from cmds import transformers as cmd_tfms, choices as cmd_choices
 from utils.command import check_up
 from utils.globthread import stop_global_thread
 from views import redrawui
@@ -92,13 +92,15 @@ async def read_attach(ctx: commands.Context):
         return
 
 
+
+
 class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     '''Suite of tools for generating images.'''
     
     def __init__(self, bot: BotUs):
         self.bot = bot
         #self.igen = imgman.ImageGenManager()
-        self.igen = imgman.MedImageGenManager()
+        self.igen = imgman.DreamShaperXLManager()
         self.ctx_menu = app_commands.ContextMenu(name='🎨 Redraw (Image)', callback=self._cm_redraw,)
         self.bot.tree.add_command(self.ctx_menu)
         
@@ -211,8 +213,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         
         await self.bot.change_presence(**settings.BOT_PRESENCE['draw'])
 
-        model_aliasmap = {'sdxl_turbo': 'Turbo SDXL (fast)' , 'sdxl':'SDXL (big)', 'dreamshaper_turbo': 'DreamShaper XL2 Turbo (Med)'}
-        model_alias = model_aliasmap[self.igen.model_name]
+        
+        model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         complete_msg = f'{model_alias} all fired up'
         return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
         
@@ -225,15 +227,13 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         await ctx.send('Drawing disabled.')
             
     @commands.hybrid_command(name='artist')
-    @app_commands.choices(model=[app_commands.Choice(name='SDXL (big)', value='sdxl'), 
-                                 app_commands.Choice(name='Turbo SDXL (fast)', value='sdxl_turbo'), 
-                                 app_commands.Choice(name='DreamShaper XL2 Turbo (Med)', value='dreamshaper_turbo')])
+    @app_commands.choices(model=cmd_choices.IMAGE_MODELS)
     async def artist(self, ctx: commands.Context, model: app_commands.Choice[str]):
         '''Unloads the image generation model'''
         if self.igen.model_name != model.value:
             await self.igen.unload_pipeline()
-            model_map = {'sdxl_turbo': imgman.FastImageGenManager(), 'sdxl':imgman.ImageGenManager(), 'dreamshaper_turbo': imgman.MedImageGenManager()}
-            self.igen = model_map[model.value]
+            
+            self.igen = imgman.AVAILABLE_MODELS[model.value]['manager']
             return await self.imgup(ctx)
         elif not self.igen.is_ready:
             return await self.imgup(ctx)
@@ -299,16 +299,11 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
         
-        if steps is None:
-            step_defaults = {'sdxl_turbo': 2, 'sdxl':40, 'dreamshaper_turbo':8}
-            steps = step_defaults[self.igen.model_name]
-            #steps = 2 if self.igen.model_name == 'sdxl_turbo' else 40
-
         await ctx.defer()
         await asyncio.sleep(1)
         async with self.bot.writing_status(presense_done='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
-            image = await self.igen.generate_image(prompt, steps, neg_prompt=neg_prompt, guidance=guidance, stage_mix=stage_mix, refine_strength=refine_strength)
+            image = await self.igen.generate_image(prompt, steps, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength)
             await send_imagebytes(ctx, image, prompt)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         
@@ -319,7 +314,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def redraw(self, ctx: commands.Context, image_url: str, prompt: str, *, 
                      steps: int = None, 
-                     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 30.0, 
+                     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 55.0, 
                      neg_prompt: str = None, 
                      guidance: float = 10.0, 
                      stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
@@ -333,7 +328,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             image_url: image URL. Square = Best results. Ideal size= 1024x1024 (Turbo ideal= 512x512).
             prompt: A description of the image to be generated.
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).
-            strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default=30.
+            strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default=55.
 
             neg_prompt: Description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).
@@ -342,18 +337,14 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
         image = load_image(image_url).convert('RGB')
-        
-        if steps is None:
-            step_defaults = {'sdxl_turbo': 4, 'sdxl':50, 'dreamshaper_turbo':8}
-            steps = step_defaults[self.igen.model_name]
-        
+                
         await ctx.defer()
         await asyncio.sleep(1)
         
         async with self.bot.writing_status(presense_done='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
             image = await self.igen.regenerate_image(image=image, prompt=prompt, 
-                                                     steps=steps, strength=strength, neg_prompt=neg_prompt, guidance=guidance, stage_mix=stage_mix, refine_strength=refine_strength)
+                                                     steps=steps, strength=strength, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength)
             await send_imagebytes(ctx, image, prompt)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         out_imgpath = save_image_prompt(image, prompt)
@@ -380,50 +371,9 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         
             
 
-
-# class ImgGroup:
-#     bot: BotUs
-#     igen: ImageGenManager|FastImageGenManager
-
-#     @commands.hybrid_group(name='img')
-#     async def img(self, ctx: commands.Context):
-#         '''(GROUP). call `!help img` to see sub-commands.'''
-#         if ctx.invoked_subcommand is None:
-#             await ctx.send(f"{ctx.subcommand_passed} does not belong to img")
-    
-#     @img.command(name='up', aliases=['iup','imageup'])
-#     async def up(self, ctx: commands.Context):
-#         '''Loads in the image generation model'''
-#         msg = None
-#         if not self.igen.is_ready:
-#             msg = await ctx.send('Warming up drawing skills...')
-#             await self.igen.load_pipeline()
-        
-#         await self.bot.change_presence(**settings.BOT_PRESENCE['draw'])
-#         complete_msg = 'Pencils sharpened. Draw when ready!'
-#         if msg is None:
-#             return await ctx.send(complete_msg)
-#         return await msg.edit(content = complete_msg)
-    
-#     @img.command(name='down', aliases=['idown','imagedown'])
-#     async def down(self, ctx: commands.Context):
-#         '''Unloads the image generation model'''
-#         await self.igen.unload_pipeline()
-#         await self.bot.change_presence(**settings.BOT_PRESENCE['ready'])
-#         await ctx.send('Drawing disabled.')
-
 async def setup(bot: BotUs):
     igen = ImageGen(bot)
-    #igroup = ImgGroup(name='img', description='(GROUP) img utils')
-    #igen.add_command(igroup)
-    #igen.app_command.add_command()
-    
-    #igrp = ImgGroup()
-    #igrp.cog = igen
-    #igrp
-    #igrp.app_command.add_command()
-    #await bot.add_cog(igrp)
-    #igrp.cog = 'ImageGen'
+
     await bot.add_cog(igen)
 
 

@@ -373,7 +373,7 @@ class TwoStageImageGenManager:
 # https://huggingface.co/ByteDance/SDXL-Lightning
 # https://civitai.com/models/133005?modelVersionId=357609
     
-class FastImageGenManager(OneStageImageGenManager):
+class SDXLTurboManager(OneStageImageGenManager):
     def __init__(self):
         super().__init__(
             model_name='sdxl_turbo', 
@@ -396,7 +396,7 @@ class FastImageGenManager(OneStageImageGenManager):
         # Currently, not working properly for SDXL Turbo + savings are negligible
         pass
 
-class ImageGenManager(TwoStageImageGenManager):
+class SDXLManager(TwoStageImageGenManager):
     def __init__(self):
         super().__init__(
             model_name = "sdxl",
@@ -412,7 +412,7 @@ class ImageGenManager(TwoStageImageGenManager):
             offload=True
         )
 
-class MedImageGenManager(OneStageImageGenManager):
+class DreamShaperXLManager(OneStageImageGenManager):
     def __init__(self):
         super().__init__(
             model_name = 'dreamshaper_turbo', # bf16 saves ~3gb vram over fp16
@@ -432,3 +432,19 @@ class MedImageGenManager(OneStageImageGenManager):
         def lazy_scheduler():
             return DPMSolverMultistepScheduler.from_config(self.base.scheduler.config)
         await super().load_pipeline(lazy_scheduler)
+
+AVAILABLE_MODELS = {
+    'sdxl_turbo': {
+        'manager': SDXLTurboManager(),
+        'desc': 'Turbo SDXL (fast)'
+    },
+    'sdxl': {
+        'manager': SDXLManager(),
+        'desc':'SDXL (big)'
+    },
+    'dreamshaper_turbo': {
+        'manager': DreamShaperXLManager(),
+        'desc': 'DreamShaper XL2 Turbo (Med)'
+    },
+}
+
