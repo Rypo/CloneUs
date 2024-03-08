@@ -433,6 +433,41 @@ class DreamShaperXLManager(OneStageImageGenManager):
             return DPMSolverMultistepScheduler.from_config(self.base.scheduler.config)
         await super().load_pipeline(lazy_scheduler)
 
+class JuggernautXLLightningManager(OneStageImageGenManager):
+    def __init__(self):
+        super().__init__(
+            model_name = 'juggernaut_lightning', # https://civitai.com/models/133005/juggernaut-xl?modelVersionId=357609
+            model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning/blob/main/Juggernaut_RunDiffusionPhoto2_Lightning_4Steps.safetensors', # https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning
+            
+            config = DiffusionConfig(
+                steps = 6, # 4-6 step /  5 and 7
+                i2i_steps = 6,
+                guidance_scale = 2.0, # 1.5 - 2
+                img_dims = (832,1216), # 832*1216 (1024,1024)
+                locked=['guidance_scale', 'denoise_blend', 'refine_strength']
+            ),
+            # TODO: use min(w/h, 1024/1024) min(w/h, 832/1216)
+            offload=True,
+        )
+    
+    @async_wrap_thread
+    def load_pipeline(self):
+        self.base = StableDiffusionXLPipeline.from_single_file(
+            self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False,
+        )
+        self.base.scheduler = DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True, euler_at_final=True)
+        # use_karras_sigmas=True, euler_at_final=True --- https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_xl
+        if self.offload:
+            self.base.enable_model_cpu_offload()
+        else:
+            self.base = self.base.to("cuda")
+            
+        self.basei2i = AutoPipelineForImage2Image.from_pipe(self.base, torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)
+        if not self.offload:
+            self.basei2i = self.basei2i.to("cuda")
+       
+        self.is_ready = True
+
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
         'manager': SDXLTurboManager(),
@@ -445,6 +480,10 @@ AVAILABLE_MODELS = {
     'dreamshaper_turbo': {
         'manager': DreamShaperXLManager(),
         'desc': 'DreamShaper XL2 Turbo (Med)'
+    },
+    'juggernaut_lightning': {
+        'manager': JuggernautXLLightningManager(),
+        'desc': 'Juggernaut XL Lightning'
     },
 }
 
