@@ -9,8 +9,26 @@ from discord.enums import TextStyle
 from discord.ext import commands
 from discord.utils import MISSING
 
-
-
+param_defaults = {
+    'sdxl': {
+        'prompt':None,
+        'neg_prompt':None,
+        'steps': 50,
+        'strength': 55,
+        'guidance': 10,
+        'stage_mix': None,
+        'refine_strength':30,
+    },
+    'sdxl_turbo': {
+        'prompt':None,
+        'neg_prompt':None,
+        'steps': 4,
+        'strength': 55,
+        'guidance': 0,
+        'stage_mix': None,
+        'refine_strength':None,
+    }
+}
 
 
 class RedrawUIView(discord.ui.View):
@@ -35,27 +53,8 @@ class RedrawUIView(discord.ui.View):
             'stage_mix': {'name': 'Stage Mix', 'inline': True, 'option': 'secondary'},
             'refine_strength': {'name': 'Refine Strength', 'inline': True, 'option': 'secondary'},
         })
-        if model_name == 'sdxl':
-            self.data = {
-                'prompt':None,
-                'neg_prompt':None,
-                'steps': 50,
-                'strength': 30,
-                'guidance': 10,
-                'stage_mix': None,
-                'refine_strength':30,
-                
-            }
-        elif model_name == 'sdxl_turbo':
-            self.data = {
-                'prompt':None,
-                'neg_prompt':None,
-                'steps': 4,
-                'strength': 30,
-                'guidance': 0,
-                'stage_mix': None,
-                'refine_strength':None,
-            }
+        self.data = param_defaults[model_name]
+        if model_name == 'sdxl_turbo':
             self.secondary_button.style=discord.ButtonStyle.gray
             self.secondary_button.disabled = True
             self.secondary_button.label = 'SDXL Only'
