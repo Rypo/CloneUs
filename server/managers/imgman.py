@@ -5,10 +5,7 @@ import io
 import math
 import time
 import typing
-
-from dataclasses import dataclass, field
-
-
+from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
 
 import discord
 from discord.ext import commands
@@ -22,6 +19,7 @@ from diffusers import (
     StableDiffusionXLPipeline, 
     StableDiffusionXLImg2ImgPipeline, 
     DPMSolverMultistepScheduler, 
+    DPMSolverSinglestepScheduler,
     UNet2DConditionModel, 
     EulerDiscreteScheduler
 )
@@ -73,35 +71,116 @@ def torch_compile_flags(restore_defaults=False, verbose=False):
         # torch._inductor.config.use_mixed_mm = True
 
 @dataclass
+class CfgItem:
+    default: typing.Any
+    _: KW_ONLY
+    locked: bool = False
+    bounds: tuple = None
+    name: str = None
+
+@dataclass
 class DiffusionConfig:
     # model_name: str
     # model_path: str
     steps: int
-    i2i_steps: int 
     guidance_scale: float
-    img_dims: tuple[int]
-
+    
     strength: float = 0.55
     negative_prompt: str = None
+    orient: typing.Literal['square','portrait'] = 'square'
+    img_dims: tuple[int, int]|list[tuple[int, int]] = (1024, 1024)
     denoise_blend: float = None
-    refine_strength: float = 0.3
+    refine_strength: float = None
     refine_guidance_scale: float = None
-
-    locked: list[str] = field(default_factory=list, kw_only=True)
-
+    _ : KW_ONLY
+    locked: InitVar[list[str]] = None
+    
+    def __post_init__(self, locked):
+        '''Assign field meta data to a CfgItem names <key>_'''
+        # This might be a better solution -- https://docs.python.org/3/library/dataclasses.html#descriptor-typed-fields 
+        if locked is None:
+            locked = []
+        
+        self_copy = self.__dict__.copy()
+        for k,v in self.__dict__.items():
+            if not isinstance(v, CfgItem):
+                md_item = CfgItem(v, name=k, locked=(k in locked))
+            else:
+                name = v.name if v.name is not None else k
+                is_locked = v.locked or k in locked
+                md_item = CfgItem(v.default, locked=is_locked, bounds=v.bounds, name=name)
+            
+            self_copy[f'{k}_'] = md_item
+            self_copy[f'{k}'] = md_item.default
+        
+        for k, v in self_copy.items():
+            setattr(self, f'{k}', v)
+        
+    
     def lock(self, *args):
-        self.locked += args
+        for k in args:
+            getattr(self, f'{k}_').locked = True
+
+    def to_dict(self):
+        return {v.name: v for k,v in vars(self).items() if k.endswith('_')}#{'default':v.default, 'locked':v.locked, 'bounds':v.bounds} 
+
+    def to_md(self):
+        md_text = ""
+        for k,v in self.to_dict().items():
+            if v.default is None and v.locked:
+                continue
+            
+            default = v.default
+            lb, ub = 0, 0
+            if v.bounds is not None:
+                lb, ub = v.bounds
+            # These values are displayed as 0-100 for end-user simplicity
+            if k in ['strength', 'refine_strength', 'stage_mix']:
+                default = int(default*100)
+                lb = int(lb*100)
+                ub = int(ub*100)
+            
+            postfix = ''
+            if v.locked:
+                postfix = '🔒' 
+            elif v.bounds is not None:
+                postfix = f'*(common: {lb} - {ub})*'
+            
+            md_text += f"\n- {k}: {default} {postfix}"
+        return md_text
 
     def get_if_none(self, **kwargs):
         '''Fill with default config value if arg is None'''
         filled_kwargs = {}
         for k,v in kwargs.items():
-            if v is None or k in self.locked:
+            if v is None or getattr(self, f'{k}_').locked:
                 v = getattr(self, k)
             filled_kwargs[k] = v
         return filled_kwargs
-        #return {k: (getattr(self, k) if (v is None or k in self.locked) else v) for k,v in kwargs.items()}
         
+    def nearest_dims(self, img_wh):
+        dim_out = self.img_dims
+        
+        if isinstance(self.img_dims, list):
+            w_in, h_in = img_wh
+            ar_in = w_in/h_in
+            dim_out = min(self.img_dims, key=lambda wh: abs(ar_in - wh[0]/wh[1]))
+        
+        return dim_out
+    
+    def get_dims(self, orient:typing.Literal['square','portrait']=None):
+        if orient is None:
+            orient = self.orient
+        
+        dim_out = self.img_dims
+        
+        if isinstance(self.img_dims, list):
+            if orient == 'square':
+                dim_out = min(self.img_dims, key=lambda wh: abs(1 - wh[0]/wh[1]))
+            elif orient == 'portrait':
+                dim_out = min(self.img_dims, key=lambda wh: wh[0]/wh[1])
+
+        return dim_out
 
 class OneStageImageGenManager:
     def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False):
@@ -178,9 +257,11 @@ class OneStageImageGenManager:
     
     
     @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, image=None):
+    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, image=None, target_size=None):
         if image is None:
-            return self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt).images[0]
+            #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
+            h,w = target_size
+            return self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, height=h, width=w).images[0]
             #imgs = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, num_images_per_prompt=1, **kwargs).images#[0]
             #return make_image_grid(imgs, 2, 2)
         if strength>0:  
@@ -189,27 +270,35 @@ class OneStageImageGenManager:
                 print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
                 num_inference_steps = steps
                 
-            out_image = self.basei2i(prompt=prompt, image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale).images[0]
+            out_image = self.basei2i(prompt=prompt, image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, target_size=target_size).images[0]
         else:
             out_image=image
         return out_image
     
     @async_wrap_thread
-    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, **kwargs) -> Image.Image:
+    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, orient:typing.Literal['square','portrait']=None, **kwargs) -> Image.Image:
         fkwg = self.config.get_if_none(steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt)
-        print(kwargs)
-        print('fkwg:', fkwg)
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'])
+        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+        dim_out = self.config.get_dims(orient)
+        target_size = (dim_out[1], dim_out[0]) # h,w
+            
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], target_size=target_size)
         return image
 
     @async_wrap_thread
     def regenerate_image(self, image:Image.Image, prompt:str, steps:int=None, strength:float=None, negative_prompt:str=None, guidance_scale:float=None, **kwargs) -> Image.Image:
-        fkwg = self.config.get_if_none(i2i_steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, strength=strength)
-        print('regenerate_image input size:',image.size)
-        print(kwargs)
-        print('fkwg:', fkwg)
+        fkwg = self.config.get_if_none(steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, strength=strength)
+        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+        
+        dim_out = self.config.nearest_dims(image.size)
+        print('regenerate_image input size:', image.size, '->', dim_out)
+        image = image.resize(dim_out)
+        # target_size defaults img_size 
+        # - https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py#L1325
         strength = cmd_tfms.percent_transform(fkwg['strength'])
-        out_image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['i2i_steps'], negative_prompt=fkwg['negative_prompt'], strength=strength, guidance_scale=fkwg['guidance_scale'], image=image.resize(self.config.img_dims))
+        out_image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], strength=strength, guidance_scale=fkwg['guidance_scale'], image=image)
+
+        #self.base.disable_vae_tiling()
         return out_image    
 
 
@@ -313,7 +402,7 @@ class TwoStageImageGenManager:
         release_memory()
 
     @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt, guidance_scale, denoise_blend, refine_strength, strength=None, image=None):
+    def pipeline(self, prompt, num_inference_steps, negative_prompt, guidance_scale, denoise_blend, refine_strength, strength=None, image=None, target_size=None):
         output_type = 'latent'
         if denoise_blend is None:
             output_type = 'pil'
@@ -322,8 +411,9 @@ class TwoStageImageGenManager:
         
         t0 = time.perf_counter()
         if image is None:
+            h,w = target_size
             image = self.base(prompt=prompt, num_inference_steps=num_inference_steps, denoising_end=denoise_blend, 
-                                guidance_scale=guidance_scale, negative_prompt=negative_prompt, output_type=output_type).images[0]
+                                guidance_scale=guidance_scale, negative_prompt=negative_prompt, output_type=output_type, height=h, width=w).images[0]
             
         elif strength*num_inference_steps >= 1:
             image = self.basei2i(prompt=prompt, num_inference_steps=num_inference_steps, denoising_end=denoise_blend, 
@@ -331,8 +421,7 @@ class TwoStageImageGenManager:
         
         t_base = time.perf_counter()
         if refine_strength*num_inference_steps >= 1:
-            refine_guidance_scale = self.config.refine_guidance_scale
-            if refine_guidance_scale is None:
+            if (refine_guidance_scale := self.config.refine_guidance_scale) is None:
                 refine_guidance_scale = guidance_scale*1.5
             image = self.refiner(prompt=prompt, num_inference_steps=num_inference_steps, denoising_start=denoise_blend,
                                     guidance_scale=refine_guidance_scale, negative_prompt=negative_prompt, image=[image], strength=refine_strength).images[0]
@@ -342,31 +431,51 @@ class TwoStageImageGenManager:
         return image
 
     @async_wrap_thread
-    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, denoise_blend:float|None=None, refine_strength:float=None, **kwargs) -> Image.Image:
-        print(kwargs)
-        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, denoise_blend=denoise_blend, refine_strength=refine_strength)
-        print('fkwg:', fkwg)
+    def generate_image(self, prompt:str, 
+                       steps: int = None, 
+                       negative_prompt: str = None, 
+                       guidance_scale: float = None, 
+                       orient: typing.Literal['square','portrait'] = None, 
+                       denoise_blend: float|None = None, 
+                       refine_strength: float = None, 
+                       **kwargs) -> Image.Image:
         
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, denoise_blend=denoise_blend, refine_strength=refine_strength)
+        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+        
+        dim_out = self.config.get_dims(orient)
+        target_size = (dim_out[1], dim_out[0]) # h,w
+
         denoise_blend = cmd_tfms.percent_transform(fkwg['denoise_blend'])
         refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
         
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], denoise_blend=denoise_blend, refine_strength=refine_strength)
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
+                              denoise_blend=denoise_blend, refine_strength=refine_strength, target_size=target_size)
         return image
 
     @async_wrap_thread
-    def regenerate_image(self, image:Image.Image, prompt:str, steps:int=None, strength:float=None, negative_prompt:str=None, guidance_scale:float=None, denoise_blend:float|None=None, refine_strength:float=None, **kwargs) -> Image.Image:
-        print('regenerate_image input size:',image.size)
+    def regenerate_image(self, image:Image.Image, prompt:str, 
+                         steps: int = None, 
+                         strength: float = None, 
+                         negative_prompt: str = None, 
+                         guidance_scale: float = None, 
+                         denoise_blend: float|None = None, 
+                         refine_strength: float = None, 
+                         **kwargs) -> Image.Image:
         
-        print(kwargs)
-        fkwg = self.config.get_if_none(i2i_steps=steps, strength=strength, guidance_scale=guidance_scale, negative_prompt=negative_prompt, denoise_blend=denoise_blend, refine_strength=refine_strength)
-        print('fkwg:', fkwg)
+        fkwg = self.config.get_if_none(steps=steps, strength=strength, guidance_scale=guidance_scale, negative_prompt=negative_prompt, denoise_blend=denoise_blend, refine_strength=refine_strength)
+        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+
+        dim_out = self.config.nearest_dims(image.size)
+        print('regenerate_image input size:', image.size, '->', dim_out)
+        image = image.resize(dim_out)
         
         strength = cmd_tfms.percent_transform(fkwg['strength'])
         denoise_blend = cmd_tfms.percent_transform(fkwg['denoise_blend'])
         refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
         
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['i2i_steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
-                              denoise_blend=denoise_blend, refine_strength=refine_strength, strength=strength, image=image.resize(self.config.img_dims))
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
+                              denoise_blend=denoise_blend, refine_strength=refine_strength, strength=strength, image=image)
         return image
 
 
@@ -379,11 +488,12 @@ class SDXLTurboManager(OneStageImageGenManager):
             model_name='sdxl_turbo', 
             model_path="stabilityai/sdxl-turbo",
             config=DiffusionConfig(
-                steps = 2, # 1-4 steps
-                i2i_steps = 4,
-                guidance_scale = 0.0,
+                steps = CfgItem(4, bounds=(1,4)), # 1-4 steps
+                guidance_scale = CfgItem(0.0, locked=True),
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = (512,512),
-                locked=['guidance_scale', 'negative_prompt', 'denoise_blend', 'refine_strength']
+
+                locked=['guidance_scale', 'negative_prompt', 'orient', 'denoise_blend', 'refine_strength', 'refine_guidance_scale']
             ), 
             offload=True)
         
@@ -403,12 +513,17 @@ class SDXLManager(TwoStageImageGenManager):
             model_path = "stabilityai/stable-diffusion-xl-base-1.0",
             refiner_path="stabilityai/stable-diffusion-xl-refiner-1.0",
             config = DiffusionConfig(
-                steps = 40,
-                i2i_steps = 50,
-                guidance_scale = 7.0,
+                steps = CfgItem(50, bounds=(40,60)),
+                guidance_scale = CfgItem(7.0, bounds=(5,15)), 
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
+                orient = CfgItem('square', locked=True),
                 img_dims = (1024,1024),
-                refine_strength=0.3,
+                denoise_blend= CfgItem(None, bounds=(0.7, 0.9)),
+                refine_strength = CfgItem(0.3, bounds=(0.2, 0.5)),
+
+                locked=['orient', 'refine_guidance_scale']
             ),
+            
             offload=True
         )
 
@@ -418,11 +533,12 @@ class DreamShaperXLManager(OneStageImageGenManager):
             model_name = 'dreamshaper_turbo', # bf16 saves ~3gb vram over fp16
             model_path = 'lykon/dreamshaper-xl-v2-turbo', # https://civitai.com/models/112902?modelVersionId=333449
             config = DiffusionConfig(
-                steps = 8, # 4-8 steps
-                i2i_steps = 8,
-                guidance_scale = 2.0, # cfg=2.0, 
-                img_dims = (1024,1024),
-                locked=['guidance_scale', 'denoise_blend', 'refine_strength']
+                steps = CfgItem(8, bounds=(4,8)),
+                guidance_scale = CfgItem(2.0, locked=True),
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
+                img_dims = [(1024,1024), (832,1216)],
+                
+                locked=['guidance_scale', 'denoise_blend', 'refine_strength', 'refine_guidance_scale']
             ),
             offload=True,
         )
@@ -430,23 +546,24 @@ class DreamShaperXLManager(OneStageImageGenManager):
     #@async_wrap_thread
     async def load_pipeline(self):
         def lazy_scheduler():
-            return DPMSolverMultistepScheduler.from_config(self.base.scheduler.config)
+            return DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
+            #return DPMSolverMultistepScheduler.from_config(self.base.scheduler.config)
         await super().load_pipeline(lazy_scheduler)
 
 class JuggernautXLLightningManager(OneStageImageGenManager):
     def __init__(self):
-        super().__init__(
+        super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning
             model_name = 'juggernaut_lightning', # https://civitai.com/models/133005/juggernaut-xl?modelVersionId=357609
-            model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning/blob/main/Juggernaut_RunDiffusionPhoto2_Lightning_4Steps.safetensors', # https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning
+            model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning/blob/main/Juggernaut_RunDiffusionPhoto2_Lightning_4Steps.safetensors', 
             
             config = DiffusionConfig(
-                steps = 6, # 4-6 step /  5 and 7
-                i2i_steps = 6,
-                guidance_scale = 2.0, # 1.5 - 2
-                img_dims = (832,1216), # 832*1216 (1024,1024)
-                locked=['guidance_scale', 'denoise_blend', 'refine_strength']
+                steps = CfgItem(6, bounds=(5,7)), # 4-6 step /  5 and 7
+                guidance_scale = CfgItem(1.5, bounds=(1.5,2.0)),
+                strength = CfgItem(0.6, bounds=(0.3, 0.9)),
+                img_dims = [(1024,1024), (832,1216)],
+
+                locked = ['denoise_blend', 'refine_strength', 'refine_guidance_scale']
             ),
-            # TODO: use min(w/h, 1024/1024) min(w/h, 832/1216)
             offload=True,
         )
     
@@ -455,7 +572,11 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
         self.base = StableDiffusionXLPipeline.from_single_file(
             self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False,
         )
-        self.base.scheduler = DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True, euler_at_final=True)
+        # https://huggingface.co/docs/diffusers/v0.26.3/en/api/schedulers/overview#schedulers
+        # DPM++ SDE == DPMSolverSinglestepScheduler
+        # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
+        self.base.scheduler = DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False)
+        #self.base.scheduler = DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False, algorithm_type='sde-dpmsolver++', solver_order=2)
         # use_karras_sigmas=True, euler_at_final=True --- https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_xl
         if self.offload:
             self.base.enable_model_cpu_offload()
