@@ -99,8 +99,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     
     def __init__(self, bot: BotUs):
         self.bot = bot
-        #self.igen = imgman.ImageGenManager()
-        self.igen = imgman.DreamShaperXLManager()
+        self.igen = imgman.JuggernautXLLightningManager()
         self.ctx_menu = app_commands.ContextMenu(name='🎨 Redraw (Image)', callback=self._cm_redraw,)
         self.bot.tree.add_command(self.ctx_menu)
         
@@ -216,6 +215,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         complete_msg = f'{model_alias} all fired up'
+        complete_msg += self.igen.config.to_md()
+
         return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
         
     
@@ -281,7 +282,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     async def draw(self, ctx: commands.Context, prompt:str, *,
                    steps: int = None, 
                    neg_prompt: str = None, 
-                   guidance: float = 7.0, 
+                   guidance: float = None, 
+                   orient: typing.Literal['square', 'portrait'] = None,
                    stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                    refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 30.0, 
                    fast:bool=False):
@@ -292,6 +294,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             prompt: A description of the image to be generated.
             steps: Num iters to run. Increase = ⬆Quality, ⬆Run Time. Default=40 (Turbo: Default=2).
             
+            orient: Image shape (aspect ratio). square w=h = 1:1. portrait w<h = 13:19. Default='square' (Turbo ignores). 
             neg_prompt: Description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).
             stage_mix: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).
@@ -303,7 +306,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         await asyncio.sleep(1)
         async with self.bot.writing_status(presense_done='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
-            image = await self.igen.generate_image(prompt, steps, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength)
+            image = await self.igen.generate_image(prompt, steps, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength, orient=orient)
             await send_imagebytes(ctx, image, prompt)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         
@@ -316,7 +319,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                      steps: int = None, 
                      strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 55.0, 
                      neg_prompt: str = None, 
-                     guidance: float = 10.0, 
+                     guidance: float = None, 
                      stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                      refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 30.0, 
                      fast:bool=False
