@@ -28,6 +28,7 @@ from safetensors.torch import load_file
 from diffusers.utils import load_image, make_image_grid
 from DeepCache import DeepCacheSDHelper
 from PIL import Image
+from spandrel import ImageModelDescriptor, ModelLoader
 
 from cloneus import cpaths
 import config.settings as settings
@@ -592,19 +593,90 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
         'manager': SDXLTurboManager(),
-        'desc': 'Turbo SDXL (fast)'
+        'desc': 'Turbo SDXL (Sm, fast)'
     },
     'sdxl': {
         'manager': SDXLManager(),
-        'desc':'SDXL (big)'
+        'desc':'SDXL (Lg, slow)'
     },
     'dreamshaper_turbo': {
         'manager': DreamShaperXLManager(),
-        'desc': 'DreamShaper XL2 Turbo (Med)'
+        'desc': 'DreamShaper XL2 Turbo (M, fast)'
     },
     'juggernaut_lightning': {
         'manager': JuggernautXLLightningManager(),
-        'desc': 'Juggernaut XL Lightning'
+        'desc': 'Juggernaut XL Lightning (M, fast)'
     },
 }
 
+class Upsampler:
+    def __init__(self, model_name=typing.Literal["4x_NMKD-Superscale-SP178000_G.pth", "4xUltrasharp-V10.pth"], dtype=torch.bfloat16):
+        # https://civitai.com/articles/904/settings-recommendations-for-novices-a-guide-for-understanding-the-settings-of-txt2img
+        ext_modeldir = cpaths.ROOT_DIR/'extras/models'
+        print(ext_modeldir.joinpath(model_name))
+        # load a model from disk
+        self.model = ModelLoader().load_from_file(ext_modeldir.joinpath(model_name))
+        # make sure it's an image to image model
+        assert isinstance(self.model, ImageModelDescriptor)
+        
+        self.model.eval().to('cuda', dtype=dtype)
+    
+    def pil_image_to_torch_bgr(self, img: Image.Image) -> torch.Tensor:
+        # https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/bef51aed032c0aaa5cfd80445bc4cf0d85b408b5/modules/upscaler_utils.py#L14C1-L19C33
+        img = np.array(img.convert("RGB"))
+        img = img[:, :, ::-1]  # flip RGB to BGR
+        img = np.transpose(img, (2, 0, 1))  # HWC to CHW
+        img = np.ascontiguousarray(img) / 255  # Rescale to [0, 1]
+        return torch.from_numpy(img)
+    
+    def torch_bgr_to_pil_image(self, tensor: torch.Tensor) -> Image.Image:
+        # https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/bef51aed032c0aaa5cfd80445bc4cf0d85b408b5/modules/upscaler_utils.py#L22C1-L35C39
+        if tensor.ndim == 4:
+            # If we're given a tensor with a batch dimension, squeeze it out
+            # (but only if it's a batch of size 1).
+            if tensor.shape[0] != 1:
+                raise ValueError(f"{tensor.shape} does not describe a BCHW tensor")
+            tensor = tensor.squeeze(0)
+        assert tensor.ndim == 3, f"{tensor.shape} does not describe a CHW tensor"
+        # TODO: is `tensor.float().cpu()...numpy()` the most efficient idiom?
+        arr = tensor.float().cpu().clamp_(0, 1).numpy()  # clamp
+        arr = 255.0 * np.moveaxis(arr, 0, 2)  # CHW to HWC, rescale
+        arr = arr.round().astype(np.uint8)
+        arr = arr[:, :, ::-1]  # flip BGR to RGB
+        return Image.fromarray(arr, "RGB")
+        
+    
+    @torch.inference_mode()
+    def process(self, img: torch.FloatTensor) -> np.array:
+        # https://github.com/joeyballentine/ESRGAN-Bot/blob/master/testbot.py#L73
+        img = img.to(self.model.device, dtype=self.model.dtype)    
+        output = self.model(img).detach_()#.squeeze(0).float().cpu().clamp_(0, 1).numpy()
+        
+        release_memory()
+        return output
+    
+    def upscale(self, img: Image.Image, scale:float):
+        dest_w = int((img.width * scale) // 8 * 8)
+        dest_h = int((img.height * scale) // 8 * 8)
+
+        for _ in range(3):
+            if img.width >= dest_w and img.height >= dest_h:
+                break
+
+            shape = (img.width, img.height)
+
+            img = self.upsample(img)
+
+            if shape == (img.width, img.height):
+                break
+
+        if img.width != dest_w or img.height != dest_h:
+            img = img.resize((int(dest_w), int(dest_h)), resample=Image.Resampling.LANCZOS)
+
+        return img
+    
+    def upsample(self, image: Image.Image) -> Image.Image:
+        img_tens = self.pil_image_to_torch_bgr(image).unsqueeze(0)
+        output = self.process(img_tens)
+        img_ups = self.torch_bgr_to_pil_image(output)
+        return img_ups
