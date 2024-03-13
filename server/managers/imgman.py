@@ -26,9 +26,11 @@ from diffusers import (
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from diffusers.utils import load_image, make_image_grid
+from accelerate import cpu_offload
 from DeepCache import DeepCacheSDHelper
 from PIL import Image
 from spandrel import ImageModelDescriptor, ModelLoader
+from compel import Compel, ReturnedEmbeddingsType
 
 from cloneus import cpaths
 import config.settings as settings
@@ -123,7 +125,7 @@ class DiffusionConfig:
             getattr(self, f'{k}_').locked = True
 
     def to_dict(self):
-        return {v.name: v for k,v in vars(self).items() if k.endswith('_')}#{'default':v.default, 'locked':v.locked, 'bounds':v.bounds} 
+        return {v.name: v for k,v in vars(self).items() if k.endswith('_')}
 
     def to_md(self):
         md_text = ""
@@ -145,7 +147,7 @@ class DiffusionConfig:
             if v.locked:
                 postfix = '🔒' 
             elif v.bounds is not None:
-                postfix = f'*(common: {lb} - {ub})*'
+                postfix = f'*(typical: {lb} - {ub})*'
             
             md_text += f"\n- {k}: {default} {postfix}"
         return md_text
@@ -184,7 +186,7 @@ class DiffusionConfig:
         return dim_out
 
 class OneStageImageGenManager:
-    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False):
+    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_callback:typing.Callable=None):
         self.is_compiled = False
         self.is_ready = False
         self.dc_enabled = None
@@ -193,24 +195,43 @@ class OneStageImageGenManager:
         self.model_path = model_path
         self.config = config
         self.offload = offload
-    
+        self._scheduler_callback = scheduler_callback
+        # https://huggingface.co/docs/diffusers/v0.26.3/en/api/schedulers/overview#schedulers
+        # DPM++ SDE == DPMSolverSinglestepScheduler
+        # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
 
     @async_wrap_thread
-    def load_pipeline(self, scheduler_callback:typing.Callable=None):
-        self.base: StableDiffusionXLPipeline = AutoPipelineForText2Image.from_pretrained(
+    def load_pipeline(self):
+        pipeline_loader = (StableDiffusionXLPipeline.from_single_file if self.model_path.endswith('.safetensors') 
+                           else AutoPipelineForText2Image.from_pretrained)
+
+        self.base: StableDiffusionXLPipeline = pipeline_loader(
             self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False,
         )
-        if scheduler_callback is not None:
-            self.base.scheduler = scheduler_callback()
+        if self._scheduler_callback is not None:
+            self.base.scheduler = self._scheduler_callback()
+        
         if self.offload:
             self.base.enable_model_cpu_offload()
         else:
             self.base = self.base.to("cuda")
-            
-        self.basei2i = AutoPipelineForImage2Image.from_pipe(self.base, torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)
+        
+        self.compeler = Compel(
+            tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
+            text_encoder=[self.base.text_encoder, self.base.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True]
+        )
+
+        self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base,)# torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)#.to(0)
+        
         if not self.offload:
             self.basei2i = self.basei2i.to("cuda")
-       
+        
+        
+        self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
+        #self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
+        
         self.is_ready = True
     
     def _setup_dc(self):
@@ -237,6 +258,8 @@ class OneStageImageGenManager:
     def unload_pipeline(self):
         self.base = None
         self.basei2i = None
+        self.compeler = None
+        self.upsampler = None
         release_memory()
         self.is_ready = False
         if self.is_compiled:
@@ -256,34 +279,71 @@ class OneStageImageGenManager:
         _ = self.pipeline(prompt='Cat', num_inference_steps=4, guidance_scale=self.config.guidance_scale)
         self.is_compiled = True
     
+    @torch.inference_mode()
+    def embed_prompts(self, prompt:str, negative_prompt:str = None):
+        
+        if set(prompt) & set('()-+'):
+            conditioning, pooled = self.compeler(prompt)
+            prompt_encodings = dict(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
+            if negative_prompt is not None:
+                neg_conditioning, neg_pooled = self.compeler(negative_prompt)
+                prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
+        else:
+            prompt_encodings = dict(prompt=prompt, negative_prompt=negative_prompt)
+            
+        return prompt_encodings
+        
     
     @torch.inference_mode()
     def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, image=None, target_size=None):
+        t0 = time.perf_counter()
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
+        t1 = time.perf_counter()
+        #print(prompt_encodings)
+        
         if image is None:
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            return self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, height=h, width=w).images[0]
-            #imgs = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, num_images_per_prompt=1, **kwargs).images#[0]
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings).images[0]
+            #imgs = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, num_images_per_prompt=4, **kwargs).images#[0]
             #return make_image_grid(imgs, 2, 2)
-        if strength>0:  
-            if num_inference_steps*strength < 1:
-                steps = math.ceil(1/strength)
+            release_memory()
+            print(torch.cuda.memory_summary(abbreviated=True))
+            t2 = time.perf_counter()
+        if strength:
+            is_refine = strength <= 0.4 # Assume low strength = refinement, not regeneration.
+            min_effective_steps = 2 if is_refine else 1
+            
+            if num_inference_steps*strength < min_effective_steps:
+                steps = math.ceil(min_effective_steps/strength)
                 print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
                 num_inference_steps = steps
+            
+            if is_refine:
+                print('Upscaling..')
+                image = self.upsampler.upscale(img=image, scale=1.5)
                 
-            out_image = self.basei2i(prompt=prompt, image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, target_size=target_size).images[0]
-        else:
-            out_image=image
-        return out_image
+                release_memory()
+                t3 = time.perf_counter()
+
+            # target_size defaults img_size 
+            # - https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py#L1325
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
+            release_memory()
+            t4 = time.perf_counter()
+        
+        print(f'total: {t4-t0:.2f}s | prompt_embed: {t1-t0:.2f}s | T2I: {t2-t1:.2f}s | upscale: {t3-t2:.2f}s | refine: {t4-t3:.2f}s')
+        return image
     
     @async_wrap_thread
-    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, orient:typing.Literal['square','portrait']=None, **kwargs) -> Image.Image:
-        fkwg = self.config.get_if_none(steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt)
+    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, orient:typing.Literal['square','portrait']=None, refine_strength:float=None, **kwargs) -> Image.Image:
+        fkwg = self.config.get_if_none(steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, refine_strength=refine_strength)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
-        dim_out = self.config.get_dims(orient)
-        target_size = (dim_out[1], dim_out[0]) # h,w
-            
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], target_size=target_size)
+        img_dims = self.config.get_dims(orient)
+        target_size = (img_dims[1], img_dims[0]) # h,w
+        
+        refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], target_size=target_size, strength=refine_strength)
         return image
 
     @async_wrap_thread
@@ -293,14 +353,13 @@ class OneStageImageGenManager:
         
         dim_out = self.config.nearest_dims(image.size)
         print('regenerate_image input size:', image.size, '->', dim_out)
-        image = image.resize(dim_out)
-        # target_size defaults img_size 
-        # - https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py#L1325
+        image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
+        
         strength = cmd_tfms.percent_transform(fkwg['strength'])
         out_image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], strength=strength, guidance_scale=fkwg['guidance_scale'], image=image)
 
         #self.base.disable_vae_tiling()
-        return out_image    
+        return out_image
 
 
 class TwoStageImageGenManager:
@@ -479,147 +538,19 @@ class TwoStageImageGenManager:
                               denoise_blend=denoise_blend, refine_strength=refine_strength, strength=strength, image=image)
         return image
 
-
-# https://huggingface.co/ByteDance/SDXL-Lightning
-# https://civitai.com/models/133005?modelVersionId=357609
-    
-class SDXLTurboManager(OneStageImageGenManager):
-    def __init__(self):
-        super().__init__(
-            model_name='sdxl_turbo', 
-            model_path="stabilityai/sdxl-turbo",
-            config=DiffusionConfig(
-                steps = CfgItem(4, bounds=(1,4)), # 1-4 steps
-                guidance_scale = CfgItem(0.0, locked=True),
-                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
-                img_dims = (512,512),
-
-                locked=['guidance_scale', 'negative_prompt', 'orient', 'denoise_blend', 'refine_strength', 'refine_guidance_scale']
-            ), 
-            offload=True)
-        
-    
-    def dc_fastmode(self, enable:bool, img2img=False):
-        pass
-
-    @async_wrap_thread
-    def compile_pipeline(self):
-        # Currently, not working properly for SDXL Turbo + savings are negligible
-        pass
-
-class SDXLManager(TwoStageImageGenManager):
-    def __init__(self):
-        super().__init__(
-            model_name = "sdxl",
-            model_path = "stabilityai/stable-diffusion-xl-base-1.0",
-            refiner_path="stabilityai/stable-diffusion-xl-refiner-1.0",
-            config = DiffusionConfig(
-                steps = CfgItem(50, bounds=(40,60)),
-                guidance_scale = CfgItem(7.0, bounds=(5,15)), 
-                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
-                orient = CfgItem('square', locked=True),
-                img_dims = (1024,1024),
-                denoise_blend= CfgItem(None, bounds=(0.7, 0.9)),
-                refine_strength = CfgItem(0.3, bounds=(0.2, 0.5)),
-
-                locked=['orient', 'refine_guidance_scale']
-            ),
-            
-            offload=True
-        )
-
-class DreamShaperXLManager(OneStageImageGenManager):
-    def __init__(self):
-        super().__init__(
-            model_name = 'dreamshaper_turbo', # bf16 saves ~3gb vram over fp16
-            model_path = 'lykon/dreamshaper-xl-v2-turbo', # https://civitai.com/models/112902?modelVersionId=333449
-            config = DiffusionConfig(
-                steps = CfgItem(8, bounds=(4,8)),
-                guidance_scale = CfgItem(2.0, locked=True),
-                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
-                img_dims = [(1024,1024), (832,1216)],
-                
-                locked=['guidance_scale', 'denoise_blend', 'refine_strength', 'refine_guidance_scale']
-            ),
-            offload=True,
-        )
-
-    #@async_wrap_thread
-    async def load_pipeline(self):
-        def lazy_scheduler():
-            return DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
-            #return DPMSolverMultistepScheduler.from_config(self.base.scheduler.config)
-        await super().load_pipeline(lazy_scheduler)
-
-class JuggernautXLLightningManager(OneStageImageGenManager):
-    def __init__(self):
-        super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning
-            model_name = 'juggernaut_lightning', # https://civitai.com/models/133005/juggernaut-xl?modelVersionId=357609
-            model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning/blob/main/Juggernaut_RunDiffusionPhoto2_Lightning_4Steps.safetensors', 
-            
-            config = DiffusionConfig(
-                steps = CfgItem(6, bounds=(5,7)), # 4-6 step /  5 and 7
-                guidance_scale = CfgItem(1.5, bounds=(1.5,2.0)),
-                strength = CfgItem(0.6, bounds=(0.3, 0.9)),
-                img_dims = [(1024,1024), (832,1216)],
-
-                locked = ['denoise_blend', 'refine_strength', 'refine_guidance_scale']
-            ),
-            offload=True,
-        )
-    
-    @async_wrap_thread
-    def load_pipeline(self):
-        self.base = StableDiffusionXLPipeline.from_single_file(
-            self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False,
-        )
-        # https://huggingface.co/docs/diffusers/v0.26.3/en/api/schedulers/overview#schedulers
-        # DPM++ SDE == DPMSolverSinglestepScheduler
-        # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
-        self.base.scheduler = DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False)
-        #self.base.scheduler = DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False, algorithm_type='sde-dpmsolver++', solver_order=2)
-        # use_karras_sigmas=True, euler_at_final=True --- https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_xl
-        if self.offload:
-            self.base.enable_model_cpu_offload()
-        else:
-            self.base = self.base.to("cuda")
-            
-        self.basei2i = AutoPipelineForImage2Image.from_pipe(self.base, torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)
-        if not self.offload:
-            self.basei2i = self.basei2i.to("cuda")
-       
-        self.is_ready = True
-
-AVAILABLE_MODELS = {
-    'sdxl_turbo': {
-        'manager': SDXLTurboManager(),
-        'desc': 'Turbo SDXL (Sm, fast)'
-    },
-    'sdxl': {
-        'manager': SDXLManager(),
-        'desc':'SDXL (Lg, slow)'
-    },
-    'dreamshaper_turbo': {
-        'manager': DreamShaperXLManager(),
-        'desc': 'DreamShaper XL2 Turbo (M, fast)'
-    },
-    'juggernaut_lightning': {
-        'manager': JuggernautXLLightningManager(),
-        'desc': 'Juggernaut XL Lightning (M, fast)'
-    },
-}
-
 class Upsampler:
-    def __init__(self, model_name=typing.Literal["4x_NMKD-Superscale-SP178000_G.pth", "4xUltrasharp-V10.pth"], dtype=torch.bfloat16):
+    def __init__(self, model_name=typing.Literal["4xNMKD-Superscale.pth", "4xUltrasharp-V10.pth"], dtype=torch.bfloat16):
         # https://civitai.com/articles/904/settings-recommendations-for-novices-a-guide-for-understanding-the-settings-of-txt2img
         ext_modeldir = cpaths.ROOT_DIR/'extras/models'
-        print(ext_modeldir.joinpath(model_name))
+        
         # load a model from disk
         self.model = ModelLoader().load_from_file(ext_modeldir.joinpath(model_name))
         # make sure it's an image to image model
         assert isinstance(self.model, ImageModelDescriptor)
         
+        #self.model = cpu_offload(self.model.eval().to(dtype=dtype))
         self.model.eval().to('cuda', dtype=dtype)
+        #cpu_offload(self.model.model)
     
     def pil_image_to_torch_bgr(self, img: Image.Image) -> torch.Tensor:
         # https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/bef51aed032c0aaa5cfd80445bc4cf0d85b408b5/modules/upscaler_utils.py#L14C1-L19C33
@@ -647,15 +578,22 @@ class Upsampler:
         
     
     @torch.inference_mode()
-    def process(self, img: torch.FloatTensor) -> np.array:
+    def process(self, img: torch.FloatTensor) -> torch.Tensor:
         # https://github.com/joeyballentine/ESRGAN-Bot/blob/master/testbot.py#L73
         img = img.to(self.model.device, dtype=self.model.dtype)    
         output = self.model(img).detach_()#.squeeze(0).float().cpu().clamp_(0, 1).numpy()
         
-        release_memory()
         return output
     
-    def upscale(self, img: Image.Image, scale:float):
+    @torch.inference_mode()
+    def upsample(self, image: Image.Image) -> Image.Image:
+        img_tens = self.pil_image_to_torch_bgr(image).unsqueeze(0)
+        output = self.process(img_tens)
+        img_ups = self.torch_bgr_to_pil_image(output)
+        return img_ups
+    
+    @torch.inference_mode()
+    def upscale(self, img: Image.Image, scale:float=1.5):
         dest_w = int((img.width * scale) // 8 * 8)
         dest_h = int((img.height * scale) // 8 * 8)
 
@@ -675,8 +613,105 @@ class Upsampler:
 
         return img
     
-    def upsample(self, image: Image.Image) -> Image.Image:
-        img_tens = self.pil_image_to_torch_bgr(image).unsqueeze(0)
-        output = self.process(img_tens)
-        img_ups = self.torch_bgr_to_pil_image(output)
-        return img_ups
+class SDXLTurboManager(OneStageImageGenManager):
+    def __init__(self):
+        super().__init__(
+            model_name='sdxl_turbo', 
+            model_path="stabilityai/sdxl-turbo",
+            config=DiffusionConfig(
+                steps = CfgItem(4, bounds=(1,4)), # 1-4 steps
+                guidance_scale = CfgItem(0.0, locked=True),
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
+                img_dims = (512,512),
+                refine_strength = 0.3,
+                locked=['guidance_scale', 'negative_prompt', 'orient', 'denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+            ), 
+            offload=False)
+        
+    
+    def dc_fastmode(self, enable:bool, img2img=False):
+        pass
+
+    @async_wrap_thread
+    def compile_pipeline(self):
+        # Currently, not working properly for SDXL Turbo + savings are negligible
+        pass
+
+class SDXLManager(TwoStageImageGenManager):
+    def __init__(self):
+        super().__init__(
+            model_name = "sdxl",
+            model_path = "stabilityai/stable-diffusion-xl-base-1.0",
+            refiner_path="stabilityai/stable-diffusion-xl-refiner-1.0",
+            config = DiffusionConfig(
+                steps = CfgItem(50, bounds=(40,60)),
+                guidance_scale = CfgItem(7.0, bounds=(5,15)), 
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
+                orient = CfgItem('square', locked=True),
+                img_dims = (1024,1024),
+                denoise_blend= CfgItem(None, bounds=(0.7, 0.9)),
+                refine_strength = CfgItem(0.3, bounds=(0.2, 0.4)),
+
+                locked=['orient', 'refine_guidance_scale']
+            ),
+            
+            offload=True
+        )
+
+class DreamShaperXLManager(OneStageImageGenManager):
+    def __init__(self):
+        super().__init__(
+            model_name = 'dreamshaper_turbo', # bf16 saves ~3gb vram over fp16
+            model_path = 'lykon/dreamshaper-xl-v2-turbo', # https://civitai.com/models/112902?modelVersionId=333449
+            config = DiffusionConfig(
+                steps = CfgItem(8, bounds=(4,8)),
+                guidance_scale = CfgItem(2.0, locked=True),
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
+                img_dims = [(1024,1024), (832,1216)],
+                refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked=['guidance_scale', 'denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=True,
+            scheduler_callback = lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
+        )
+
+class JuggernautXLLightningManager(OneStageImageGenManager):
+    def __init__(self):
+        super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning
+            model_name = 'juggernaut_lightning', # https://civitai.com/models/133005/juggernaut-xl?modelVersionId=357609
+            model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning/blob/main/Juggernaut_RunDiffusionPhoto2_Lightning_4Steps.safetensors', 
+            
+            config = DiffusionConfig(
+                steps = CfgItem(6, bounds=(5,7)), # 4-6 step /  5 and 7
+                guidance_scale = CfgItem(1.5, bounds=(1.5,2.0)),
+                strength = CfgItem(0.6, bounds=(0.3, 0.9)),
+                img_dims = [(1024,1024), (832,1216)],
+                orient='portrait',
+                refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+            ),
+            offload=False,
+            scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False)
+        )
+    
+# https://huggingface.co/ByteDance/SDXL-Lightning
+
+AVAILABLE_MODELS = {
+    'sdxl_turbo': {
+        'manager': SDXLTurboManager(),
+        'desc': 'Turbo SDXL (Sm, fast)'
+    },
+    'sdxl': {
+        'manager': SDXLManager(),
+        'desc':'SDXL (Lg, slow)'
+    },
+    'dreamshaper_turbo': {
+        'manager': DreamShaperXLManager(),
+        'desc': 'DreamShaper XL2 Turbo (M, fast)'
+    },
+    'juggernaut_lightning': {
+        'manager': JuggernautXLLightningManager(),
+        'desc': 'Juggernaut XL Lightning (M, fast)'
+    },
+}
+
