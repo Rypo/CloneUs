@@ -200,8 +200,19 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                 except Exception as e:
                     print(e)
                         
-                    
-
+    @commands.command(name='iseed', aliases=['imgseed', 'imageseed'])
+    async def iseed(self, ctx: commands.Context, seed:int = None):
+        self.igen.set_seed(seed=seed)
+        return await ctx.send(f'Global image seed set to {seed}. Welcome to the land of {"non-" if seed is None else ""}determinisim')
+    
+    @commands.command(name='iinfo', aliases=['imginfo', 'imageinfo'])
+    async def iinfo(self, ctx: commands.Context, seed:int = None):
+        model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
+        msg = model_alias + '\n' + f'Image Seed: {self.igen.global_seed}'
+        msg += self.igen.config.to_md()
+        #msg += f'\nImage seed: {self.igen.global_seed}'
+        return await ctx.send(msg)
+    
     @commands.command(name='imgup', aliases=['iup','imageup'])
     async def imgup(self, ctx: commands.Context):
         '''Loads in the image generation model'''
@@ -284,8 +295,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                    neg_prompt: str = None, 
                    guidance: float = None, 
                    orient: typing.Literal['square', 'portrait'] = None,
-                   stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                    refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 30.0, 
+                   stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                    fast:bool=False):
         """
         Generate an image from a text prompt description.
@@ -297,8 +308,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             orient: Image shape (aspect ratio). square w=h = 1:1. portrait w<h = 13:19. Default='square' (Turbo ignores). 
             neg_prompt: Description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).
-            stage_mix: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).
             refine_strength: Refinement stage intensity. 0=Alter Nothing. 100=Alter Everything. Default=30 (Turbo ignores).
+            stage_mix: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
         

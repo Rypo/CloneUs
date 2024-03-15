@@ -33,6 +33,7 @@ from spandrel import ImageModelDescriptor, ModelLoader
 from compel import Compel, ReturnedEmbeddingsType
 
 from cloneus import cpaths
+
 import config.settings as settings
 from cmds import flags as cmd_flags, transformers as cmd_tfms
 from utils.globthread import async_wrap_thread, stop_global_thread
@@ -199,6 +200,15 @@ class OneStageImageGenManager:
         # https://huggingface.co/docs/diffusers/v0.26.3/en/api/schedulers/overview#schedulers
         # DPM++ SDE == DPMSolverSinglestepScheduler
         # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
+        self.global_seed = None
+    
+    def set_seed(self, seed:int|None = None):
+        self.global_seed = seed
+    
+    @property
+    def generator(self):
+        return torch.Generator('cuda').manual_seed(self.global_seed) if self.global_seed is not None else None
+
 
     @async_wrap_thread
     def load_pipeline(self):
@@ -244,13 +254,16 @@ class OneStageImageGenManager:
         self.dc_enabled = False
         
     def dc_fastmode(self, enable:bool, img2img=False):
+        # TODO: This will break under various conditions
+        # if min_effective_steps (steps*strength < 5) refine breaks?
+        # e.g. refine_strength=0.3, steps < 25 / refine_strength=0.4, steps < 20
         if self.dc_enabled is None:
             self._setup_dc()
         if enable != self.dc_enabled: 
             if enable:
                 (self.dc_basei2i if img2img else self.dc_base).enable()
             else:
-                (self.dc_basei2i if img2img else self.dc_base).disable() 
+                (self.dc_basei2i if img2img else self.dc_base).disable()
                 
             self.dc_enabled=enable 
 
@@ -296,20 +309,27 @@ class OneStageImageGenManager:
     
     @torch.inference_mode()
     def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, image=None, target_size=None):
+        if self.global_seed is not None:
+            #meval.seed_everything(self.global_seed)
+            torch.manual_seed(self.global_seed)
+            torch.cuda.manual_seed(self.global_seed)
+            
         t0 = time.perf_counter()
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
         t1 = time.perf_counter()
-        #print(prompt_encodings)
         
+        t2 = t1 # default in case skip
         if image is None:
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings).images[0]
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h,  width=w, **prompt_encodings).images[0] # , generator=self.generator
             #imgs = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, num_images_per_prompt=4, **kwargs).images#[0]
             #return make_image_grid(imgs, 2, 2)
-            release_memory()
-            print(torch.cuda.memory_summary(abbreviated=True))
+            print('(draw) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
+            #release_memory()
+            
             t2 = time.perf_counter()
+        t3 = t4 = t2 #time.perf_counter() # default in case skip
         if strength:
             is_refine = strength <= 0.4 # Assume low strength = refinement, not regeneration.
             min_effective_steps = 2 if is_refine else 1
@@ -322,16 +342,18 @@ class OneStageImageGenManager:
             if is_refine:
                 print('Upscaling..')
                 image = self.upsampler.upscale(img=image, scale=1.5)
-                
-                release_memory()
                 t3 = time.perf_counter()
+                print('(upscale) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
+                release_memory()
+                
 
             # target_size defaults img_size 
             # - https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py#L1325
             image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
-            release_memory()
+            print('(refine) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
+            
             t4 = time.perf_counter()
-        
+        release_memory()
         print(f'total: {t4-t0:.2f}s | prompt_embed: {t1-t0:.2f}s | T2I: {t2-t1:.2f}s | upscale: {t3-t2:.2f}s | refine: {t4-t3:.2f}s')
         return image
     
@@ -691,7 +713,7 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
                 locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ),
             offload=False,
-            scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False)
+            scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
         )
     
 # https://huggingface.co/ByteDance/SDXL-Lightning
