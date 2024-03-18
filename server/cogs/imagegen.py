@@ -61,22 +61,42 @@ async def send_imagebytes(ctx:commands.Context, image:Image.Image, prompt:str):
     with io.BytesIO() as imgbin:
         image.save(imgbin, 'PNG')
         imgbin.seek(0)
-        msg = await ctx.send(file=discord.File(fp=imgbin, filename='image.png',  description=prompt)) 
+        #view = redrawui.DrawUIView(ctx)
+        #msg = await view.send(ctx, discord.File(fp=imgbin, filename='image.png',  description=prompt))
+        msg = await ctx.send(file=discord.File(fp=imgbin, filename='image.png',  description=prompt))#, view=redrawui.DrawUIView()) 
     return msg
 
+def imgbytes_file(image:Image.Image, prompt:str):
+    with io.BytesIO() as imgbin:
+        image.save(imgbin, 'PNG')
+        imgbin.seek(0)
+        
+        return discord.File(fp=imgbin, filename='image.png',  description=prompt)
+        
+
+def clean_discord_urls(url, verbose=False):
+    if not isinstance(url, str) or 'discordapp' not in url:
+        return url
+    
+    clean_url = url.split('format=')[0].rstrip('&=?')
+    if verbose:
+        print(f'old discord url: {url}\nnew discord url: {clean_url}')
+    return clean_url
 
 def extract_image_url(message: discord.Message, verbose=False):
     """read image url from message"""
-    
+    url = None
     if message.embeds:
-        if verbose: print('embeds_url:', message.embeds[0].url)
-        return message.embeds[0].url
+        url = message.embeds[0].url
+        if verbose: print('embeds_url:', url)
+        
     elif message.attachments:
+        url = message.attachments[0].url
         #img_filename = message.attachments[0].filename
-        if verbose: print('attach_url:',message.attachments[0].url)
-        return message.attachments[0].url
+        if verbose: print('attach_url:', url)
+        
 
-    return None
+    return clean_discord_urls(url)
         
 
 async def read_attach(ctx: commands.Context):
@@ -295,7 +315,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                    neg_prompt: str = None, 
                    guidance: float = None, 
                    orient: typing.Literal['square', 'portrait'] = None,
-                   refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 30.0, 
+                   refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                    stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                    fast:bool=False):
         """
@@ -312,27 +332,34 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             stage_mix: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
+        needs_view = False
+        if not ctx.interaction.response.is_done():
+            await ctx.defer()
+            await asyncio.sleep(1)
+            needs_view = True
         
-        await ctx.defer()
-        await asyncio.sleep(1)
         async with self.bot.writing_status(presense_done='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
-            image = await self.igen.generate_image(prompt, steps, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength, orient=orient)
-            await send_imagebytes(ctx, image, prompt)
+            image, fwkg = await self.igen.generate_image(prompt, steps, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength, orient=orient)
+            #await send_imagebytes(ctx, image, prompt)
+            #image_file = imgbytes_file(image, prompt)
+            if needs_view:#_view:
+                view = redrawui.DrawUIView(fwkg, timeout=180)
+                msg = await view.send(ctx, image)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         
         out_imgpath = save_image_prompt(image, prompt)
-        #await ctx.send(file=discord.File(out_imgpath))
+        return image
 
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def redraw(self, ctx: commands.Context, image_url: str, prompt: str, *, 
                      steps: int = None, 
-                     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 55.0, 
+                     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                      neg_prompt: str = None, 
                      guidance: float = None, 
                      stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
-                     refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = 30.0, 
+                     refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = None, 
                      fast:bool=False
                      ):
         """
@@ -350,18 +377,26 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             refine_strength: Refinement stage intensity. 0=Alter Nothing. 100=Alter Everything. Default=30 (Turbo ignores).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
-        image = load_image(image_url).convert('RGB')
-                
-        await ctx.defer()
-        await asyncio.sleep(1)
+        image = load_image(clean_discord_urls(image_url)).convert('RGB')
+        
+        needs_view = False
+        if not ctx.interaction.response.is_done():        
+            await ctx.defer()
+            await asyncio.sleep(1)
+            needs_view = True
         
         async with self.bot.writing_status(presense_done='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
-            image = await self.igen.regenerate_image(image=image, prompt=prompt, 
+            image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, 
                                                      steps=steps, strength=strength, negative_prompt=neg_prompt, guidance_scale=guidance, denoise_blend=stage_mix, refine_strength=refine_strength)
-            await send_imagebytes(ctx, image, prompt)
+            #msg = await send_imagebytes(ctx, image, prompt)
+            #image_file = imgbytes_file(image, prompt)
+            if needs_view:#_view:
+                view = redrawui.DrawUIView(fwkg, timeout=180)
+                msg = await view.send(ctx, image)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         out_imgpath = save_image_prompt(image, prompt)
+        return image
 
     @commands.command(name='disco')
     async def disco(self, ctx: commands.Context, duration: int = 32):

@@ -332,7 +332,7 @@ class OneStageImageGenManager:
         t3 = t4 = t2 #time.perf_counter() # default in case skip
         if strength:
             is_refine = strength <= 0.4 # Assume low strength = refinement, not regeneration.
-            min_effective_steps = 2 if is_refine else 1
+            min_effective_steps = 1#2 if is_refine else 1
             
             if num_inference_steps*strength < min_effective_steps:
                 steps = math.ceil(min_effective_steps/strength)
@@ -366,7 +366,7 @@ class OneStageImageGenManager:
         
         refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
         image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], target_size=target_size, strength=refine_strength)
-        return image
+        return image, fkwg
 
     @async_wrap_thread
     def regenerate_image(self, image:Image.Image, prompt:str, steps:int=None, strength:float=None, negative_prompt:str=None, guidance_scale:float=None, **kwargs) -> Image.Image:
@@ -378,10 +378,10 @@ class OneStageImageGenManager:
         image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
         
         strength = cmd_tfms.percent_transform(fkwg['strength'])
-        out_image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], strength=strength, guidance_scale=fkwg['guidance_scale'], image=image)
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], strength=strength, guidance_scale=fkwg['guidance_scale'], image=image)
 
         #self.base.disable_vae_tiling()
-        return out_image
+        return image, fkwg
 
 
 class TwoStageImageGenManager:
@@ -533,7 +533,7 @@ class TwoStageImageGenManager:
         
         image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
                               denoise_blend=denoise_blend, refine_strength=refine_strength, target_size=target_size)
-        return image
+        return image, fkwg
 
     @async_wrap_thread
     def regenerate_image(self, image:Image.Image, prompt:str, 
@@ -558,7 +558,7 @@ class TwoStageImageGenManager:
         
         image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
                               denoise_blend=denoise_blend, refine_strength=refine_strength, strength=strength, image=image)
-        return image
+        return image, fkwg
 
 class Upsampler:
     def __init__(self, model_name=typing.Literal["4xNMKD-Superscale.pth", "4xUltrasharp-V10.pth"], dtype=torch.bfloat16):
@@ -636,7 +636,7 @@ class Upsampler:
         return img
     
 class SDXLTurboManager(OneStageImageGenManager):
-    def __init__(self):
+    def __init__(self, offload=False):
         super().__init__(
             model_name='sdxl_turbo', 
             model_path="stabilityai/sdxl-turbo",
@@ -645,10 +645,10 @@ class SDXLTurboManager(OneStageImageGenManager):
                 guidance_scale = CfgItem(0.0, locked=True),
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = (512,512),
-                refine_strength = 0.3,
+                refine_strength = 0.,
                 locked=['guidance_scale', 'negative_prompt', 'orient', 'denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ), 
-            offload=False)
+            offload=offload)
         
     
     def dc_fastmode(self, enable:bool, img2img=False):
@@ -660,7 +660,7 @@ class SDXLTurboManager(OneStageImageGenManager):
         pass
 
 class SDXLManager(TwoStageImageGenManager):
-    def __init__(self):
+    def __init__(self, offload=True):
         super().__init__(
             model_name = "sdxl",
             model_path = "stabilityai/stable-diffusion-xl-base-1.0",
@@ -677,11 +677,11 @@ class SDXLManager(TwoStageImageGenManager):
                 locked=['orient', 'refine_guidance_scale']
             ),
             
-            offload=True
+            offload=offload
         )
 
 class DreamShaperXLManager(OneStageImageGenManager):
-    def __init__(self):
+    def __init__(self, offload=False):
         super().__init__(
             model_name = 'dreamshaper_turbo', # bf16 saves ~3gb vram over fp16
             model_path = 'lykon/dreamshaper-xl-v2-turbo', # https://civitai.com/models/112902?modelVersionId=333449
@@ -690,15 +690,15 @@ class DreamShaperXLManager(OneStageImageGenManager):
                 guidance_scale = CfgItem(2.0, locked=True),
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = [(1024,1024), (832,1216)],
-                refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                refine_strength=CfgItem(0., bounds=(0.2, 0.4)),
                 locked=['guidance_scale', 'denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
             ),
-            offload=True,
+            offload=offload,
             scheduler_callback = lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
         )
 
 class JuggernautXLLightningManager(OneStageImageGenManager):
-    def __init__(self):
+    def __init__(self, offload=True):
         super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning
             model_name = 'juggernaut_lightning', # https://civitai.com/models/133005/juggernaut-xl?modelVersionId=357609
             model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XL-Lightning/blob/main/Juggernaut_RunDiffusionPhoto2_Lightning_4Steps.safetensors', 
@@ -709,10 +709,10 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
                 strength = CfgItem(0.6, bounds=(0.3, 0.9)),
                 img_dims = [(1024,1024), (832,1216)],
                 orient='portrait',
-                refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                refine_strength=CfgItem(0., bounds=(0.2, 0.4)),
                 locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ),
-            offload=False,
+            offload=offload,
             scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
         )
     
@@ -732,7 +732,7 @@ AVAILABLE_MODELS = {
         'desc': 'DreamShaper XL2 Turbo (M, fast)'
     },
     'juggernaut_lightning': {
-        'manager': JuggernautXLLightningManager(),
+        'manager': JuggernautXLLightningManager(offload=True),
         'desc': 'Juggernaut XL Lightning (M, fast)'
     },
 }
