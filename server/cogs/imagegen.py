@@ -27,7 +27,7 @@ import config.settings as settings
 from cmds import transformers as cmd_tfms, choices as cmd_choices
 from utils.command import check_up
 from utils.globthread import stop_global_thread
-from views import redrawui
+from views import imageui
 from run import BotUs
 
 bot_logger = settings.logging.getLogger('bot')
@@ -154,7 +154,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         #print(f'IMG URL: {img_url}')
         await message.remove_reaction('🖼️',self.bot.user)
 
-        mv = redrawui.RedrawUIView(self.igen.model_name)
+        mv = imageui.RedrawUIView(self.igen.model_name)
         msg = await mv.send(ctx=ctx, image_url=img_url, image_filename=None, ephemeral=ephemeral)
         await mv.wait()
         print(mv.data)
@@ -344,7 +344,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             #await send_imagebytes(ctx, image, prompt)
             #image_file = imgbytes_file(image, prompt)
             if needs_view:#_view:
-                view = redrawui.DrawUIView(fwkg, timeout=180)
+                view = imageui.DrawUIView(fwkg, timeout=180)
                 msg = await view.send(ctx, image)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         
@@ -392,7 +392,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             #msg = await send_imagebytes(ctx, image, prompt)
             #image_file = imgbytes_file(image, prompt)
             if needs_view:#_view:
-                view = redrawui.DrawUIView(fwkg, timeout=180)
+                view = imageui.DrawUIView(fwkg, timeout=180)
                 msg = await view.send(ctx, image)
             #self.igen.dc_fastmode(enable=False, img2img=False)
         out_imgpath = save_image_prompt(image, prompt)

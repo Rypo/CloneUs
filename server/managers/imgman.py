@@ -37,7 +37,7 @@ from cloneus import cpaths
 import config.settings as settings
 from cmds import flags as cmd_flags, transformers as cmd_tfms
 from utils.globthread import async_wrap_thread, stop_global_thread
-from views import redrawui
+from views import imageui
 
 bot_logger = settings.logging.getLogger('bot')
 model_logger = settings.logging.getLogger('model')
@@ -139,7 +139,7 @@ class DiffusionConfig:
             if v.bounds is not None:
                 lb, ub = v.bounds
             # These values are displayed as 0-100 for end-user simplicity
-            if k in ['strength', 'refine_strength', 'stage_mix']:
+            if k in ['strength', 'refine_strength', 'denoise_blend']:
                 default = int(default*100)
                 lb = int(lb*100)
                 ub = int(ub*100)
