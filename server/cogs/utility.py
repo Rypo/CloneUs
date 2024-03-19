@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands 
 
 import config.settings as settings
-from views import redrawui
+from views import games
 
 
 class Utility(commands.Cog):
@@ -55,7 +55,7 @@ class Utility(commands.Cog):
     @commands.command()
     async def tic(self, ctx: commands.Context):
         """Starts a tic-tac-toe game with yourself."""
-        await ctx.send('Tic Tac Toe: X goes first', view=redrawui.TicTacToe())
+        await ctx.send('Tic Tac Toe: X goes first', view=games.TicTacToe())
 
 
 
