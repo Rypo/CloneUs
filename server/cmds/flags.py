@@ -1,4 +1,5 @@
 import typing
+import discord
 from discord import app_commands
 from discord.ext import commands
 
@@ -70,38 +71,47 @@ class WordRuleFlags(commands.FlagConverter):
     weighted_words: app_commands.Transform[str, cmd_tfms.WordListTransformer]  = commands.flag(name='weighted_words', default=None, 
                                                                                                description='"words:weight" pairs. Comma seperated, CASE & " spa cing" sensitive')
 
-
-class DrawFlags(commands.FlagConverter):
-    # prompt: str = commands.flag(
-    #     description="A description of the image to be generated.")
-    steps: int = commands.flag(
-        default=None, description="Num of iterations to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).")
-    strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
-        default=80, description="How much to change input image. 0 = Change Nothing. 100=Change Entirely. Default=80")
-    neg_prompt: str = commands.flag(
-        default=None, description="Text description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).")
-    guidance: float = commands.flag(
-        default=10.0, description="Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).")
-    stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
-        default=None, description="Percent of `steps` for Base stage before Refine stage. ⬇Quality, ⬇Run Time. Defaults to None (turbo ignores).")
-
-class RedrawFlags(commands.FlagConverter):
-    # image_url: str = commands.flag(
-    #     description="Image URL. Square = Best results. 1024x1024 = ideal (512x512 = Turbo ideal).")
-    # prompt: str = commands.flag(
-    #     description="A description of the image to be generated.")
-    steps: int = commands.flag(
-        default=None, description="Num of iterations to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).")
-    #strength: commands.Range[float, 0, 100] = commands.flag(
-    strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
-        default=80, description="How much to change input image. 0 = Change Nothing. 100=Change Entirely. Default=80")
+class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+    #prompt: str
+    steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
+    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
-    neg_prompt: str = commands.flag(
-        default=None, description="Description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).")
-    guidance: float = commands.flag(
-        default=10.0, description="Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).")
-    stage_mix: app_commands.Transform[float, cmd_tfms.PercentTransformer]  = commands.flag( # commands.Range[float, 0, 100]
-        default=None, description="Percent of `steps` for Base stage before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).")
+    hdsteps: int = commands.flag(default=0, aliases=['refine_steps'])
+    strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength']) 
+    dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
+    fast: bool = commands.flag(default=False, aliases=['lq'],) 
+
+
+class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+    # imgfile: discord.Attachment
+    # prompt: str
+    steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
+    strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['str']) 
+    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    hdsteps: int = commands.flag(default=0, aliases=['refine_steps']) 
+    dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
+    fast: bool = commands.flag(default=False, aliases=['lq'],) 
+
+# class RedrawFlags(commands.FlagConverter):
+#     # image_url: str = commands.flag(
+#     #     description="Image URL. Square = Best results. 1024x1024 = ideal (512x512 = Turbo ideal).")
+#     # prompt: str = commands.flag(
+#     #     description="A description of the image to be generated.")
+#     steps: int = commands.flag(
+#         default=None, description="Num of iterations to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).")
+#     #strength: commands.Range[float, 0, 100] = commands.flag(
+#     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
+#         default=80, description="How much to change input image. 0 = Change Nothing. 100=Change Entirely. Default=80")
     
-    refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
-        default=30, description="Refinement stage alteration power. 0 = Alter Nothing. 100=Alter Everything. Default=30")
+#     neg_prompt: str = commands.flag(
+#         default=None, description="Description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).")
+#     guidance: float = commands.flag(
+#         default=10.0, description="Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).")
+#     denoise_blend: app_commands.Transform[float, cmd_tfms.PercentTransformer]  = commands.flag( # commands.Range[float, 0, 100]
+#         default=None, description="Percent of `steps` for Base stage before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).")
+    
+#     refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
+#         default=30, description="Refinement stage alteration power. 0 = Alter Nothing. 100=Alter Everything. Default=30")

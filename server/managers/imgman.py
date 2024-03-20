@@ -91,15 +91,17 @@ class DiffusionConfig:
     
     strength: float = 0.55
     negative_prompt: str = None
-    orient: typing.Literal['square','portrait'] = 'square'
-    img_dims: tuple[int, int]|list[tuple[int, int]] = (1024, 1024)
+    aspect: typing.Literal['square','portrait','landscape'] = 'square'
+    refine_steps: int = CfgItem(0, bounds=(0, 3))
+    refine_strength: float = CfgItem(0.3, bounds=(0.2, 0.4))
     denoise_blend: float = None
-    refine_strength: float = None
+    
+    img_dims: tuple[int, int]|list[tuple[int, int]] = (1024, 1024)
     refine_guidance_scale: float = None
     _ : KW_ONLY
     locked: InitVar[list[str]] = None
     
-    def __post_init__(self, locked):
+    def __post_init__(self, locked: list[str]):
         '''Assign field meta data to a CfgItem names <key>_'''
         # This might be a better solution -- https://docs.python.org/3/library/dataclasses.html#descriptor-typed-fields 
         if locked is None:
@@ -120,10 +122,22 @@ class DiffusionConfig:
         for k, v in self_copy.items():
             setattr(self, f'{k}', v)
         
+        # These are the vals that are not passed as arguments in command calls. 
+        self.metadata_keys = ['img_dims', 'refine_guidance_scale', 'locked']
     
     def lock(self, *args):
         for k in args:
             getattr(self, f'{k}_').locked = True
+
+    def get_defaults(self, only_usable:bool=True) -> dict:
+        defaults = {}
+        for k,v in self.to_dict().items():
+            if only_usable:
+                if k in self.metadata_keys or (v.default is None and v.locked):
+                    continue
+            defaults[k] = v.default
+        return defaults
+
 
     def to_dict(self):
         return {v.name: v for k,v in vars(self).items() if k.endswith('_')}
@@ -131,7 +145,7 @@ class DiffusionConfig:
     def to_md(self):
         md_text = ""
         for k,v in self.to_dict().items():
-            if v.default is None and v.locked:
+            if k in self.metadata_keys or (v.default is None and v.locked):
                 continue
             
             default = v.default
@@ -172,18 +186,19 @@ class DiffusionConfig:
         
         return dim_out
     
-    def get_dims(self, orient:typing.Literal['square','portrait']=None):
-        if orient is None:
-            orient = self.orient
+    def get_dims(self, aspect:typing.Literal['square','portrait', 'landscape']):
         
         dim_out = self.img_dims
         
         if isinstance(self.img_dims, list):
-            if orient == 'square':
+            if aspect == 'square':
                 dim_out = min(self.img_dims, key=lambda wh: abs(1 - wh[0]/wh[1]))
-            elif orient == 'portrait':
+            elif aspect == 'portrait':
                 dim_out = min(self.img_dims, key=lambda wh: wh[0]/wh[1])
-
+            elif aspect == 'landscape':
+                dim_out = max(self.img_dims, key=lambda wh: wh[0]/wh[1])
+            else:
+                raise ValueError(f'Unknown aspect {aspect!r}')
         return dim_out
 
 class OneStageImageGenManager:
@@ -308,7 +323,7 @@ class OneStageImageGenManager:
         
     
     @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, image=None, target_size=None):
+    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, refine_steps=None, strength=None, image=None, target_size=None):
         if self.global_seed is not None:
             #meval.seed_everything(self.global_seed)
             torch.manual_seed(self.global_seed)
@@ -322,55 +337,56 @@ class OneStageImageGenManager:
         if image is None:
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h,  width=w, **prompt_encodings).images[0] # , generator=self.generator
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings).images[0] # , generator=self.generator
             #imgs = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, num_images_per_prompt=4, **kwargs).images#[0]
             #return make_image_grid(imgs, 2, 2)
             print('(draw) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
             #release_memory()
             
             t2 = time.perf_counter()
-        t3 = t4 = t2 #time.perf_counter() # default in case skip
+        t3 = t4 = t2  # default in case skip
         if strength:
-            is_refine = strength <= 0.4 # Assume low strength = refinement, not regeneration.
-            min_effective_steps = 1#2 if is_refine else 1
-            
-            if num_inference_steps*strength < min_effective_steps:
-                steps = math.ceil(min_effective_steps/strength)
-                print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
-                num_inference_steps = steps
-            
-            if is_refine:
+            min_effective_steps = 1
+            if refine_steps > 0:
+                min_effective_steps = refine_steps
+                
                 print('Upscaling..')
                 image = self.upsampler.upscale(img=image, scale=1.5)
                 t3 = time.perf_counter()
                 print('(upscale) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
                 release_memory()
                 
-
-            # target_size defaults img_size 
-            # - https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py#L1325
+            if num_inference_steps*strength < min_effective_steps:
+                steps = math.ceil(min_effective_steps/strength)
+                print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
+                num_inference_steps = steps
+            # target_size defaults img_size
             image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
             print('(refine) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
             
             t4 = time.perf_counter()
+        
         release_memory()
         print(f'total: {t4-t0:.2f}s | prompt_embed: {t1-t0:.2f}s | T2I: {t2-t1:.2f}s | upscale: {t3-t2:.2f}s | refine: {t4-t3:.2f}s')
         return image
     
     @async_wrap_thread
-    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, orient:typing.Literal['square','portrait']=None, refine_strength:float=None, **kwargs) -> Image.Image:
-        fkwg = self.config.get_if_none(steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, refine_strength=refine_strength)
+    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, aspect:typing.Literal['square','portrait','landscape']=None, refine_steps:int=0, refine_strength:float=None, **kwargs) -> Image.Image:
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength, aspect=aspect)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
-        img_dims = self.config.get_dims(orient)
+        img_dims = self.config.get_dims(fkwg['aspect'])
         target_size = (img_dims[1], img_dims[0]) # h,w
         
         refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], target_size=target_size, strength=refine_strength)
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
+                              refine_steps=refine_steps, strength=refine_strength, target_size=target_size, )
+        
+        #call_kwargs = {'prompt':prompt, **fkwg, 'refine_steps':refine_steps, 'refine_strength':refine_strength}
         return image, fkwg
 
     @async_wrap_thread
-    def regenerate_image(self, image:Image.Image, prompt:str, steps:int=None, strength:float=None, negative_prompt:str=None, guidance_scale:float=None, **kwargs) -> Image.Image:
-        fkwg = self.config.get_if_none(steps=steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, strength=strength)
+    def regenerate_image(self, image:Image.Image, prompt:str, steps:int=None, strength:float=None, negative_prompt:str=None, guidance_scale:float=None, refine_steps:int=0, **kwargs) -> Image.Image:
+        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
         
         dim_out = self.config.nearest_dims(image.size)
@@ -378,9 +394,11 @@ class OneStageImageGenManager:
         image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
         
         strength = cmd_tfms.percent_transform(fkwg['strength'])
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], strength=strength, guidance_scale=fkwg['guidance_scale'], image=image)
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], strength=strength, 
+                              negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, image=image)
 
         #self.base.disable_vae_tiling()
+        #call_kwargs = {'prompt':prompt, **fkwg}
         return image, fkwg
 
 
@@ -517,15 +535,15 @@ class TwoStageImageGenManager:
                        steps: int = None, 
                        negative_prompt: str = None, 
                        guidance_scale: float = None, 
-                       orient: typing.Literal['square','portrait'] = None, 
+                       aspect: typing.Literal['square','portrait', 'landscape'] = None, 
                        denoise_blend: float|None = None, 
                        refine_strength: float = None, 
                        **kwargs) -> Image.Image:
         
-        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, denoise_blend=denoise_blend, refine_strength=refine_strength)
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, denoise_blend=denoise_blend, refine_strength=refine_strength, aspect=aspect)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
         
-        dim_out = self.config.get_dims(orient)
+        dim_out = self.config.get_dims(aspect)
         target_size = (dim_out[1], dim_out[0]) # h,w
 
         denoise_blend = cmd_tfms.percent_transform(fkwg['denoise_blend'])
@@ -646,7 +664,7 @@ class SDXLTurboManager(OneStageImageGenManager):
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = (512,512),
                 refine_strength = 0.,
-                locked=['guidance_scale', 'negative_prompt', 'orient', 'denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+                locked=['guidance_scale', 'negative_prompt', 'aspect', 'denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ), 
             offload=offload)
         
@@ -669,12 +687,12 @@ class SDXLManager(TwoStageImageGenManager):
                 steps = CfgItem(50, bounds=(40,60)),
                 guidance_scale = CfgItem(7.0, bounds=(5,15)), 
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
-                orient = CfgItem('square', locked=True),
+                aspect = CfgItem('square', locked=True),
                 img_dims = (1024,1024),
                 denoise_blend= CfgItem(None, bounds=(0.7, 0.9)),
-                refine_strength = CfgItem(0.3, bounds=(0.2, 0.4)),
+                #refine_strength = CfgItem(0.3, bounds=(0.2, 0.4)),
 
-                locked=['orient', 'refine_guidance_scale']
+                locked=['aspect', 'refine_guidance_scale']
             ),
             
             offload=offload
@@ -690,7 +708,7 @@ class DreamShaperXLManager(OneStageImageGenManager):
                 guidance_scale = CfgItem(2.0, locked=True),
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = [(1024,1024), (832,1216)],
-                refine_strength=CfgItem(0., bounds=(0.2, 0.4)),
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
                 locked=['guidance_scale', 'denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
             ),
             offload=offload,
@@ -707,9 +725,9 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
                 steps = CfgItem(6, bounds=(5,7)), # 4-6 step /  5 and 7
                 guidance_scale = CfgItem(1.5, bounds=(1.5,2.0)),
                 strength = CfgItem(0.6, bounds=(0.3, 0.9)),
-                img_dims = [(1024,1024), (832,1216)],
-                orient='portrait',
-                refine_strength=CfgItem(0., bounds=(0.2, 0.4)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                aspect='portrait',
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
                 locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ),
             offload=offload,
