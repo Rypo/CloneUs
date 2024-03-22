@@ -79,7 +79,7 @@ class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
     hdsteps: int = commands.flag(default=0, aliases=['refine_steps'])
-    strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength']) 
+    hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength']) 
     dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
 
@@ -91,7 +91,9 @@ class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['str']) 
     no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
     guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
-    hdsteps: int = commands.flag(default=0, aliases=['refine_steps']) 
+    aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
+    hdsteps: int = commands.flag(default=0, aliases=['refine_steps'])
+    hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength'])
     dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
 

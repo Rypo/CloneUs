@@ -223,7 +223,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             
             guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=0. Usually < 3.
-            strength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored if hdsteps=0.
+            hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored if hdsteps=0.
             dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
@@ -234,7 +234,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                                guidance_scale = flags.guide, 
                                aspect = flags.aspect, 
                                refine_steps = flags.hdsteps, 
-                               refine_strength = flags.strength, 
+                               refine_strength = flags.hdstrength, 
                                denoise_blend = flags.dblend, 
                                fast = flags.fast,
                                )
@@ -284,6 +284,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
             guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=0. Usually < 3.
+            hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored if hdsteps=0.
             dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
@@ -295,6 +296,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                                  guidance_scale = flags.guide, 
                                  aspect = flags.aspect, 
                                  refine_steps = flags.hdsteps, 
+                                 refine_strength = flags.hdstrength,
                                  denoise_blend = flags.dblend, 
                                  fast = flags.fast
                                  )
@@ -306,6 +308,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                      guidance_scale: float = None, 
                      aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                      refine_steps: int = 0,
+                     refine_strength: float = None,
                      denoise_blend: float = None, 
                      fast:bool=False):
         
@@ -321,9 +324,10 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         
         async with self.bot.writing_status(presense_done='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
-            image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, steps=steps, strength=strength, 
-                                                           negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                                                           aspect=aspect, refine_steps=refine_steps, denoise_blend=denoise_blend,)
+            image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, steps=steps, 
+                                                           strength=strength, negative_prompt=negative_prompt, 
+                                                           guidance_scale=guidance_scale, aspect=aspect, refine_steps=refine_steps,
+                                                           refine_strength=refine_strength, denoise_blend=denoise_blend,)
             
             #image_file = imgbytes_file(image, prompt)
             out_imgpath = save_image_prompt(image, prompt)

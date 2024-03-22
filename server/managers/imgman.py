@@ -56,6 +56,9 @@ def release_memory():
     gc.collect()
     torch.cuda.synchronize()
 
+def print_memstats(label:str):
+    print(f'({label}) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
+
 def torch_compile_flags(restore_defaults=False, verbose=False):
     # https://huggingface.co/docs/diffusers/tutorials/fast_diffusion#use-faster-kernels-with-torchcompile
     if verbose:
@@ -201,6 +204,13 @@ class DiffusionConfig:
                 raise ValueError(f'Unknown aspect {aspect!r}')
         return dim_out
 
+def calc_esteps(num_inference_steps:int, strength:float, min_effective_steps:int):
+    if num_inference_steps*strength < min_effective_steps:
+        steps = math.ceil(min_effective_steps/strength)
+        print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
+        num_inference_steps = steps
+    return num_inference_steps
+
 class OneStageImageGenManager:
     def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_callback:typing.Callable=None):
         self.is_compiled = False
@@ -323,7 +333,7 @@ class OneStageImageGenManager:
         
     
     @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, refine_steps=None, strength=None, image=None, target_size=None):
+    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None):
         if self.global_seed is not None:
             #meval.seed_everything(self.global_seed)
             torch.manual_seed(self.global_seed)
@@ -331,74 +341,96 @@ class OneStageImageGenManager:
             
         t0 = time.perf_counter()
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
-        t1 = time.perf_counter()
-        
-        t2 = t1 # default in case skip
-        if image is None:
+        t_pe = time.perf_counter()
+        t_main = t_pe # default in case skip
+        mlabel = '_2I'
+        # Txt2Img
+        if image is None: 
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings).images[0] # , generator=self.generator
-            #imgs = self.base(prompt=prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, negative_prompt=negative_prompt, num_images_per_prompt=4, **kwargs).images#[0]
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings).images[0] # , generator=self.generator, num_images_per_prompt=4
             #return make_image_grid(imgs, 2, 2)
-            print('(draw) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
+            t_main = time.perf_counter()
+            print_memstats('draw')
             #release_memory()
+            mlabel = 'T2I'
             
-            t2 = time.perf_counter()
-        t3 = t4 = t2  # default in case skip
-        if strength:
-            min_effective_steps = 1
-            if refine_steps > 0:
-                min_effective_steps = refine_steps
-                
-                print('Upscaling..')
-                image = self.upsampler.upscale(img=image, scale=1.5)
-                t3 = time.perf_counter()
-                print('(upscale) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
-                release_memory()
-                
-            if num_inference_steps*strength < min_effective_steps:
-                steps = math.ceil(min_effective_steps/strength)
-                print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
-                num_inference_steps = steps
-            # target_size defaults img_size
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
-            print('(refine) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
-            
-            t4 = time.perf_counter()
         
+        # Img2Img - not just else because could pass image with str=0 to just up+refine. But should never be image=None + strength
+        elif strength:
+            num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
+            t_main = time.perf_counter()
+            print_memstats('redraw')
+            mlabel = 'I2I'
+            
+        t_up = t_re = t_main  # default in case skip
+        # Upscale + Refine
+        if refine_steps > 0 and refine_strength: 
+            image = self.upsampler.upscale(img=image, scale=1.5)
+            t_up = time.perf_counter()
+            print_memstats('upscale')
+            release_memory()
+            
+            num_inference_steps = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)            
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
+            t_re = time.perf_counter()
+            print_memstats('refine')
+        
+        t_fi = time.perf_counter()
         release_memory()
-        print(f'total: {t4-t0:.2f}s | prompt_embed: {t1-t0:.2f}s | T2I: {t2-t1:.2f}s | upscale: {t3-t2:.2f}s | refine: {t4-t3:.2f}s')
+        
+        print(f'total: {t_fi-t0:.2f}s | prompt_embed: {t_pe-t0:.2f}s | {mlabel}: {t_main-t_pe:.2f}s | upscale: {t_up-t_main:.2f}s | refine: {t_re-t_up:.2f}s')
         return image
     
     @async_wrap_thread
-    def generate_image(self, prompt:str, steps:int=None, negative_prompt:str=None, guidance_scale:float=None, aspect:typing.Literal['square','portrait','landscape']=None, refine_steps:int=0, refine_strength:float=None, **kwargs) -> Image.Image:
+    def generate_image(self, prompt:str, 
+                       steps:int=None, 
+                       negative_prompt:str=None, 
+                       guidance_scale:float=None, 
+                       aspect:typing.Literal['square','portrait','landscape']=None, 
+                       refine_steps:int=0, 
+                       refine_strength:float=None, 
+                       **kwargs) -> Image.Image:
         fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength, aspect=aspect)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
         img_dims = self.config.get_dims(fkwg['aspect'])
         target_size = (img_dims[1], img_dims[0]) # h,w
         
-        refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
-                              refine_steps=refine_steps, strength=refine_strength, target_size=target_size, )
+        # We don't wanna run refine unless refine steps passed
+        refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength']) #if fkwg['refine_steps'] else 0
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], 
+                              guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, refine_strength=refine_strength, target_size=target_size, )
         
-        #call_kwargs = {'prompt':prompt, **fkwg, 'refine_steps':refine_steps, 'refine_strength':refine_strength}
         return image, fkwg
 
     @async_wrap_thread
-    def regenerate_image(self, image:Image.Image, prompt:str, steps:int=None, strength:float=None, negative_prompt:str=None, guidance_scale:float=None, refine_steps:int=0, **kwargs) -> Image.Image:
-        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps)
+    def regenerate_image(self, image:Image.Image, prompt:str, 
+                         steps:int=None, 
+                         strength:float=None, 
+                         negative_prompt:str=None, 
+                         guidance_scale:float=None, 
+                         aspect:typing.Literal['square','portrait','landscape']=None, 
+                         refine_steps:int=0, 
+                         refine_strength:float=None, 
+                         **kwargs) -> Image.Image:
+        
+        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
         
-        dim_out = self.config.nearest_dims(image.size)
+        # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
+        dim_out = self.config.nearest_dims(image.size) if aspect is None else self.config.get_dims(aspect)
         print('regenerate_image input size:', image.size, '->', dim_out)
         image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
         
         strength = cmd_tfms.percent_transform(fkwg['strength'])
-        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], strength=strength, 
-                              negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, image=image)
+        refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
+        image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], strength=strength, negative_prompt=fkwg['negative_prompt'], 
+                              guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, refine_strength=refine_strength, image=image) # target_size defaults img_size
 
         #self.base.disable_vae_tiling()
-        #call_kwargs = {'prompt':prompt, **fkwg}
+        # Don't want to fill with default value, but still want it in filledkwargs
+        fkwg.update(aspect=aspect)
         return image, fkwg
 
 
@@ -559,6 +591,7 @@ class TwoStageImageGenManager:
                          strength: float = None, 
                          negative_prompt: str = None, 
                          guidance_scale: float = None, 
+                         aspect: typing.Literal['square','portrait', 'landscape'] = None, 
                          denoise_blend: float|None = None, 
                          refine_strength: float = None, 
                          **kwargs) -> Image.Image:
@@ -566,7 +599,8 @@ class TwoStageImageGenManager:
         fkwg = self.config.get_if_none(steps=steps, strength=strength, guidance_scale=guidance_scale, negative_prompt=negative_prompt, denoise_blend=denoise_blend, refine_strength=refine_strength)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
 
-        dim_out = self.config.nearest_dims(image.size)
+        
+        dim_out = self.config.nearest_dims(image.size) if aspect is None else self.config.get_dims(aspect)
         print('regenerate_image input size:', image.size, '->', dim_out)
         image = image.resize(dim_out)
         
@@ -738,19 +772,19 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
-        'manager': SDXLTurboManager(),
+        'manager': SDXLTurboManager,
         'desc': 'Turbo SDXL (Sm, fast)'
     },
     'sdxl': {
-        'manager': SDXLManager(),
+        'manager': SDXLManager,
         'desc':'SDXL (Lg, slow)'
     },
     'dreamshaper_turbo': {
-        'manager': DreamShaperXLManager(),
+        'manager': DreamShaperXLManager,
         'desc': 'DreamShaper XL2 Turbo (M, fast)'
     },
     'juggernaut_lightning': {
-        'manager': JuggernautXLLightningManager(offload=True),
+        'manager': JuggernautXLLightningManager,
         'desc': 'Juggernaut XL Lightning (M, fast)'
     },
 }
