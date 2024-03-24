@@ -210,7 +210,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
     @commands.hybrid_command(name='draw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _draw(self, ctx: commands.Context, prompt:str,  flags: cmd_flags.DrawFlags):
+    async def _draw(self, ctx: commands.Context, prompt:str, *, flags: cmd_flags.DrawFlags):
         """
         Generate an image from a text prompt description.
 
@@ -269,7 +269,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: str, flags: cmd_flags.RedrawFlags):
+    async def _redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: str, *, flags: cmd_flags.RedrawFlags):
         """
         Remix an image from a text prompt and image.
 
