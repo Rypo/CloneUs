@@ -42,9 +42,9 @@ class BotUs(commands.Bot):
 
         # This copies the global commands over to your guild.
         self.tree.copy_global_to(guild=settings.GUILDS_ID)
-        await self.tree.sync(guild=settings.GUILDS_ID)
+        await self.tree.sync() #await self.tree.sync(guild=settings.GUILDS_ID)
 
-    async def sync(self, guild:discord.Guild, spec: typing.Literal["~", "*", "^"] = None):
+    async def gsync(self, guild:discord.Guild, spec: typing.Literal["~", "*", "^"] = "*"):
         # https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#sync-command-example
         if spec == "~":
             synced = await self.tree.sync(guild=guild)
@@ -81,6 +81,16 @@ class BotUs(commands.Bot):
                     await self.reload_extension(f'{extdir}.{ext_file.stem}')
                 else:
                     raise ValueError('Unknown state:', state)
+
+    async def add_temporary_reaction(self, message: discord.Message, emoji:str, delete_after:float=60.0):
+        await message.add_reaction(emoji)
+        def check(reaction, user):
+            return not user.bot and str(reaction.emoji) == emoji 
+        try:
+            reaction, user = await self.wait_for('reaction_add', timeout=delete_after, check=check)
+        except asyncio.TimeoutError:
+            print('No response in time. Removing')
+            await message.remove_reaction(emoji, self.user)
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
         """The event triggered when an error is raised while invoking a command.
@@ -140,12 +150,12 @@ def main():
         os.environ.pop('EAGER_LOAD')
 
 
-    @bot.command(name='sync')
-    @commands.guild_only()
+    @bot.command(name='gsync')
+    #@commands.guild_only()
     @commands.is_owner()
     async def sync_treecmds(ctx: commands.Context, spec: typing.Literal["~", "*", "^"] = None) -> None:
         
-        synced = await bot.sync(ctx.guild, spec=spec)
+        synced = await bot.gsync(ctx.guild, spec=spec)
         
         synced_md = '\n- ' + '\n- '.join([s.name for s in synced])
         await ctx.send(f"Synced {len(synced)} commands {'globally' if spec is None else 'to the current guild.'}{synced_md}")
