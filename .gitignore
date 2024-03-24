@@ -9,7 +9,8 @@ libs
 # train run files
 runs/**
 wandb
-
+# extra models
+extras/models/*
 # Discord server
 server/logs
 server/appcmds
