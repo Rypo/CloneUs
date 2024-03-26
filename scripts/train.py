@@ -39,15 +39,23 @@ def verify_config(cfg):
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
     
-    if cfg.flashattn_lib == 'unsloth' and cfg.quant_method != 'bnb4':
-        raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
+    if cfg.flashattn_lib == 'unsloth': 
+        if cfg.quant_method != 'bnb4':
+            raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
+        if cfg.lora_use_dora:
+            raise ValueError('Unsloth does not support DoRA training. Set lora_use_dora: false to use unsloth')
+        if cfg.lora_target_modules == 'all-linear':
+            print('Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
+            cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            
 
 def main():
     # Decent example for HfArgumentParser
     # https://github.com/huggingface/trl/blob/main/examples/scripts/sft.py
     
     cfg = OmegaConf.load(cpaths.ROOT_DIR/'config'/'train_config.yaml')
-    
+    verify_config(cfg)
+
     model_map = {
         'NousResearch/Llama-2-7b-hf':'llama2-7b-i4', # foundation
         'mistralai/Mistral-7B-v0.1':'mistral-7b-i4', # foundation
@@ -88,8 +96,6 @@ def main():
         peft_config = LoraConfig.from_pretrained(cfg.resume_from_checkpoint)
         peft_config.inference_mode = False
     
-    verify_config(cfg)
-
         
     if cfg.dataset.name == 'chunkh': # append hours_between_session
         hbs = cfg.dataset.hours_between_sessions

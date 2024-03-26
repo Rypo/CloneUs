@@ -156,9 +156,12 @@ def create_resumable_save(trainer):
 
 
 def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens, attn_implementation, custom_scheduler):
-    lora_modules_dstr = ''.join(
-        [m[0] if m.endswith('proj') else ''.join([n[0] for n in m.split('_')]).title() 
-        for m in peft_config.target_modules])
+    if peft_config.target_modules == 'all-linear':
+        lora_modules_dstr = 'AllLinear'
+    else:
+        lora_modules_dstr = ''.join(
+            [m[0] if m.endswith('proj') else ''.join([n[0] for n in m.split('_')]).title() 
+            for m in peft_config.target_modules])
     
     lora_layers_dstr = f'_l{lay[0]}-{lay[-1]}' if (lay := peft_config.layers_to_transform) is not None else ''
 
