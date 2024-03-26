@@ -33,7 +33,7 @@ from transformers import (
 )
 import transformers
 
-from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig
+from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
 
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
@@ -249,9 +249,14 @@ def load_any_inference(model_savedir, **kwargs):
         kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
         return load_gptq(model_savedir, **kargs)
     else:
-        defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+        quant_method = 'aqlm' if 'aqlm' in dirstr else 'bnb4'
+        defaults = dict(quant_method=quant_method, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
         kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-        return load_unmerged(model_savedir, **kargs)
+        return load_peft(model_savedir, **kargs)
+    # else:
+    #     defaults = dict(quant_method='bnb4', dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+    #     kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+    #     return load_unmerged(model_savedir, **kargs)
         #raise ValueError('Unable to determine model type from model_savedir path')
 
 def _overide_embeddings(model, checkpoint_dirpath):
@@ -277,8 +282,7 @@ def load_unmerged_customtoks(tokenizer, checkpoint_dirpath,  quant_config, dtype
         device_map="auto",
         # CANNOT USE: use_safetensors=True, since I stopped saving the full model
         torch_dtype=dtype,
-        attn_implementation=attn_implementation, # ["eager", "sdpa", "flash_attention_2"]
-        #use_flash_attention_2=use_flash,
+        attn_implementation=attn_implementation, 
     )
 
     model.resize_token_embeddings(len(tokenizer))
@@ -291,45 +295,72 @@ def load_unmerged_customtoks(tokenizer, checkpoint_dirpath,  quant_config, dtype
 
     return model, tokenizer
 
-def load_unmerged(checkpoint_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> typing.Tuple[
-    (transformers.LlamaForCausalLM | transformers.MistralForCausalLM), transformers.PreTrainedTokenizerFast]:
-    if not torch.cuda.is_bf16_supported():
-        return load_unmerged_lowrsc(checkpoint_dirpath, quant_config=quant_config, dtype=dtype, attn_implementation=attn_implementation)
-    if quant_config is None:
+def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PeftModelForCausalLM, transformers.PreTrainedTokenizerFast]:
+    t0=time.perf_counter()
+    quant_config = None
+    if quant_method=='bnb4':
         quant_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16
         )
+    pt_kwargs = dict(
+        low_cpu_mem_usage=True,
+        quantization_config=quant_config,
+        device_map="auto",
+        torch_dtype=dtype,
+        attn_implementation=attn_implementation,
+    )
+    if pt_kwargs['quantization_config'] is None:
+        pt_kwargs.pop('quantization_config')
+    
+    model = AutoPeftModelForCausalLM.from_pretrained(checkpoint_dirpath, **pt_kwargs,)
+    
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    print(f'load_peft: {time.perf_counter()-t0:0.2f}s')
+    return model, tokenizer
+
+def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> typing.Tuple[
+    (transformers.LlamaForCausalLM | transformers.MistralForCausalLM), transformers.PreTrainedTokenizerFast]:
+    t0=time.perf_counter()
+    
+    if not torch.cuda.is_bf16_supported():
+        return load_unmerged_lowrsc(checkpoint_dirpath, quant_config=quant_method, dtype=dtype, attn_implementation=attn_implementation)
+    
+    quant_config = None
+    
+    if quant_method=='bnb4':
+        quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
         
     
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
 
-    #if len(tokenizer) > 32000:
-    #    return load_unmerged_customtoks(tokenizer, checkpoint_dirpath, quant_config, dtype=dtype, attn_implementation=attn_implementation)
-        
-    model: transformers.PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-        checkpoint_dirpath,
+    pt_kwargs = dict(
         low_cpu_mem_usage=True,
         quantization_config=quant_config,
         device_map="auto",
         # CANNOT USE: use_safetensors=True, since I stopped saving the full model
         torch_dtype=dtype,
-        attn_implementation=attn_implementation, # ["eager", "sdpa", "flash_attention_2"]
-        #use_flash_attention_2=use_flash,
+        attn_implementation=attn_implementation,
     )
-
+    if quant_config is None:
+        pt_kwargs.pop('quantization_config')
+    
+    model: transformers.PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+        checkpoint_dirpath,
+        **pt_kwargs
+    )
     #.to_bettertransformer()
     
     if not model.active_adapters():
+        print('No active adapters auto loaded. Attempting manual')
         lora_config = PeftConfig.from_pretrained(checkpoint_dirpath)
         model.add_adapter(lora_config)
-    # NOTE: Unless use dutil.get_tokenizer with **NOT** set the pad id, or set padside=right
-    #tokenizer = dutil.get_tokenizer(model.config._name_or_path)
+        #model = PeftModel.from_pretrained(model, checkpoint_dirpath)
     
     warn_tokenizer(tokenizer, attn_implementation)
-    
+    print(f'load_unmerged: {time.perf_counter()-t0:0.2f}s')
     return model, tokenizer
 
 def load_unmerged_lowrsc(checkpoint_dirpath, quant_config=None, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="sdpa") -> typing.Tuple[

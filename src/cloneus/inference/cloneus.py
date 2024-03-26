@@ -659,22 +659,24 @@ class Cloneus:
         return trunc_input_text
 
     @torch.inference_mode()
-    def base_generate(self, input_text:str|list[str], sys_prompt:str=None) -> tuple[str, str, int, int]:        
-        adapters = self.model.active_adapters()
-        self.model.disable_adapters()
-
+    def base_generate(self, input_text:str|list[str], sys_prompt:str=None) -> tuple[str, str, int, int]:
+        # adapters = self.model.active_adapters()#()
+        # self.model.disable_adapters()
+        # TODO: Function for base/cloneus hybrid
+        # - just user/assistant tags on a trained model. Surprisingly, sort of works to have AI style responsiveness but with custom vernacular
         chat_history = [input_text] if isinstance(input_text, str) else input_text
         trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
         
         inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True)
         input_len = inputs.pop('length')[0].item()
-        
-        output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
+        with self.model.disable_adapter():
+            output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
+        #output = base_model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
         out_text = self.base_tokenizer.decode(out_tokens, skip_special_tokens=True)
         
-        self.model.set_adapter(adapters)
+        #self.model.set_adapter(adapters)
         
         return trunc_input_text, out_text, input_len, output_len
     
@@ -682,10 +684,10 @@ class Cloneus:
 
     @torch.inference_mode()
     def base_stream_generate(self, input_text:str|list[str], sys_prompt:str=None):
+        #adapters = self.model.active_adapters()
+        #self.model.disable_adapters()
+        #base_model: PeftModel = self.model.get_base_model()
         
-        adapters = self.model.active_adapters()
-        self.model.disable_adapters()
-
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
@@ -696,14 +698,15 @@ class Cloneus:
         input_len = inputs.pop('length')[0].item()
 
         genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
-        thread = Thread(target=self.model.generate, kwargs=genkwargs)
-        thread.start()
-        generated_text = ""
-        for new_text in streamer:
-            generated_text += new_text
-            yield new_text
+        with self.model.disable_adapter():
+            thread = Thread(target=self.model.generate, kwargs=genkwargs)
+            thread.start()
+            generated_text = ""
+            for new_text in streamer:
+                generated_text += new_text
+                yield new_text
         
         output_len = self.base_tokenizer(generated_text, return_length=True).length
 
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
-        self.model.set_adapter(adapters)
+        #self.model.set_adapter(adapters)
