@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 from dotenv import load_dotenv
 import torch
 from transformers import GPTQConfig,BitsAndBytesConfig
-from peft import LoraConfig
+from peft import LoraConfig, LoftQConfig
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
 import cloneus.training.trainer as mtrain
@@ -38,6 +38,9 @@ def verify_config(cfg):
         for dispname, fname in roles.author_to_fname.items():
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
+    
+    if cfg.flashattn_lib == 'unsloth' and cfg.quant_method != 'bnb4':
+        raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
 
 def main():
     # Decent example for HfArgumentParser
@@ -45,65 +48,46 @@ def main():
     
     cfg = OmegaConf.load(cpaths.ROOT_DIR/'config'/'train_config.yaml')
     
-    custom_token_map = tokenization.author_special_tokens(cfg.custom_tokens, pad_vocab_to=cfg.pad_vocab_to) if cfg.custom_tokens else None
-
     model_map = {
-        'NousResearch/Llama-2-7b-hf':'llama2-7b-i4', 
-        'mistralai/Mistral-7B-v0.1':'mistral-7b-i4',
-        'mistralai/Mistral-7B-Instruct-v0.1':'mistral-inst-v01-7b-i4',
-        'mistralai/Mistral-7B-Instruct-v0.2':'mistral-inst-v02-7b-i4',
-        'teknium/OpenHermes-2.5-Mistral-7B':'mistral-inst-OpenHermes2.5',
-        'NousResearch/Llama-2-13b-hf':'llama2-13b-i4', 
-        'TheBloke/Llama-2-13B-GPTQ':'llama2-13b-gptq',
-        'TinyLlama/TinyLlama-1.1B-Chat-v1.0':'tinyllama1b-chat-v1',
-        'NousResearch/Nous-Hermes-2-SOLAR-10.7B':'solar-10b-inst-hermes2',
+        'NousResearch/Llama-2-7b-hf':'llama2-7b-i4', # foundation
+        'mistralai/Mistral-7B-v0.1':'mistral-7b-i4', # foundation
+        'mistralai/Mistral-7B-Instruct-v0.1':'mistral-inst-v01-7b-i4', # instruct
+        'mistralai/Mistral-7B-Instruct-v0.2':'mistral-inst-v02-7b-i4', # instruct
+        'teknium/OpenHermes-2.5-Mistral-7B':'mistral-inst-OpenHermes2.5', # chatml
+        'NousResearch/Llama-2-13b-hf':'llama2-13b-i4', # foundation
+        'TheBloke/Llama-2-13B-GPTQ':'llama2-13b-gptq', # foundation
+        'TinyLlama/TinyLlama-1.1B-Chat-v1.0':'tinyllama1b-chat-v1', # chat (Zephyr)
+        'NousResearch/Nous-Hermes-2-SOLAR-10.7B':'solar-10b-inst-hermes2', # chatml
+        'ISTA-DASLab/Mixtral-8x7b-AQLM-2Bit-1x16-hf':'mixtral-8x7b-aqlm-2bit', # foundation
+        'ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf': 'mixtral-inst-8x7b-aqlm-2bit', # instruct
+        'NousResearch/Nous-Hermes-2-Mistral-7B-DPO': 'mistral-7b-hermes2-dpo' # chatml
         # Add aliases for new models here
     }
-    
+    # https://huggingface.co/NousResearch/Hermes-2-Pro-Mistral-7B
     model_name = model_map.get(cfg.model_id, cfg.model_id.split('/')[-1])  
     
-    
-    if 'gptq' in model_name:
-        # https://huggingface.co/docs/optimum/llm_quantization/usage_guides/quantization
-        quant_config = GPTQConfig(bits=4, use_exllama=False) # , use_cuda_fp16=True
-    else: 
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
-    
+    target_modules = (cfg.lora_target_modules if isinstance(cfg.lora_target_modules, str) else list(cfg.lora_target_modules)) # all-linear
     peft_config = LoraConfig(
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
-        target_modules=list(cfg.lora_target_modules),
+        target_modules=target_modules, 
         lora_dropout=cfg.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
         inference_mode = False,
         use_rslora=cfg.lora_use_rslora,
+        init_lora_weights=('loftq' if cfg.lora_use_loftq else True),
         #loftq_config=
+        use_dora=cfg.lora_use_dora
     )
-    if custom_token_map: 
-        # this should now be handled automatically as of peft 0.8.0
-        # https://github.com/huggingface/peft/releases/tag/v0.8.0
-        for modu in ["embed_tokens", "lm_head"]:
-            if modu not in peft_config.target_modules:
-                peft_config.target_modules.add(modu)
-            #if modu not in peft_config.modules_to_save: peft_config.modules_to_save.append(modu)
-        #peft_config.modules_to_save = ["embed_tokens", "lm_head"]
     
+    # This does nothing currently.
+    num_custom_tokens = tokenization.apply_special_tokens(tokenizer=None, custom_tokens=cfg.custom_tokens, pad_vocab_to=cfg.pad_vocab_to)
+
     if cfg.resume_from_checkpoint is not None:
         peft_config = LoraConfig.from_pretrained(cfg.resume_from_checkpoint)
         peft_config.inference_mode = False
-
-
-    tokenizer = tokenization.get_tokenizer(cfg.model_id, padding_side=cfg.padding_side)
     
-    num_custom_tokens = tokenizer.add_special_tokens(custom_token_map) if custom_token_map else None
-
-
     verify_config(cfg)
 
         
@@ -127,7 +111,7 @@ def main():
         warmup_ratio=cfg.warmup_ratio,
         warmup_steps=cfg.warmup_steps,
         learning_rate=cfg.learning_rate,
-        save_strategy=('epoch' if isinstance(cfg.dataset.hours_between_sessions, int) else 'steps'),
+        save_strategy=('epoch' if isinstance(cfg.dataset.hours_between_sessions, int) else 'steps'), #-- TODO Think about better solution
         save_steps=cfg.save_steps,
         #eval_steps=cfg.eval_steps,
         logging_steps=(5 if cfg.use_sft_trainer else cfg.logging_steps), 
@@ -139,16 +123,24 @@ def main():
         group_by_length=(cfg.group_by_length and not cfg.use_sft_trainer),
         weight_decay=cfg.weight_decay,
         custom_scheduler=cfg.custom_scheduler,
+        logging_first_step=True,
         #disable_tqdm = cfg.use_sft_trainer # honestly, even it's wrong, still nice to have
         #torch_compile=True,
     )
-
+    
+    model, tokenizer = mllm.model_tokenizer_from_config(peft_config, cfg)
+    
 
     cfg.ctx_len = cfg.chunk_size
-    cfg.has_custom_tokens=(custom_token_map is not None)
+    cfg.has_custom_tokens=(num_custom_tokens is not None and num_custom_tokens > 0)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
     cfg.fprompt = None
     cfg.base_dir = args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
+
+    if cfg.instruct_model:
+        name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
+        cfg.prompt.name_mapping = name_mapping
+        cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
 
     data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
 
@@ -158,71 +150,31 @@ def main():
         dset = dataset.dataset_ungrouped(data_file_path, tokenizer, cfg, text_only=False)
     elif cfg.dataset.name == 'chunk_maxlen':
         dset = dataset.dataset_all_chunks(data_file_path, tokenizer, cfg)
-
-    elif cfg.instruct_model:
-        name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
-        cfg.prompt.name_mapping = name_mapping
-        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
-        cfg.fprompt = fprompt
-
-
-        if cfg.custom_chat_template:
-            dset = dataset.author_role_dataset(data_file_path, tokenizer, cfg, cfg.custom_chat_template)
-        else:
-            dset = dataset.instruct_dataset_timechunks(data_file_path, tokenizer, cfg, has_system=None)
-            
+    elif cfg.tune_type in ['chatml', 'chat']:
+        dset = dataset.author_role_dataset(data_file_path, tokenizer, cfg)
+    elif cfg.tune_type == 'instruct':
+        dset = dataset.instruct_dataset_timechunks(data_file_path, tokenizer, cfg, has_system=None)    
     else:
         dset = dataset.dataset_timechunk(data_file_path, tokenizer, cfg, text_only=False)
     
     
-    
-    callbacks = [] # [GenerationCallback(20), FullSaveCallback]
-    
-    if cfg.flashattn_lib=='huggingface':
-        model,peft_config = mllm.get_model(cfg.model_id, peft_config, quant_config, tokenizer, 
-                                           custom_tokens_map=custom_token_map, attn_implementation=cfg.attn_implementation, lora_target_linear=cfg.lora_target_linear)
-        
-    elif cfg.flashattn_lib=='unsloth':
-        print('before:',peft_config)
-        model, tokenizer = mllm.get_unsloth(cfg.model_id, peft_config, max_seq_length=cfg.chunk_size)
-        if cfg.padding_side and cfg.padding_side != tokenizer.padding_side:
-            print(f'WARNING. Unsloth padding_side ({tokenizer.padding_side}) != config padding_side ({cfg.padding_side}). Overriding with padding_side={cfg.padding_side}.')
-            tokenizer.padding_side = cfg.padding_side
-        
-        if tokenizer.pad_token_id == tokenizer.eos_token_id:
-            print('WARNING. PAD = EOS. Overriding.')
-            tokenizer.pad_token_id = tokenizer.unk_token_id
-        
-        # TODO: look into ~4-7gb higher vRAM usage after changing padding_side=right -> padding_side=left
-        # https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side
-        
-    else:
-        print('Defaulting to no flash attention')
-        model,peft_config = mllm.get_model(cfg.model_id, peft_config, quant_config, tokenizer, 
-                                           custom_tokens_map=custom_token_map, attn_implementation=None, lora_target_linear=cfg.lora_target_linear)
-            
-
-    if tokenizer.padding_side != 'left':
-        print('WARNING. padding_side = right. You know what you doing?')
-
-    if cfg.custom_chat_template:
-        print('Using custom chat template')
-        tokenizer.chat_template = cfg.custom_chat_template
     
     if cfg.resume_from_checkpoint is not None:
         load_model_safetensors(model, os.path.join(cfg.resume_from_checkpoint, 'model.safetensors'))
 
     #assert not peft_config.inference_mode and not model.config.use_cache and model.training, "Peft is not training or cache enabled"
     #model = model.to(torch.bfloat16)#.to_bettertransformer()
+    
+    callbacks = [] # [GenerationCallback(20), FullSaveCallback]
     if cfg.use_sft_trainer:
         trainer = mtrain.get_sft_trainer(model, dset, tokenizer, args, peft_config, callbacks=callbacks, max_packed_seqlength=cfg.chunk_size)
     else:
-        trainer = mtrain.get_trainer(model, dset, tokenizer, args, callbacks=callbacks)#, collator_pad_multiple=8) # TODO: reenable?
+        trainer = mtrain.get_trainer(model, dset, tokenizer, args, callbacks=callbacks)
 
 
     write_first_batches(trainer, batchsample_dir='_tmp')
 
-    if custom_token_map:
+    if num_custom_tokens:
         tokenization.save_embeddings(model, args.output_dir)
 
     safe_train(trainer, cfg.resume_from_checkpoint)
