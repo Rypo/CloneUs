@@ -99,7 +99,7 @@ class AICore(commands.Cog):
         self.cleaner.cancel()
         #self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         await self.bot.remove_cog('TextGen')
-        
+        release_memory()
         globthread.stop_global_thread()
 
 
@@ -191,7 +191,7 @@ class AICore(commands.Cog):
         #if not self.message_caches[thread.id]
         await thread.join()
         if thread.starter_message:
-            self.msgmgr.add_message(thread.starter_message)
+            await self.msgmgr.add_message(thread.starter_message)
         #await thread.send(f'found thread: {thread.id}, cat: {thread.category}, members: {membernames}, messages: {self.message_caches[thread.id]}')
 
     
@@ -247,3 +247,4 @@ async def setup(bot):
     load_nowait = bool(os.getenv('EAGER_LOAD',False))
     
     await bot.add_cog(AICore(bot, load_nowait=load_nowait))
+    #await bot.sync(guild=settings.GUILDS_ID, spec="*")
