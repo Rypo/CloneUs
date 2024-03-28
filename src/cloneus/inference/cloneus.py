@@ -178,10 +178,12 @@ class Cloneus:
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
 
         self._is_instruct_model = self.tokenizer.chat_template is not None
-        self.has_sysprompt = self.tokenizer.use_default_system_prompt
+        # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
+        self.has_sysprompt = self.tokenizer.use_default_system_prompt or self.config.get('tune_type') == 'chatml' 
         self._use_sysprompt = self.has_sysprompt and not self.config.prompt.append_msg
         
-        print(self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, 'Instruct:', self._is_instruct_model, 'has_system:',self.has_sysprompt, 'use_system:',self._use_sysprompt, 'chat:', self._is_chat_model )
+        print(self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, 
+              f'Instruct: {self._is_instruct_model}, has_system: {self.has_sysprompt} (use: {self._use_sysprompt}), chat: {self._is_chat_model}')
 
         self.stop_criteria = None if (self._is_instruct_model or '</s>' in self.postfix) else [
             genconfig.NewLineTokensCriteria(self.tokenizer('\n\n', add_special_tokens=False, return_tensors='pt')['input_ids'][0,1:].to(0))]
