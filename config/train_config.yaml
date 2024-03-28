@@ -11,14 +11,17 @@ sample_output:
 model_id: teknium/OpenHermes-2.5-Mistral-7B
 # model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # model_id: NousResearch/Nous-Hermes-2-SOLAR-10.7B
+# model_id: ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf
 
-model_type: MistralForCausalLM # LlamaForCausalLM
+model_type: MistralForCausalLM # LlamaForCausalLM, MistralForCausalLM, MixtralForCausalLM
 instruct_model: true
+tune_type: chatml # foundation, instruct, chat, chatml 
+quant_method: bnb4 # bnb4, aqlm, gptq
 
-flashattn_lib: unsloth # huggingface
+flashattn_lib: unsloth # huggingface, unsloth
 attn_implementation: flash_attention_2 # flash_attention_2, sdpa, eagar
 
-padding_side: right # left
+padding_side: right # left, right
 
 # Upper token limit on chunk size. Spillover will be placed in a new group.
 chunk_size: 8192
@@ -30,8 +33,8 @@ group_by_length: true
 
 num_epochs: 3
 learning_rate: 0.0002 
-lr_scheduler: cosine # constant_with_warmup
-custom_scheduler:  # warmup_const_cosine
+lr_scheduler: cosine # cosine, linear, constant, constant_with_warmup
+custom_scheduler: # warmup_const_cosine # to enable, needs lr_scheduler: linear
 
 dataset:
   name: chunkh # chunkh135
@@ -72,9 +75,11 @@ lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.0 # Use 0 for unsloth optimizations to take effect
 lora_use_rslora: false # More important for high r (>32) -- https://arxiv.org/abs/2312.03732
+lora_use_loftq: false
+lora_use_dora: false # significant improvement for r=8, but slower + no unsloth support -- https://arxiv.org/abs/2402.09353
 lora_target_linear: true
 lora_fan_in_fan_out:
-lora_target_modules:
+lora_target_modules: # "all-linear"
   - gate_proj
   - down_proj
   - up_proj
@@ -98,10 +103,10 @@ fp16: false
 tf32: true
 
 special_tokens:
-  bos_token: "<s>"
+  bos_token: "<|im_start|>"
   eos_token: "<|im_end|>" # "</s>"
   unk_token: "<unk>"
-  pad_token: "<unk>"
+  pad_token: "</s>"
 
 pad_vocab_to:
 custom_tokens:
