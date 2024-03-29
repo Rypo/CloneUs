@@ -1,5 +1,6 @@
 import gc
 import os
+import datetime
 import functools
 import math
 import torch
@@ -164,14 +165,17 @@ def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens
             for m in peft_config.target_modules])
     
     lora_layers_dstr = f'_l{lay[0]}-{lay[-1]}' if (lay := peft_config.layers_to_transform) is not None else ''
-
-    schedule_dstr = (args.lr_scheduler_type if custom_scheduler is None else custom_scheduler)
+    schd_abbrs = {'cosine':'cos', 'linear':'lin', 'constant':'const', 'constant_with_warmup':'constwu'}
+    schedule_dstr = (schd_abbrs.get(args.lr_scheduler_type,args.lr_scheduler_type) if custom_scheduler is None else custom_scheduler)
 
     custom_token_dstr = f'ctk{n_custom_tokens}' if n_custom_tokens is not None else ''
 
     warmup_dstr = f'-wu{args.warmup_ratio or args.warmup_steps}' #if 'warmup' in schedule_dstr else ''
 
+    tnow = datetime.datetime.now().strftime('%Y%m%dT%H%M%S') # YYYYmmddTHHMMSS
+
     args.output_dir = args.output_dir.format(
+        tnow=tnow,
         base_outdir=base_outdir,
         chunksize=chunk_size, 
         ctk_pad=custom_token_dstr, 
@@ -179,7 +183,7 @@ def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens
         warmup=warmup_dstr, 
         lora_a=peft_config.lora_alpha, 
         lora_r=peft_config.r, 
-        lora_dropout=peft_config.lora_dropout, 
+        #lora_dropout=peft_config.lora_dropout, 
         lora_modules=lora_modules_dstr,
         lora_layers=lora_layers_dstr
     )
@@ -213,7 +217,7 @@ def create_args(base_outdir, peft_config: LoraConfig, chunk_size=512,  n_custom_
         warmup_steps = 0
     
     batch_size = kwargs.pop('batch_size', 4)
-
+    
     args = TrainingArguments(
         num_train_epochs=kwargs.pop('num_train_epochs', 3),
         per_device_train_batch_size=batch_size,
@@ -230,7 +234,7 @@ def create_args(base_outdir, peft_config: LoraConfig, chunk_size=512,  n_custom_
         fp16=kwargs.pop('fp16', False), # https://huggingface.co/docs/transformers/perf_train_gpu_one#mixed-precision-training
         tf32=kwargs.pop('tf32', True), # add (IMPLICATIONS WITH BF16,gradaccum: https://github.com/huggingface/transformers/issues/14608#issuecomment-1004392537 )
         logging_steps=kwargs.pop('logging_steps', 5),
-        output_dir='{base_outdir}/cnk{chunksize}{ctk_pad}-{scheduler}{warmup}-lora_a{lora_a}_r{lora_r}_d{lora_dropout}_{lora_modules}{lora_layers}', # -sft256
+        output_dir='{base_outdir}/{tnow}_cnk{chunksize}{ctk_pad}-{scheduler}{warmup}--a{lora_a}r{lora_r}_{lora_modules}{lora_layers}', # -sft256
         optim=kwargs.pop('optim', 'paged_adamw_32bit'),#'paged_adamw_8bit',# #"adamw_hf"
         max_grad_norm=kwargs.pop('max_grad_norm', 0.3),
         warmup_ratio=warmup_ratio,#kwargs.pop('warmup_ratio', 0.00),
