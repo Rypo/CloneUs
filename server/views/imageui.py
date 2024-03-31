@@ -62,22 +62,23 @@ class DrawUIView(discord.ui.View):
 
         self.is_redraw = 'imgfile' in self.kwargs
         
-        default_auto = (self.is_redraw and flags.aspect is None)
+        # default_auto = (self.is_redraw and flags.aspect is None)
         
-        if self.is_redraw:
-            self.aspect_select.add_option(label='auto', description=f'Auto (best match)', emoji='💠', default=default_auto)
+        # if self.is_redraw:
+        #     self.aspect_select.add_option(label='auto', description=f'Auto (best match)', emoji='💠', default=default_auto)
         
-        for soption in ['🔲 square (1:1)', '📱 portrait (13:19)', '🖼️ landscape (19:13)']:
-            emoji, label, ar = soption.split()
-            is_default = not default_auto and self.kwargs['aspect']==label
-            self.aspect_select.add_option(label=label, description=f'{label.title()} {ar}', emoji=emoji, default=is_default)
+        # for soption in ['🔲 square (1:1)', '📱 portrait (13:19)', '🖼️ landscape (19:13)']:
+        #     emoji, label, ar = soption.split()
+        #     is_default = not default_auto and self.kwargs['aspect']==label
+        #     self.aspect_select.add_option(label=label, description=f'{label.title()} {ar}', emoji=emoji, default=is_default)
 
         self.message = await ctx.send(view=self)
-        self.upsample_message = await self.message.reply('<Embiggened Images>')
+        #self.upsample_message = await self.message.reply('<Embiggened Images>')
         #self.upsample_message = await ctx.send('<Embiggened Images>')
         #self.upsample_thread = await ctx.channel.create_thread(name='<Embiggened Images>', message=self.message)
         # https://github.com/Rapptz/discord.py/issues/9008#issuecomment-1299999500
-
+        # print(self.call_ctx.command)
+        # print(self.call_ctx.author)
         await self.add_image(image, fpath)
 
         return self.message
@@ -94,11 +95,10 @@ class DrawUIView(discord.ui.View):
 
         self.redo_button.label = f'({self.cur_imgnum} / {self.n_images})'
 
-        #self.upsample_button.disabled = self.cur_filename in self.already_upsampled
-        print(f'index: {self.cur_imgnum}, items: {self.n_images}')
         
     async def update_view(self, img_file: discord.File = None):
         self.update_buttons()
+        print(f'index: {self.cur_imgnum}, items: {self.n_images}')
         if img_file is None:
             self.message = await self.message.edit(view=self)
         else:
@@ -154,37 +154,37 @@ class DrawUIView(discord.ui.View):
         await interaction.delete_original_response()
 
 
-    @discord.ui.select(cls=discord.ui.Select, placeholder='image layout/aspect ratio', row=0)
-    async def aspect_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        selected_value = select.values[0]
+    # @discord.ui.select(cls=discord.ui.Select, placeholder='image layout/aspect ratio', row=0)
+    # async def aspect_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+    #     selected_value = select.values[0]
 
-        self.kwargs['aspect'] = None if selected_value == 'auto' else selected_value
-        for opt in select.options:
-            opt.default = (opt.value == selected_value)
-        return await self.redo(interaction)
+    #     self.kwargs['aspect'] = None if selected_value == 'auto' else selected_value
+    #     for opt in select.options:
+    #         opt.default = (opt.value == selected_value)
+    #     return await self.redo(interaction)
 
     @discord.ui.button(label='\u200b', style=discord.ButtonStyle.primary, disabled=True, emoji='⬅️', row=1)
     async def prev_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         self.cur_imgnum -= 1
         await self.refresh()
-
-    @discord.ui.button(label='(0 / 0)', style=discord.ButtonStyle.secondary, disabled=False, emoji='🔄', row=1)
+    
+    @discord.ui.button(label='(0 / 0)', style=discord.ButtonStyle.secondary, disabled=False, emoji='🔄', row=1) # ▶️ 🔄 ♻️
     async def redo_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         return await self.redo(interaction)
-        
+    
     @discord.ui.button(label='\u200b', style=discord.ButtonStyle.primary, disabled=True, emoji='➡️', row=1)
     async def next_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         self.cur_imgnum += 1
         await self.refresh()
-    
+
     @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='⚙️', row=1) # 🎛️ ⚙️ 🎚️
     async def config_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         #await interaction.response.defer()
         kwargs = self.kwargs.copy()
 
-        kwargs.pop('aspect') # remove since we have dropdown
+        #kwargs.pop('aspect') # remove since we have dropdown
         kwargs.pop('fast', None) # not worth having redraw scroll, just use whatever is passed on cmd call
 
         image_url = kwargs.pop('imgfile', None)
@@ -205,6 +205,15 @@ class DrawUIView(discord.ui.View):
 
         config: dict = yaml.load(cm.vals['config'], yaml.SafeLoader)
         hd_config: dict = yaml.load(cm.vals['hd_config'], yaml.SafeLoader)
+        
+        # Allow abbr for aspect select
+        if aspect:=config.get('aspect'):
+            opts = ['auto','square', 'portrait', 'landscape']
+            aspect = [o for o in opts if o.startswith(aspect.lower())][0]
+            if aspect=='auto':
+                aspect = None
+            config['aspect'] = aspect
+
         self.kwargs.update({
             'prompt':cm.vals['prompt'],
             'negative_prompt':cm.vals['negative_prompt'],
@@ -217,10 +226,12 @@ class DrawUIView(discord.ui.View):
         # NOTE: if decide to do this, remove the defer from on_submit
         #await self.redo(cm.submit_interaction)
     
+
     @discord.ui.button(label='HD', style=discord.ButtonStyle.green, disabled=False, emoji='⬇️', row=1) # 🆙
     async def upsample_button(self, interaction:discord.Interaction, button: discord.ui.Button):
+        # TODO: Maybe just make it a toggle? like -- red: HD (off), green: HD (on)
         await interaction.response.defer(thinking=True)
-        
+        # print(interaction.message.attachments)
         kwargs = self.kwargs.copy()
         imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
 
@@ -234,22 +245,25 @@ class DrawUIView(discord.ui.View):
         image, fpath = await self.call_ctx.invoke(imgen.redraw, *self.call_ctx.args, **kwargs)
         
         #await interaction.followup.send(file=to_bytes_file(image_file, kwargs['prompt']))
-        
-        #if self.upsample_thread is None:
-            #self.upsample_thread = await self.call_ctx.channel.create_thread(name='Upsampled Images')
-        #await self.upsample_thread.send(file=to_bytes_file(image_file, kwargs['prompt']))
         ifile = to_bytes_file(image, kwargs['prompt'])
-        if self.upsample_message.content:
-            self.upsample_message = await self.upsample_message.edit(content=None, attachments=[ifile])
+        
+        # if self.upsample_thread is None:
+        #    self.upsample_thread = await self.call_ctx.channel.create_thread(name='Upsampled Images', message=self.message)
+        
+        # await self.upsample_thread.send(file=ifile)
+        
+        # if self.upsample_message.content:
+        #     self.upsample_message = await self.upsample_message.edit(content=None, attachments=[ifile])
+        # else:
+        #     self.upsample_message = await self.upsample_message.add_files(ifile)
+
+        if self.upsample_message is None:
+            self.upsample_message = await self.message.reply(file=ifile)
         else:
             self.upsample_message = await self.upsample_message.add_files(ifile)
-        
-        await interaction.delete_original_response()
-        
-        # print(interaction.message.attachments)
-        # print(self.call_ctx.command)
-        # print(self.call_ctx.author)
 
+        await interaction.delete_original_response()
+    
     # @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='❌', row=0) # row=4
     # async def delete_button(self, interaction:discord.Interaction, button: discord.ui.Button):
     #     await interaction.response.defer()
