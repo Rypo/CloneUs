@@ -4,8 +4,7 @@ import os
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
 import torch
-from transformers import GPTQConfig,BitsAndBytesConfig
-from peft import LoraConfig, LoftQConfig
+from peft import LoraConfig, LoftQConfig, AutoPeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
 import cloneus.training.trainer as mtrain
@@ -54,6 +53,11 @@ def main():
     # https://github.com/huggingface/trl/blob/main/examples/scripts/sft.py
     
     cfg = OmegaConf.load(cpaths.ROOT_DIR/'config'/'train_config.yaml')
+    
+    if cfg.resume_from_checkpoint:
+        resume_cfgpath = cpaths.ROOT_DIR/cfg.resume_from_checkpoint/'..'/'config.yaml'
+        cfg = OmegaConf.load(resume_cfgpath)
+        print('Resuming... train_config.yaml will be ignored. Resuming training from: {resume_cfgpath}')
     verify_config(cfg)
 
     model_map = {
@@ -68,7 +72,8 @@ def main():
         'NousResearch/Nous-Hermes-2-SOLAR-10.7B':'solar-10b-inst-hermes2', # chatml
         'ISTA-DASLab/Mixtral-8x7b-AQLM-2Bit-1x16-hf':'mixtral-8x7b-aqlm-2bit', # foundation
         'ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf': 'mixtral-inst-8x7b-aqlm-2bit', # instruct
-        'NousResearch/Nous-Hermes-2-Mistral-7B-DPO': 'mistral-7b-hermes2-dpo' # chatml
+        'NousResearch/Nous-Hermes-2-Mistral-7B-DPO': 'mistral-7b-hermes2-dpo', # chatml
+        #'solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ':'mistral-7b-hermes2-dpo-awq'
         # Add aliases for new models here
     }
     # https://huggingface.co/NousResearch/Hermes-2-Pro-Mistral-7B
@@ -113,6 +118,7 @@ def main():
         bf16=cfg.bf16,
         fp16=cfg.fp16,
         tf32=cfg.tf32,
+        #bf16_full_eval=cfg.bf16, #  faster and save memory but can harm metric values (default: False)
         num_train_epochs=cfg.num_epochs,
         warmup_ratio=cfg.warmup_ratio,
         warmup_steps=cfg.warmup_steps,
@@ -120,7 +126,7 @@ def main():
         save_strategy=('epoch' if isinstance(cfg.dataset.hours_between_sessions, int) else 'steps'), #-- TODO Think about better solution
         save_steps=cfg.save_steps,
         #eval_steps=cfg.eval_steps,
-        logging_steps=(5 if cfg.use_sft_trainer else cfg.logging_steps), 
+        logging_steps=cfg.logging_steps, # appears that trl fixed the iteration number issue (5 if cfg.use_sft_trainer else cfg.logging_steps), 
         
         optim=cfg.optimizer,
         max_grad_norm=cfg.max_grad_norm,
@@ -130,13 +136,14 @@ def main():
         weight_decay=cfg.weight_decay,
         custom_scheduler=cfg.custom_scheduler,
         logging_first_step=True,
-        #disable_tqdm = cfg.use_sft_trainer # honestly, even it's wrong, still nice to have
         #torch_compile=True,
+        save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
+        resume_from_checkpoint=cfg.resume_from_checkpoint,
     )
-    
+
     model, tokenizer = mllm.model_tokenizer_from_config(peft_config, cfg)
     
-
+    
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(num_custom_tokens is not None and num_custom_tokens > 0)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
@@ -164,12 +171,8 @@ def main():
         dset = dataset.dataset_timechunk(data_file_path, tokenizer, cfg, text_only=False)
     
     
-    
     if cfg.resume_from_checkpoint is not None:
-        load_model_safetensors(model, os.path.join(cfg.resume_from_checkpoint, 'model.safetensors'))
-
-    #assert not peft_config.inference_mode and not model.config.use_cache and model.training, "Peft is not training or cache enabled"
-    #model = model.to(torch.bfloat16)#.to_bettertransformer()
+       load_model_safetensors(model, os.path.join(cfg.resume_from_checkpoint, 'model.safetensors'))
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]
     if cfg.use_sft_trainer:
@@ -186,7 +189,9 @@ def main():
     safe_train(trainer, cfg.resume_from_checkpoint)
     
     try:
-        cfg.update(train_loss=trainer.state.log_history[-2].get('train_loss'), eval_loss=trainer.state.log_history[-1].get('eval_loss'))
+        penult_state = trainer.state.log_history[-2]
+        train_loss = penult_state.get('loss', penult_state.get('train_loss'))
+        cfg.update(train_loss=train_loss, eval_loss=trainer.state.log_history[-1].get('eval_loss'))
     except IndexError as e:
         print(e)
     
