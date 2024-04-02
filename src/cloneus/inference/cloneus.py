@@ -74,7 +74,7 @@ def dtype_to(dtype, to:typing.Literal['str','torch'], default=None):
         
         dtypemap = {**dict.fromkeys(['torch.float16','float16','fp16'], torch.float16),
                     **dict.fromkeys(['torch.bfloat16','bfloat16','bf16'], torch.bfloat16)}
-        return dtypemap[dtype]
+        return dtypemap.get(dtype, dtype) # allow string 'auto'
     
     if dtype is None:
         return dtype
@@ -176,6 +176,9 @@ class Cloneus:
         self.model, self.tokenizer = load.load_any_inference(self.model_dir, dtype=self.dtype, attn_implementation=self.attn_implementation)
         #self.model, self.tokenizer = minfer.load_unmerged_lowrsc(self.model_dir, dtype=None, attn_implementation='sdpa')
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
+        self.base_dtype = transformers.AutoConfig.from_pretrained(self.model.config._name_or_path).torch_dtype
+        if self.base_dtype not in [torch.float16, torch.bfloat16]: 
+            self.base_dtype = torch.bfloat16 # Avoid ever running as float32
 
         self._is_instruct_model = self.tokenizer.chat_template is not None
         # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
@@ -524,7 +527,7 @@ class Cloneus:
                 output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
                 output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
             
-        print(f'TOTAL BATCHED RUN TIME: {time.perf_counter()-t0}')
+        print(f'TOTAL BATCHED RUN TIME: {time.perf_counter()-t0:0.2f}s')
         #print('Raw Batch Outputs:\n', self.tokenizer.batch_decode(outputs, skip_special_tokens=False))
         
         # use last input_len for all. Shouldn't differ by more than a few tokens as long as author_tags are reasonable
@@ -671,8 +674,10 @@ class Cloneus:
         
         inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True)
         input_len = inputs.pop('length')[0].item()
+        self.model.to(dtype = self.base_dtype)
         with self.model.disable_adapter():
             output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
+        self.model.to(dtype = self.dtype)
         #output = base_model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
@@ -700,6 +705,9 @@ class Cloneus:
         input_len = inputs.pop('length')[0].item()
 
         genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
+        
+        self.model.to(dtype = self.base_dtype)
+        print(self.model.dtype)
         with self.model.disable_adapter():
             thread = Thread(target=self.model.generate, kwargs=genkwargs)
             thread.start()
@@ -707,7 +715,7 @@ class Cloneus:
             for new_text in streamer:
                 generated_text += new_text
                 yield new_text
-        
+        self.model.to(dtype = self.dtype)
         output_len = self.base_tokenizer(generated_text, return_length=True).length
 
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
