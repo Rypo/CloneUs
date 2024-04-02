@@ -8,9 +8,11 @@ from transformers import (
     TrainingArguments
 )
 from transformers.utils.quantization_config import  QuantizationConfigMixin
+import transformers
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from unsloth import FastLanguageModel
 from trl import setup_chat_format
+from awq import AutoAWQForCausalLM
 
 from ..utils import misc
 from ..data import tokenization
@@ -18,7 +20,8 @@ from ..data import tokenization
 def adjust_tune_format(model, tokenizer, tune_type:str, padding_side:str, custom_chat_template:str):
     if tune_type == 'chatml' and any(v not in tokenizer.get_added_vocab() for v in ['<|im_start|>', '<|im_end|>']):
         print('Warning: tune_type=chatml but detected non-chatml format. Missing chatml tokens will be added.')
-        model, tokenizer = setup_chat_format(model, tokenizer)
+        # tweaked based on Hermes models
+        model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlX')
         if tokenizer.pad_token != '</s>':
             print(f'Using </s> for pad instead of {tokenizer.pad_token}.')
             tokenizer.pad_token = '</s>'
@@ -27,7 +30,7 @@ def adjust_tune_format(model, tokenizer, tune_type:str, padding_side:str, custom
     
     return model, tokenizer
 
-def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, tune_type='chatml', padding_side=None, custom_chat_template=None,):
+def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, tune_type='chatmlX', padding_side=None, custom_chat_template=None,):
     # pip install -e "git+https://github.com/unslothai/unsloth.git#egg=unsloth
     # https://pip.pypa.io/en/stable/cli/pip_install/
 
@@ -60,6 +63,39 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, tune_typ
     model.config.pretraining_tp = 1  # should already be =1,  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/configuration_llama.py#L79
     return model, tokenizer
 
+def get_awq(model_id, peft_config, max_seq_len:int, batch_size:int, tune_type='chatmlX', padding_side=None, custom_chat_template=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+    # TODO: awq peft training?
+    # - https://github.com/casper-hansen/AutoAWQ/blob/main/examples/train.py
+    # test on : https://huggingface.co/solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ/tree/main
+    
+    # ref1: https://github.com/huggingface/transformers/blob/096f304695f7e7b169b031f7814352e900ad71c4/src/transformers/quantizers/quantizer_awq.py#L111
+    # ref2: https://github.com/huggingface/transformers/blob/096f304695f7e7b169b031f7814352e900ad71c4/src/transformers/quantizers/quantizer_awq.py#L115C29-L115C84
+    model = AutoAWQForCausalLM.from_quantized(model_id, 
+                                              fuse_layers=False, # True and False work. False was in train example  -- You cannot save an AWQ model that uses fused modules! - ref1
+                                              device_map='auto', 
+                                              #use_exllama_v2=True, # can't peft with it -- You cannot save an AWQ model that uses Exllama backend! - ref2
+                                              safetensors=True, 
+                                              max_seq_len=max_seq_len, 
+                                              batch_size=batch_size,
+                                              attn_implementation=attn_implementation,
+                                              #torch_dtype=None, # will not load in bf16
+                                              offload_folder='_tmp'
+                                              )
+    
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model, tokenizer = adjust_tune_format(model, tokenizer, tune_type, padding_side, custom_chat_template)
+    
+    # NOTE: model.model is *required*, just model will error out
+    model = prepare_model_for_kbit_training(model.model, use_gradient_checkpointing=True)
+    model = get_peft_model(model, peft_config)
+    #model = get_peft_model(model.model, peft_config)
+    model.print_trainable_parameters()
+    model.enable_input_require_grads()
+    
+    #model.half()
+    return model, tokenizer
+
 def get_model(model_id, 
               peft_config: LoraConfig, 
               quant_config:typing.Literal['bnb4','aqlm', 'gptq']|QuantizationConfigMixin='bnb4', 
@@ -78,6 +114,8 @@ def get_model(model_id,
         quant_config = GPTQConfig(bits=4, use_exllama=False) # , use_cuda_fp16=True
     elif quant_config=='aqlm':
         quant_config = None
+    elif quant_config=='awq':
+        raise NotImplementedError('use: get_awq()')
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     
@@ -85,22 +123,14 @@ def get_model(model_id,
         quantization_config=quant_config,
         use_cache=False, 
         attn_implementation=attn_implementation,
-        torch_dtype=torch.bfloat16, # 'auto'=31.6gb  (WORSE)
+        torch_dtype='auto', 
         low_cpu_mem_usage=True,
-        device_map="auto", # batch:(2,2): sequential= 26.9gb , auto=26.0/25.9gb
+        device_map="auto", 
     )
     if quant_config is None:
-        pretrain_kwargs.pop('quantization_config') # passing as None will error as of transformers 4.39.1 
+        pretrain_kwargs.pop('quantization_config') # passing as None will error as of transformers 4.39.2 (during .to_dict() call)
     
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        **pretrain_kwargs
-        # quantization_config=quant_config,
-        # use_cache=False, 
-        # attn_implementation=attn_implementation,
-        # torch_dtype=torch.bfloat16,
-        # low_cpu_mem_usage=True,
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs)
 
     model, tokenizer = adjust_tune_format(model, tokenizer, tune_type, padding_side, custom_chat_template)
     
@@ -120,21 +150,33 @@ def get_model(model_id,
     model.print_trainable_parameters()
     model.enable_input_require_grads()
     
-
+    model.bfloat16()
     #model = model.to(torch.bfloat16)
     return model, tokenizer
 
 
 def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
-        #tokenizer = tokenization.get_tokenizer(cfg.model_id, padding_side=cfg.padding_side)
     if cfg.flashattn_lib=='huggingface':
-        model, tokenizer = get_model(cfg.model_id, 
-                                     peft_config, 
-                                     quant_config=cfg.quant_method, 
-                                     attn_implementation=cfg.attn_implementation, 
-                                     tune_type=cfg.tune_type, 
-                                     padding_side=cfg.padding_side, 
-                                     custom_chat_template=cfg.custom_chat_template) #custom_token_map
+        if cfg.quant_method =='awq':
+            model, tokenizer = get_awq(cfg.model_id, 
+                                        peft_config, 
+                                        max_seq_len=cfg.chunk_size, 
+                                        batch_size=cfg.batch_size,
+                                        
+                                        tune_type=cfg.tune_type, 
+                                        padding_side=cfg.padding_side, 
+                                        custom_chat_template=cfg.custom_chat_template,
+                                        attn_implementation=cfg.attn_implementation, ) #custom_token_map
+        else:
+            model, tokenizer = get_model(cfg.model_id, 
+                                        peft_config, 
+                                        quant_config=cfg.quant_method, 
+                                        attn_implementation=cfg.attn_implementation, 
+                                        tune_type=cfg.tune_type, 
+                                        padding_side=cfg.padding_side, 
+                                        custom_chat_template=cfg.custom_chat_template) #custom_token_map
+        
+
             
     elif cfg.flashattn_lib=='unsloth':
         # TODO: investigate why PAD = <unk> again (should be </s> if chat_ml) and if that is causing problems
