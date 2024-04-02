@@ -1,6 +1,6 @@
 import gc
 import os
-
+import argparse
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
 import torch
@@ -48,16 +48,27 @@ def verify_config(cfg):
             cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
 
-def main():
+def main(args):
     # Decent example for HfArgumentParser
     # https://github.com/huggingface/trl/blob/main/examples/scripts/sft.py
     
-    cfg = OmegaConf.load(cpaths.ROOT_DIR/'config'/'train_config.yaml')
+    config_filepath = args.config if args.config else cpaths.ROOT_DIR/'config'/'train_config.yaml'
+    cfg = OmegaConf.load(config_filepath)
     
-    if cfg.resume_from_checkpoint:
-        resume_cfgpath = cpaths.ROOT_DIR/cfg.resume_from_checkpoint/'..'/'config.yaml'
+    
+    resume_ckpt = None
+    if args.resume:
+        resume_ckpt = args.resume
+        resume_cfgpath = os.path.join(os.path.dirname(args.resume), 'config.yaml')
+    elif cfg.resume_from_checkpoint:
+        resume_ckpt = cfg.resume_from_checkpoint
+        resume_cfgpath = (cpaths.ROOT_DIR/cfg.resume_from_checkpoint).parent/'config.yaml'
+    
+    if resume_ckpt:
         cfg = OmegaConf.load(resume_cfgpath)
-        print('Resuming... train_config.yaml will be ignored. Resuming training from: {resume_cfgpath}')
+        print(f'Resuming training from: {resume_ckpt}')
+        cfg.resume_from_checkpoint = os.path.relpath(resume_ckpt, cpaths.ROOT_DIR)
+    
     verify_config(cfg)
 
     model_map = {
@@ -107,7 +118,7 @@ def main():
         cfg.dataset.name += str(hbs) if isinstance(hbs, int) else ''.join(map(str,hbs))
     
     base_outdir = cpaths.RUNS_DIR/f'{model_name}/{cfg.dataset.name}'
-    args = mtrain.create_args(
+    train_args = mtrain.create_args(
         base_outdir,
         peft_config,
         chunk_size=cfg.chunk_size,
@@ -148,7 +159,7 @@ def main():
     cfg.has_custom_tokens=(num_custom_tokens is not None and num_custom_tokens > 0)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
     cfg.fprompt = None
-    cfg.base_dir = args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
+    cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
     if cfg.instruct_model:
         name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
@@ -176,15 +187,15 @@ def main():
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]
     if cfg.use_sft_trainer:
-        trainer = mtrain.get_sft_trainer(model, dset, tokenizer, args, peft_config, callbacks=callbacks, max_packed_seqlength=cfg.chunk_size)
+        trainer = mtrain.get_sft_trainer(model, dset, tokenizer, train_args, peft_config, callbacks=callbacks, max_packed_seqlength=cfg.chunk_size)
     else:
-        trainer = mtrain.get_trainer(model, dset, tokenizer, args, callbacks=callbacks)
+        trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, callbacks=callbacks)
 
 
     write_first_batches(trainer, batchsample_dir='_tmp')
 
     if num_custom_tokens:
-        tokenization.save_embeddings(model, args.output_dir)
+        tokenization.save_embeddings(model, train_args.output_dir)
 
     safe_train(trainer, cfg.resume_from_checkpoint)
     
@@ -195,15 +206,25 @@ def main():
     except IndexError as e:
         print(e)
     
-    OmegaConf.save(cfg, os.path.join(args.output_dir, 'config.yaml'))
+    OmegaConf.save(cfg, os.path.join(train_args.output_dir, 'config.yaml'))
 
 
-    if args.save_strategy == 'steps':
+    if train_args.save_strategy == 'steps':
         mtrain.save_last_step(trainer)
 
-    return args
+    return train_args
 
+def get_cli_args():
+    parser = argparse.ArgumentParser(description='Finetune an LLM on your Discord chat export data.')
+    parser.add_argument('-c','--config', default=None, type=str, required=False,
+                        help='Path/to/config_file.yaml. If not set, will use file at ./config/train_config.yaml')
+    
+    parser.add_argument('-r','--resume', default=None, type=str, required=False,
+                        help='Path/to/checkpoint-dir to resume training from. If set, --config will be ignored and the local config.yaml file will be used.')
+    
+    return parser.parse_args()
 
 if __name__ == "__main__":
     load_dotenv()
-    args = main()
+    args = get_cli_args()
+    train_args = main(args)
