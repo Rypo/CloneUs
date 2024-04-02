@@ -7,6 +7,7 @@ from discord.ext import commands
 from cloneus.data import roles
 
 class WordListTransformer(app_commands.Transformer):
+    '''Converts as comma separated string into a list of strings or tuples if has word:val format'''
     # https://discordpy.readthedocs.io/en/latest/interactions/api.html#discord.app_commands.Transformer
     async def transform(self, interaction: discord.Interaction, wordlist: str) -> list[str]:
         # (x, _, y) = value.partition(',')
@@ -28,6 +29,7 @@ class AuthorInitialsTransformer(app_commands.Transformer):
 
 
 class PercentTransformer(app_commands.Transformer):
+    '''Rescales from 1-100 to 0.01-1.00 if not already in range'''
     @property
     def min_value(self): return 0.0
     @property
@@ -43,6 +45,7 @@ class PercentTransformer(app_commands.Transformer):
         return value
 
 def percent_transform(value: float):
+    '''Rescales from 1-100 to 0.01-1.00 if not already in range'''
     if value:
         value = float(value) 
         if value>1.0:
@@ -96,10 +99,4 @@ class VibeTransformer(app_commands.Transformer):
 
         scale = 1 - intensity
         return (phrase, scale)
-
-        #author:str, phrase:str, strength:app_commands.Range[float,None,1.0] = None
-        # example "sententnce"+0.8
-        # msg = self.raimgr.set_guidance_phrase(author=author, phrase=phrase, guidance_scale=guidance_scale)
-        # print(msg)
-        # await ctx.send(f'Vibe checked. (stronks: {strength})')
 
