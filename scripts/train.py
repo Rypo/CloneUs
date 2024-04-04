@@ -52,7 +52,7 @@ def main(args):
     # Decent example for HfArgumentParser
     # https://github.com/huggingface/trl/blob/main/examples/scripts/sft.py
     
-    config_filepath = args.config if args.config else cpaths.ROOT_DIR/'config'/'train_config.yaml'
+    config_filepath = args.config if args.config else cpaths.ROOT_DIR/'config'/'train'/'train_config.yaml'
     cfg = OmegaConf.load(config_filepath)
     
     
@@ -217,7 +217,7 @@ def main(args):
 def get_cli_args():
     parser = argparse.ArgumentParser(description='Finetune an LLM on your Discord chat export data.')
     parser.add_argument('-c','--config', default=None, type=str, required=False,
-                        help='Path/to/config_file.yaml. If not set, will use file at ./config/train_config.yaml')
+                        help='Path/to/config_file.yaml. If not set, will use file at ./config/train/train_config.yaml')
     
     parser.add_argument('-r','--resume', default=None, type=str, required=False,
                         help='Path/to/checkpoint-dir to resume training from. If set, --config will be ignored and the local config.yaml file will be used.')

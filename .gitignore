@@ -23,6 +23,9 @@ server/config/persistent_storage.yaml
 /data/*
 !data/discord
 config/users.json
+# custom config.yaml files
+config/train/*
+!config/train/train_config.yaml
 # Dev files
 nbs
 imgs
