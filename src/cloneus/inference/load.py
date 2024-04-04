@@ -1,70 +1,26 @@
 import os
 import gc
-import re
 import time
 import typing
-import random
-import itertools
 import functools
 import warnings
 from pathlib import Path
-from threading import Thread
-from collections import namedtuple
-from contextlib import contextmanager
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
-
-import datasets
-from omegaconf import OmegaConf, DictConfig
 
 import torch
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    TrainerCallback,
-    GenerationConfig,
     BitsAndBytesConfig,
     GPTQConfig,
-    StoppingCriteria,
-    #TextStreamer, 
-    TextIteratorStreamer
+    AwqConfig,
 )
 import transformers
 
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
-
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
+from awq import AutoAWQForCausalLM
 from unsloth import FastLanguageModel
-
-from cloneus.data import roles, dataset
-from cloneus.plugins import youtube as youtube
-
-from cloneus.core import paths as cpaths
-from . import genconfig
-
-
-
-def bnb_readme_config(readme_path):
-    # There *must* be a better way to go about this. This is hacky and I hate it
-    with open(readme_path,'r') as f:
-        readme = f.read()
-
-    config_items = re.findall('^- (.+)', readme, re.MULTILINE)[:-1]
-    bnbconf = {}
-    for k,v in dict([item.split(': ') for item in config_items]).items():
-        if v == 'None':
-            bnbconf[k] = None
-        elif v[0].isnumeric():
-            bnbconf[k] = float(v)
-        elif v in ['True', 'False']:
-            bnbconf[k] = bool(v)
-        else:
-            bnbconf[k] = v
-
-    return BitsAndBytesConfig.from_dict(bnbconf)
 
 
 def warn_tokenizer(tokenizer, flash_attn):
@@ -83,95 +39,59 @@ def cleanup(func):
             gc.collect()
     return wrapper    
 
-def load_full_model(checkpoint_path, full_model_path, model_id=None, flash=False):
-    peft_config = LoraConfig.from_pretrained(checkpoint_path)
-    if model_id is None:
-        model_id = peft_config.base_model_name_or_path
-
-    if 'gptq' in model_id.lower():
-        quant_config = GPTQConfig(bits=4, use_exllama=False) # , use_cuda_fp16=True
-    else: 
-        quant_config = bnb_readme_config(os.path.join(checkpoint_path,'README.md'))
-        #BitsAndBytesConfig.from_dict(OmegaConf.load('config/model/bnb_default.yaml'))
-    
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
-    
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        low_cpu_mem_usage=True,
-        quantization_config=quant_config,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        use_safetensors=True,
-        use_flash_attention_2=flash,
-    )
-
-    if tokenizer.additional_special_tokens:
-        model.resize_token_embeddings(len(tokenizer))
-
-    # model.config.use_cache = True
-    model = get_peft_model(model, peft_config)
-    model.load_state_dict(torch.load(full_model_path))
-    
-    return model, tokenizer
-
-
-
         
-
 @cleanup
-def load_awq(awq_dirpath, dtype=torch.float16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2",  freeze_eval=False):
-    '''Load AWQ model
+def load_awq(awq_dirpath, dtype=torch.float16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+    '''Load AWQ model - Broken for Exllama v2
     Initial testing revealed that float16, without flash is far supperior in both speed and quality.
     Going to ignore those args for now.
     '''
-    #from awq import AutoAWQForCausalLM
-    #model = AutoAWQForCausalLM.from_quantized(awq_dirpath, fuse_layers=fuse_layers, safetensors=safetensors, batch_size=batch_size, offload_folder='tmp')
-    # max_new_tokens=512, breaks it
-            
-    # quantization_config=quant_config,
-    # load_in_4bit=True,
-        
+    # this is broken at the momement. Passing quant_config will try to access exllama_config, but it is None
+    #quant_config = AwqConfig(version="exllama", exllama_config={"version":2, "max_input_len": 8192, "max_batch_size": 8})
+
     model: transformers.PreTrainedModel = AutoModelForCausalLM.from_pretrained(
         awq_dirpath, 
         low_cpu_mem_usage=True,
-        #safetensors=True,
-        #torch_dtype=dtype, #defaults to torch.float16, seems much faster, but worse. At least in some modes it's worse. It's faster in all modes. 
-        #use_flash_attention_2=use_flash, 
-        #device_map="cuda:0",
-        dtype=None,
+        #quantization_config=quant_config,
+        torch_dtype=dtype, #defaults to torch.float16, seems much faster, but worse. At least in some modes it's worse. It's faster in all modes. 
         attn_implementation=attn_implementation,
         device_map="auto",
     )
     print(model.dtype, model.training)
     tokenizer = AutoTokenizer.from_pretrained(awq_dirpath, trust_remote_code=True)
 
-    if freeze_eval:
-        model = model.eval()
-        for p in model.parameters():
-            p.requires_grad_(False)
+    # model = model.eval()
+    # for p in model.parameters():
+    #     p.requires_grad_(False)
     
     return model, tokenizer
 
-# @cleanup
-# def load_awq(awq_dirpath, fuse_layers=True, safetensors=True, batch_size=1, freeze_eval=False):
-#     '''Load AWQ model
-#     `awq_dirpath`: Path to folder containing model files.
-#     `max_new_tokens`: The max sequence length, used to allocate kv-cache for fused models.
-#     `fuse_layers`: Whether or not to use fused layers.
-#     `batch_size`: The batch size to initialize the AWQ model with.'''
-#     from awq import AutoAWQForCausalLM
-#     model = AutoAWQForCausalLM.from_quantized(awq_dirpath, fuse_layers=fuse_layers, safetensors=safetensors, batch_size=batch_size, offload_folder='tmp')
-#     # max_new_tokens=512, breaks it
-#     tokenizer = AutoTokenizer.from_pretrained(awq_dirpath, trust_remote_code=True)
-
-#     if freeze_eval:
-#         model = model.eval()
-#         for p in model.parameters():
-#             p.requires_grad_(False)
+@cleanup
+def load_awq_exl2(awq_dirpath, max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+    '''Load AWQ model
+    `awq_dirpath`: Path to folder containing model files.
+    `max_seq_len`: The max sequence length, used to allocate kv-cache for fused models.
+    `batch_size`: The batch size to initialize the AWQ model with.
+    `use_exllama_v2`: use exllamav2 inplace of GEMM 
+    `fuse_layers`: Whether or not to use fused layers. Incompat with flash-attn.
+    '''
     
-#     return model, tokenizer
+    model = AutoAWQForCausalLM.from_quantized(
+        awq_dirpath, 
+        max_seq_len=max_seq_len,
+        fuse_layers=fuse_layers, 
+        batch_size=batch_size,
+        use_exllama_v2=True,
+        device_map="auto",
+        attn_implementation=attn_implementation, 
+    )
+    tokenizer = AutoTokenizer.from_pretrained(awq_dirpath, trust_remote_code=True)
+
+    model = model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+    
+    return model, tokenizer
 
 @cleanup
 def load_gptq(ckpt_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
@@ -198,7 +118,7 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implem
         device_map="auto",
         # CANNOT USE: use_safetensors=True, since I stopped saving the full model
         #torch_dtype=dtype,
-        attn_implementation=attn_implementation, # ["eager", "sdpa", "flash_attention_2"]
+        attn_implementation=attn_implementation,
         #use_flash_attention_2=use_flash,
     )
     tokenizer = AutoTokenizer.from_pretrained(ckpt_dirpath)
@@ -235,11 +155,11 @@ def load_any_inference(model_savedir, **kwargs):
     '''
     dirstr = str(model_savedir)
 
-    if 'merged/awq' in dirstr:
-        #defaults = dict(fuse_layers=True, safetensors=True, batch_size=1, freeze_eval=False)
-        defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2", freeze_eval=False)
+    if 'awq' in dirstr:
+        defaults = dict(max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation="flash_attention_2")
+        #defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2", freeze_eval=False)
         kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-        return load_awq(model_savedir, **kargs)
+        return load_awq_exl2(model_savedir, **kargs)
     elif 'merged' in dirstr:
         defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
         kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
@@ -250,6 +170,7 @@ def load_any_inference(model_savedir, **kwargs):
         return load_gptq(model_savedir, **kargs)
     else:
         quant_method = 'aqlm' if 'aqlm' in dirstr else 'bnb4'
+        #defaults = dict(quant_method=quant_method, dtype='auto', attn_implementation="flash_attention_2")
         defaults = dict(quant_method=quant_method, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
         kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
         return load_peft(model_savedir, **kargs)
@@ -311,6 +232,7 @@ def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, att
         device_map="auto",
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
+        use_cache=True
     )
     if pt_kwargs['quantization_config'] is None:
         pt_kwargs.pop('quantization_config')
@@ -395,7 +317,7 @@ def load_unmerged_lowrsc(checkpoint_dirpath, quant_config=None, dtype=None, attn
         device_map="auto",
         # CANNOT USE: use_safetensors=True, since I stopped saving the full model
         torch_dtype=dtype,
-        attn_implementation=attn_implementation, # ["eager", "sdpa", "flash_attention_2"]
+        attn_implementation=attn_implementation,
     )
     #model = model.to_bettertransformer()
     
@@ -423,7 +345,7 @@ def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_im
         device_map="auto",
         use_safetensors=True,
         torch_dtype=dtype,
-        attn_implementation=attn_implementation, # ["eager", "sdpa", "flash_attention_2"]
+        attn_implementation=attn_implementation,
         #use_flash_attention_2=use_flash,
     )
     #.to_bettertransformer()
@@ -449,15 +371,10 @@ def load_merge_save(ckpt_dir_path:str, merge_outdir='merged', low_mem=True):
     merge_outpath = os.path.join(ckpt_dir_path, merge_outdir)
 
     merged_model = _model_to_merged(ckpt_dir_path, low_mem=low_mem)
-    tokenizer = dataset.get_tokenizer(merged_model.config._name_or_path)
-    #AutoTokenizer.from_pretrained(ckpt_dir_path)
-    
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_dir_path) # merged_model.config._name_or_path
     
     merged_model.save_pretrained(merge_outpath, safe_serialization=True)
     tokenizer.save_pretrained(merge_outpath)
 
     print(f"Saved merged model to: {merge_outpath}")
     return merge_outpath
-
-
-
