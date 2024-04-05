@@ -95,8 +95,6 @@ def test_model(model, tokenizer, genconfs, seed_text='', do_print=True):
     
     return in_text,out_texts
 
-
-    
 def textborder(center_text, sym='-', out_n=64, cent_n=0):
     bpad=int(out_n>0)
     cpad=int(cent_n>0)
@@ -107,61 +105,93 @@ def textborder(center_text, sym='-', out_n=64, cent_n=0):
     outstr = top_border + midleft_border + center_text + midright_border + bot_border
     return outstr
 
-
-def eval_model(model_path, questions_filepath, outfile='test_samples.log', gmodes:list[str]=None, question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
-    if (cpts:=list(Path(model_path).glob('*checkpoint*'))):
-        model_path = cpts[0]
-
-    clo = Cloneus(model_path)
-    clo.load_model()
-    checkpoints = sorted([p.name for p in clo.mdir_comps.basedir_path.glob('*checkpoint*')], key=lambda t: int(t.split('-')[1]))
-    
-    test_qs = get_test_questions(questions_filepath, None, True)
-    
-    if gmodes is None:
-        gmodes = ['cs','ms']
-        
-    if question_author is None:
-        question_author = roles.author_display_names[0]
-    
-    if response_authors == 'rest':
-        author_list = [a for a in roles.author_display_names if a!=question_author]
-    elif response_authors == 'all':
-        author_list = roles.author_display_names
-    elif isinstance(response_authors, list):
-        author_list = response_authors
-        
-    
-    outfile = clo.mdir_comps.basedir_path/outfile
-    with open(outfile, 'w') as f:
-        gc_inps_outs = {}
-        for c in tqdm(checkpoints): 
-            clo.switch_model(clo.mdir_comps.basedir_path, c)
-
-            for gmode in gmodes:
-                clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
-                gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconf(True)), '-', 176, 0)
-                inps_outs = gc_inps_outs.setdefault(gconf_line, {})
-                
-                for tq in tqdm(test_qs, leave=False):
-                    seed_everything(42)
-
-                    input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, tq)], author_list, '')
-                    outputs='\n'.join([atag+'⋙'+repr(text) for atag,text in zip(author_prompts,out_texts)])
-                    
-                    input_line = textborder('INPUT: '+ repr(input_text), '=', 88, 0)
-                    ckpt_output = f'CHECKPOINT: {c}\n{outputs}\n'
-                    
-                    inps_outs.setdefault(input_line, []).append(ckpt_output)
-        
-        for gc, inpo in gc_inps_outs.items():
+def write_samples(gen_samples:dict[str, dict[str, list[str]]], out_filepath:str|Path):
+    with open(out_filepath, 'w') as f:
+        for gc, in_outs in gen_samples.items():
             f.write(gc)
-            for k,v in inpo.items():    
-                f.write(k)
-                f.writelines(v)
+            for inp,outs in in_outs.items():    
+                f.write(inp)
+                f.writelines(outs)
+
+def eval_ckpt(clo:Cloneus, checkpoint_path:Path,  genconfig_modes:list[str], prompts:list[str], question_author:str, author_list:list[str]):
+    '''Evaluate a single checkpoint in run'''
+    #clo.switch_model(clo.mdir_comps.basedir_path, ckpt_subdir=checkpoint_name)
+    clo.switch_model(checkpoint_path)
+    checkpoint_name = checkpoint_path.name
+    gc_inps_outs = {} # {gmode1 : {input_text: [out1, out2, ... ]}}
+    for gmode in genconfig_modes:
+        clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
+        gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconf(True)), '-', 176, 0)
+        inps_outs = gc_inps_outs.setdefault(gconf_line, {})
+        
+        for prompt in tqdm(prompts, leave=False):
+            seed_everything(42)
+
+            input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
+            outputs='\n'.join([atag+'⋙'+repr(text) for atag,text in zip(author_prompts,out_texts)])
+            
+            input_line = textborder('INPUT: '+ repr(input_text), '=', 88, 0)
+            ckpt_output = f'CHECKPOINT: {checkpoint_name}\n{outputs}\n'
+            
+            inps_outs.setdefault(input_line, []).append(ckpt_output)
+    return gc_inps_outs
+
+def eval_run(checkpoint_paths:list[Path], prompts: list[str], genconfig_modes:list[str], question_author:str, author_list:list[str]):
+    '''Evaluate a single run consisting of multiple checkpoints'''
+    
+    clo = Cloneus(checkpoint_paths[0]).load_model()
+    
+    gc_inps_outs = {}
+    for ckpth in tqdm(checkpoint_paths): 
+        ckpt_samples = eval_ckpt(clo, ckpth, genconfig_modes=genconfig_modes, prompts=prompts, question_author=question_author, author_list=author_list)
+        
+        for gm,in_outs in ckpt_samples.items():
+            for inp,outs in in_outs.items():
+                gc_inps_outs.setdefault(gm,{}).setdefault(inp, []).extend(outs)
+    
+    return gc_inps_outs
+    
+
+def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', genconfig_modes:list[str]=None, question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
+    if genconfig_modes is None:
+        genconfig_modes = ['cs','ms']
+        
+    if question_author is None:
+        question_author = roles.author_display_names[0]
+    
+    if isinstance(response_authors, list):
+        author_list = response_authors
+    elif response_authors == 'rest':
+        author_list = [a for a in roles.author_display_names if a!=question_author]
+    elif response_authors == 'all':
+        author_list = roles.author_display_names
+    
+    runs_path = Path(runs_path)
+
+    #if (runs_path/'config.yaml').exists():
+        # sample eval from 1 run, multiple checkpoints
+    
+    config_paths = list(runs_path.rglob('*config.yaml*'))
+
+    if config_paths:
+        for config_path in config_paths:
+            run_path = config_path.parent
+            checkpoint_paths = sorted(run_path.glob('*checkpoint*'), key=lambda p: int(p.name.split('-')[1])) # checkpoint-123-awq -> sortby=int(123)
+            
+            gc_inps_outs = eval_run(checkpoint_paths=checkpoint_paths, prompts=prompts, genconfig_modes=genconfig_modes, question_author=question_author, author_list=author_list)
+            write_samples(gc_inps_outs, run_path/outfile)
+    elif any(runs_path.glob('*.safetensors')):
+        run_path = runs_path
+        print('running 1 checkpoint:',run_path)
+        # sample eval from 1 checkpoint. Write to log file inside of the checkpoint dir
+        clo = Cloneus(run_path)#.load_model() # load taken care of in eval_ckpt
+        gc_inps_outs = eval_ckpt(clo, checkpoint_path=run_path, genconfig_modes=genconfig_modes, prompts=prompts, question_author=question_author, author_list=author_list)
+        write_samples(gc_inps_outs, run_path/outfile)
+    else:
+        raise FileNotFoundError('Unable to find any models to evaluate')
 
 
-def eval_params(model_path, pgrid, test_qs, outfile='test_params.log', question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
+def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.log', question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
     if (cpts:=list(Path(model_path).glob('*checkpoint*'))):
         model_path = cpts[0]
     
@@ -178,20 +208,20 @@ def eval_params(model_path, pgrid, test_qs, outfile='test_params.log', question_
     elif isinstance(response_authors, list):
         author_list = response_authors
 
-    spgrid = dict(sorted(pgrid.items(), key=lambda kv: len(kv[1])))
+    spgrid = dict(sorted(param_grid.items(), key=lambda kv: len(kv[1])))
     param_sets = [dict(zip(spgrid, pvals)) for pvals in itertools.product(*spgrid.values())]
     print(f'Evaluating {len(param_sets)} parameter combinations')
     
     outfile = clo.mdir_comps.basedir_path/outfile
     with open(outfile, 'w') as f:
-        for tq in test_qs:
-            input_text, _, _, _, _ = clo.batch_generate([(question_author, tq)], author_list, '')
+        for prompt in prompts:
+            input_text, _, _, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
             f.write(textborder('INPUT: '+ repr(input_text), '=', 88, 0))
             for pset in param_sets:
                 f.write('\n'+ json.dumps(pset))
                 delt=clo.set_genconf(**pset)
                 seed_everything(42)
             
-                input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, tq)], author_list, '')
+                input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
                 outputs='\n'.join([repr(atag+'⋙'+text) for atag,text in zip(author_prompts,out_texts)])
                 f.write('\n'+outputs+'\n')
