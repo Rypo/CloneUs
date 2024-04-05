@@ -1,0 +1,48 @@
+# Default mode. Iterate over a list of prompts using generation config presets. 
+sample:
+  outfile: test_samples.log
+  genconfig_modes: # [cs, ms, gd]
+  - cs 
+  - ms
+  question_author: 
+  response_authors: rest # rest, all, [author1, author2, author3...]
+  prompts:
+  - What's your favorite pun?
+  - Which is bigger, a chicken egg or cow egg?
+  - How are you making money using your social media?
+  - Is it morally right to kill mosquitos?
+  - Give me a list of 13 words that have 9 letters.
+  - Do you think you can survive the zombie apocalypse?
+  - When did you realize you weren't real?
+  - How much would could a woodchuck chuck if a woodchuck could chuck wood?
+
+# Sweep mode. Preform a grid search over generation configurations using a few prompts. 
+# Ignored unless called with evaluate.py --sweep
+sweep:
+  outfile: test_params.log
+  question_author:
+  response_authors: rest
+  prompts:
+    - What's your favorite pun?
+    - Which is bigger, a chicken egg or cow egg?
+    - Is it morally right to kill mosquitos?
+    - Do you think you can survive the zombie apocalypse?
+  param_grid:
+    top_k:
+      - 20
+      - 50
+      - 80
+    top_p:
+      - 0.8
+      - 0.9
+      - 1.0
+    repetition_penalty:
+      - 1.0
+      - 1.1
+      - 1.2
+    temperature:
+      - 0.2
+      - 0.8
+      - 1.0
+      - 1.1
+      - 1.2

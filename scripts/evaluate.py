@@ -1,52 +1,38 @@
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
+from omegaconf import OmegaConf
 
 import cloneus.training.evaluation as meval
 import cloneus.core.paths as cpaths
 
 
-def get_parser():
+def get_cli_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-m','--modelname', default='mistral-7b-i4', type=str, required=False,
-                        help='model name for testing')
     
-    parser.add_argument('-p','--mpath', default=None, type=str, required=False,
-                        help='base dir path for model to test')
+    parser.add_argument('runpath', default=None, type=str, 
+                        help='Path to directory with models to test. Can be a single run, a single checkpoint, or multiple runs')
     
-    parser.add_argument('-o','--outfile',default='test_samples.log', 
-                        help='file name to dump results into')
-    return parser
+    parser.add_argument('-c','--config', default=None, type=str, required=False,
+                        help='path/to/eval_config.yaml. If None will use ./config/eval/eval_config.yaml')
+    
+    parser.add_argument('--sweep', action='store_true',
+                        help='perform a grid search over parameters')
+    return parser.parse_args()
 
 if __name__ == '__main__':
-    args = get_parser().parse_args()
-    if args.mpath is None:
-        if args.modelname == '*':
-            run_path = Path(cpaths.RUNS_DIR)
-            for model_dir in run_path.iterdir():
-                print('MODEL_DIR:', model_dir)
-                for dpath in model_dir.iterdir():
-                    print('RUNNING_DATASET:', dpath)
-                    for p in dpath.iterdir():
-                        if any(p.glob('config.yaml*')):
-                            print(p)
-                            
-                            try:
-                                meval.eval_model(p, outfile=args.outfile, )
-                            except Exception as e:
-                                print(e)
-        else:
-            run_path = Path(cpaths.RUNS_DIR/args.modelname)
-            for dpath in run_path.iterdir():
-                print('RUNNING:', dpath)
-                for p in dpath.iterdir():
-                    if any(p.glob('config.yaml*')):
-                        print(p)
-                        
-                        try:
-                            meval.eval_model(p, outfile=args.outfile, )
-                        except Exception as e:
-                            print(e)
+    args = get_cli_args()
+
+    run_path = Path(args.runpath)
+    config_path = args.config if args.config else cpaths.ROOT_DIR/'config'/'eval'/'eval_config.yaml'
+    
+    config = OmegaConf.load(config_path)
+    print('loaded config from:', config_path)
+    
+    if args.sweep:
+        cfg = config.sweep
+        meval.eval_params(run_path, param_grid=cfg.param_grid, prompts=cfg.prompts, outfile=cfg.outfile, question_author = cfg.question_author, response_authors=cfg.response_authors)
     else:
-        run_path = Path(args.mpath)
-        meval.eval_model(run_path, outfile=args.outfile, )
+        cfg = config.sample
+        #test_qs = meval.get_test_questions(cpaths.DATA_DIR/'testfiles/test_questions.txt', None, True)
+        meval.sample_trained(run_path, prompts=cfg.prompts, outfile=cfg.outfile, genconfig_modes=cfg.genconfig_modes, question_author = cfg.question_author, response_authors=cfg.response_authors)

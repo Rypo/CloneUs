@@ -26,6 +26,8 @@ config/users.json
 # custom config.yaml files
 config/train/*
 !config/train/train_config.yaml
+config/eval/*
+!config/eval/eval_config.yaml
 # Dev files
 nbs
 imgs
