@@ -83,8 +83,10 @@ def awq_from_checkpoint(model_path, awq_outpath=None):
 # https://colab.research.google.com/drive/1HzZH89yAXJaZgwJDhQj9LqSBux932BvY#scrollTo=KE8xjwlL8DnA
 @torch.inference_mode()
 def awq_from_merged(merged_dirpath, quant_config, awq_outpath=None):
+    merged_dirpath = Path(merged_dirpath)
     if awq_outpath is None:
-        awq_outpath = (Path(merged_dirpath).parent/'awq')
+        ckpt_name = merged_dirpath.name.replace('-merged','')
+        awq_outpath = merged_dirpath.with_name(ckpt_name+'-awq')
     
     awq_outpath = str(awq_outpath)
 
@@ -117,18 +119,16 @@ def get_parser():
                         help='merge peft model and save the weights')
     parser.add_argument('--awq', default=False, action='store_true', 
                         help='quantize a model with AWQ')
-    parser.add_argument('--mergedir', type=str, default='merged', 
-                        help='name of subdir in checkpoint-xxxx to store merged files')
-    parser.add_argument('--awqdir', type=str, default='awq', 
-                        help='name of subdir in checkpoint-xxxx to store awq quantized files')
     return parser
 
 
 if __name__ == '__main__':
     args = get_parser().parse_args()
     ckpt_path = Path(args.checkpoint_path)
-    merge_path = ckpt_path/args.mergedir
-    awq_path = ckpt_path/args.awqdir
+    
+    merge_path = ckpt_path.with_name(ckpt_path.name+'-merged')
+    awq_path = ckpt_path.with_name(ckpt_path.name+'-awq')
+
     has_merged = merge_path.exists() and any(merge_path.iterdir())
     
     if args.merge:
