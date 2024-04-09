@@ -1,3 +1,4 @@
+import re
 import datetime
 from pathlib import Path
 
@@ -9,22 +10,23 @@ import config.settings as settings
 # def gb_part(candidates, part, part_max=5):
 #     return dict(more_itertools.groupby_transform(candidates, lambda c: c.parts[part], None, (lambda ncands: gb_part(ncands, part+1) if part < part_max else list(ncands))))
 
-def gb_part(candidates, part, part_max=5):
-    '''groupby subparts of paths recursively
+def gb_part(candidates:list[Path], part:int, max_depth=5, return_type=list):
+    '''recursive groupby subparts of paths 
     Note: structure [(part, [(part, ...)]] can be {part: {part: {part: []}}} if change recurse-case list -> dict
     '''
-    if part > part_max:
+    if part > max_depth:
         return list(candidates)
-    return list(more_itertools.groupby_transform(candidates, lambda c: c.parts[part], None, lambda ncands: gb_part(ncands, part+1)))
+    return return_type(more_itertools.groupby_transform(candidates, lambda c: c.parts[part], None, 
+                                                        lambda ncands: gb_part(ncands, part+1, max_depth, return_type)))
 
-def print_basic_ckpttree(candidates, init_part=3, part_max=5):
+def print_basic_ckpttree(candidates:list[Path], init_part=3, max_depth=5):
     '''../runs/full/ - skip
     mistral-7b-i4/
      chunk4h_eos/
       cnk8192-cosine-wu0.1-lora_a64_r32_d0.5_kgqvoud/
        checkpoint-380'''
     spc=' '
-    for model,datasets in gb_part(candidates, init_part, part_max):
+    for model,datasets in gb_part(candidates, init_part, max_depth, return_type=list):
         print(f'{model}')
         for dataset,modelbases in datasets:
             print(f'{spc*2}- {dataset}')
@@ -32,12 +34,12 @@ def print_basic_ckpttree(candidates, init_part=3, part_max=5):
                 print(f'{spc*4}* {modelbase}')
                 for checkpoint in checkpoints:
                     print(f'{spc*6}+ {checkpoint.name}')
-                    subchecks = sorted([*checkpoint.rglob('merged'), *checkpoint.rglob('awq')])
-                    for sub in subchecks:
-                        print(f'{spc*8}- {sub.name}')
+                    #subchecks = sorted([*checkpoint.rglob('merged'), *checkpoint.rglob('awq')])
+                    #for sub in subchecks:
+                    #    print(f'{spc*8}- {sub.name}')
 
     
-def fmt_chkpts(model_basedir:Path, checkpoints: list[Path], rel_to=None, wrapcodeblock=False):
+def fmt_checkpoints(model_basedir:Path, checkpoints: list[Path], rel_to=None, wrapcodeblock=False):
     optstring = f'{model_basedir.relative_to(rel_to) if rel_to else model_basedir.name}'
 
     #checkp_opts = '\n'.join(['- {}'.format(str(o).replace(str(model_basedir)+'/','')) for o in cmatchs])
@@ -48,13 +50,28 @@ def fmt_chkpts(model_basedir:Path, checkpoints: list[Path], rel_to=None, wrapcod
     return optstring,checkp_opts
 
 
-def find_checkpoints(model_basedir: Path, rel_to=None, md_format=True, wrapcodeblock=False):
-    cmatchs = sorted([*model_basedir.rglob('checkpoint*'), *model_basedir.rglob('checkpoint*/merged'), *model_basedir.rglob('checkpoint*/merged/awq')])
+def _find_checkpoints(model_basedir: Path, rel_to=None, md_format=True, wrapcodeblock=False):
+    cmatchs = sorted([*model_basedir.rglob('checkpoint*')])
+    
     if md_format:
-        return fmt_chkpts(model_basedir, cmatchs, rel_to, wrapcodeblock)
+        return fmt_checkpoints(model_basedir, cmatchs, rel_to, wrapcodeblock)
 
     return model_basedir,cmatchs
 
+def find_checkpoints(search_path: Path, include_pattern:str|re.Pattern=None, exclude_pattern:str|re.Pattern=None, require_config:bool=True, ):
+
+    ckpt_paths = sorted([c for c in search_path.rglob('checkpoint*') 
+                         if (not require_config) or (c.parent/'config.yaml').exists()
+                         ])
+    if include_pattern:
+        irgx = re.compile(include_pattern, re.I)
+        ckpt_paths = [c for c in ckpt_paths if irgx.search(str(c))]
+
+    if exclude_pattern:
+        ergx = re.compile(exclude_pattern, re.I)
+        ckpt_paths = [c for c in ckpt_paths if not ergx.search(str(c))]
+
+    return ckpt_paths
 
 class PersistentStorage:
     def __init__(self, pstore_file=None) -> None:
