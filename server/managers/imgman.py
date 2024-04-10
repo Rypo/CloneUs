@@ -26,6 +26,7 @@ from diffusers import (
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from diffusers.utils import load_image, make_image_grid
+from transformers.image_processing_utils import select_best_resolution
 from accelerate import cpu_offload
 from DeepCache import DeepCacheSDHelper
 from PIL import Image
@@ -179,18 +180,24 @@ class DiffusionConfig:
             filled_kwargs[k] = v
         return filled_kwargs
         
-    def nearest_dims(self, img_wh):
+    def nearest_dims(self, img_wh, use_hf_sbr=True):
+        # TODO: compare implementation vs transformers select_best_resolution
+    
         dim_out = self.img_dims
         
         if isinstance(self.img_dims, list):
             w_in, h_in = img_wh
-            ar_in = w_in/h_in
-            dim_out = min(self.img_dims, key=lambda wh: abs(ar_in - wh[0]/wh[1]))
+            if use_hf_sbr:
+                resolutions = [(h,w) for w,h in self.img_dims] # May not matter since symmetric, but a precaution
+                dim_out = select_best_resolution((h_in, w_in), possible_resolutions=resolutions)
+                dim_out = (dim_out[1],dim_out[0]) # (h,w) -> (w,h)
+            else:
+                ar_in = w_in/h_in
+                dim_out = min(self.img_dims, key=lambda wh: abs(ar_in - wh[0]/wh[1]))
         
         return dim_out
     
     def get_dims(self, aspect:typing.Literal['square','portrait', 'landscape']):
-        
         dim_out = self.img_dims
         
         if isinstance(self.img_dims, list):
@@ -365,7 +372,7 @@ class OneStageImageGenManager:
             mlabel = 'I2I'
             
         t_up = t_re = t_main  # default in case skip
-        # Upscale + Refine
+        # Upscale + Refine - must be up->refine. refine->up does not improve quality
         if refine_steps > 0 and refine_strength: 
             image = self.upsampler.upscale(img=image, scale=1.5)
             t_up = time.perf_counter()
@@ -397,8 +404,8 @@ class OneStageImageGenManager:
         img_dims = self.config.get_dims(fkwg['aspect'])
         target_size = (img_dims[1], img_dims[0]) # h,w
         
-        # We don't wanna run refine unless refine steps passed
-        refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength']) #if fkwg['refine_steps'] else 0
+        # We don't want to run refine unless refine steps passed
+        refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
         image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], 
                               guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, refine_strength=refine_strength, target_size=target_size, )
         
@@ -697,7 +704,7 @@ class SDXLTurboManager(OneStageImageGenManager):
                 guidance_scale = CfgItem(0.0, locked=True),
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = (512,512),
-                refine_strength = 0.,
+                #refine_strength = 0.,
                 locked=['guidance_scale', 'negative_prompt', 'aspect', 'denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ), 
             offload=offload)
@@ -733,7 +740,7 @@ class SDXLManager(TwoStageImageGenManager):
         )
 
 class DreamShaperXLManager(OneStageImageGenManager):
-    def __init__(self, offload=False):
+    def __init__(self, offload=True):
         super().__init__(
             model_name = 'dreamshaper_turbo', # bf16 saves ~3gb vram over fp16
             model_path = 'lykon/dreamshaper-xl-v2-turbo', # https://civitai.com/models/112902?modelVersionId=333449
@@ -741,7 +748,7 @@ class DreamShaperXLManager(OneStageImageGenManager):
                 steps = CfgItem(8, bounds=(4,8)),
                 guidance_scale = CfgItem(2.0, locked=True),
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
-                img_dims = [(1024,1024), (832,1216)],
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
                 #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
                 locked=['guidance_scale', 'denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
             ),
