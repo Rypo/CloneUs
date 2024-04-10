@@ -116,7 +116,7 @@ def write_samples(gen_samples:dict[str, dict[str, list[str]]], out_filepath:str|
 def eval_ckpt(clo:Cloneus, checkpoint_path:Path,  genconfig_modes:list[str], prompts:list[str], question_author:str, author_list:list[str]):
     '''Evaluate a single checkpoint in run'''
     #clo.switch_model(clo.mdir_comps.basedir_path, ckpt_subdir=checkpoint_name)
-    clo.switch_model(checkpoint_path)
+    clo.swap_model(checkpoint_path)
     checkpoint_name = checkpoint_path.name
     gc_inps_outs = {} # {gmode1 : {input_text: [out1, out2, ... ]}}
     for gmode in genconfig_modes:
@@ -212,7 +212,7 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
     param_sets = [dict(zip(spgrid, pvals)) for pvals in itertools.product(*spgrid.values())]
     print(f'Evaluating {len(param_sets)} parameter combinations')
     
-    outfile = clo.mdir_comps.basedir_path/outfile
+    outfile = clo.path_data.run_path/outfile
     with open(outfile, 'w') as f:
         for prompt in prompts:
             input_text, _, _, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')

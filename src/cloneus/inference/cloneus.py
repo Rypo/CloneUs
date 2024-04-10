@@ -6,6 +6,7 @@ import itertools
 from pathlib import Path
 from threading import Thread
 from collections import namedtuple
+from dataclasses import dataclass
 from contextlib import contextmanager
 import numpy as np
 import pandas as pd
@@ -38,27 +39,39 @@ from cloneus.inference import genconfig
 from cloneus.inference import load
 
 
-ModelFiles = namedtuple('ModelFiles',['basedir_path','ckpt_subdir','config_path', 'modeldir_path'])
-
-def modeldir_components(model_dir, checkpoint_dir=None):
-    model_path = Path(model_dir)
-    base_path = model_path
-    while not (base_path/'config.yaml').exists():
-        base_path = base_path.parent
-        if base_path.parent==base_path:
-            raise FileNotFoundError(f'config.yaml not found along parent paths. model_path: {model_path}')
-
-
-    if checkpoint_dir is None:
-        checkpoint_dir = str(model_path.relative_to(base_path))
-        if checkpoint_dir in ['config.yaml', '.']:
-            checkpoint_dir=None
+@dataclass
+class ModelPathComponents:
+    checkpoint_path: Path # modeldir_path
+    run_path: Path # basedir_path
+    config_path: Path # config_path
     
-    if checkpoint_dir is None:
-        raise FileNotFoundError('No checkpoint dir found')
-    
-    return ModelFiles(basedir_path=base_path, ckpt_subdir=checkpoint_dir, config_path=base_path/'config.yaml', modeldir_path=base_path/checkpoint_dir)
-    
+    checkpoint_name: str # ckpt_subdir
+    run_name: str
+    dataset_name: str
+    base_model_alias: str # The nickname assigned in training e.g. "mistral-inst-OpenHermes2.5" instead of "OpenHermes-2.5-Mistral-7B"
+    has_adapter: bool # Needs adapter for hotswapping and base ask/chat.
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path:str|Path):
+        checkpoint_path = Path(checkpoint_path)
+        run_path = checkpoint_path.parent
+        config_path = (run_path/'config.yaml')
+        if not config_path.exists():
+            raise FileNotFoundError(f'config.yaml not found along parent paths. checkpoint_path: {checkpoint_path}')
+        
+        has_adapter = (checkpoint_path/'adapter_config.json').exists()
+
+        _dataset_path = run_path.parent
+        _base_model_path = _dataset_path.parent
+
+        checkpoint_name = checkpoint_path.name
+        run_name = run_path.name
+        dataset_name = _dataset_path.name
+        base_model_alias = _base_model_path.name
+
+        return cls(checkpoint_path, run_path, config_path, checkpoint_name, run_name, dataset_name, base_model_alias, has_adapter)
+
+        
 def dtype_to(dtype, to:typing.Literal['str','torch'], default=None):
     if dtype is None:
         print('USING DEFAULT bf16, -- dtype_to')
@@ -84,6 +97,10 @@ def dtype_to(dtype, to:typing.Literal['str','torch'], default=None):
 
 @contextmanager
 def batchsafe_tokenizer(tokenizer):
+    # TODO: In retrospect, this is not necessary. Could just set this on init. 
+    # Any batch will *always* use this,
+    # Any Non-batched won't use padding at all, so side/token is irrelevant anyway.
+    # That said, still need to test this assertion before removing
     pad_side = tokenizer.padding_side
     pad_tokenid = tokenizer.pad_token_id
     
@@ -118,12 +135,11 @@ class Cloneus:
 
         # if we don't filter out None from kwargs, config is over written with None
         kwargs = {k:v for k,v in kwargs.items() if v is not None}
-        mdir_comps = modeldir_components(model_dir, ckpt_subdir)
-        self.mdir_comps = mdir_comps
-        self.basemodelnick=self.mdir_comps.basedir_path.resolve().relative_to(cpaths.RUNS_DIR).parts[0]
-        #config = self.load_config(config_file, ckpt_subdir, **kwargs)
-        config = OmegaConf.load(mdir_comps.config_path)
-        config.update(model_dir = mdir_comps.modeldir_path, **kwargs)
+        ckpt_path = Path(model_dir)/ckpt_subdir if ckpt_subdir else Path(model_dir)
+        self.path_data = ModelPathComponents.from_checkpoint(ckpt_path)
+        
+        config = OmegaConf.load(self.path_data.config_path)
+        config.update(model_dir = self.path_data.checkpoint_path, **kwargs)
         
         self.model_dir = config.model_dir
         self.ctx_len = config.ctx_len
@@ -151,21 +167,30 @@ class Cloneus:
 
         return config
 
-
     @load.cleanup
-    def switch_model(self, model_dir:(str|Path), ckpt_subdir:str=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname:str=None) -> None:
-        cur_basemodelnick=self.basemodelnick
+    def swap_model(self, model_dir:(str|Path), ckpt_subdir:str=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname:str=None) -> None:
+        last_model_id = self.config.model_id
+        last_has_adapter = self.path_data.has_adapter
         self.config = self._config_init(model_dir, ckpt_subdir, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
-        new_basemodelnick=self.basemodelnick
         
-        if cur_basemodelnick==new_basemodelnick and self.model is not None:
-            #print('Swap Adapter. dtype, attn_implementation will be ignored')
-            # NOTE: This makes dtype and attn_implementation be completely ignored
-            checkpoint = self.mdir_comps.ckpt_subdir
-            adapter_name = (self.mdir_comps.basedir_path.name+'-'+checkpoint).replace('.','')
+        base_unchanged = self.config.model_id==last_model_id
+        lora_to_lora = self.path_data.has_adapter and last_has_adapter
+        
+        if self.model and base_unchanged and lora_to_lora:
+            # NOTE: attn_implementation will be completely ignored
+            
+            adapter_name = (self.path_data.run_name + '-' + self.path_data.checkpoint_name).replace('.','')
             if not adapter_name in self.model.peft_config:
-                self.model.load_adapter(self.mdir_comps.basedir_path/checkpoint, adapter_name=adapter_name)
+                self.model.load_adapter(self.path_data.checkpoint_path, adapter_name=adapter_name)
+            
             self.model.set_adapter(adapter_name)
+            for name,param in self.model.named_parameters():
+                # necessary -- https://huggingface.co/docs/peft/v0.10.0/en/package_reference/lora#peft.LoraModel.set_adapter
+                if hasattr(param,'requires_grad'):
+                    param.requires_grad_(False)
+
+            if dtype is not None:
+                self.model.to(dtype=dtype)
         else:
             self.load_model()
 
@@ -461,7 +486,7 @@ class Cloneus:
         return list(zip(tokstrs,top_probs.tolist()))
     
     @torch.inference_mode()
-    def next_author_probs(self, author_messages: list[tuple[str,str]], top_k_next_tokens: int = 5, author_list: list[str]=None):
+    def next_author_probs(self, author_messages: list[tuple[str,str]], top_k_next_tokens: int, author_list: list[str]=None):
         '''Returns a list of (authtok, proba) pairs. Note this is only the FIRST part of an author name unless author_list is provided.
         If author_list is given, try to map one of the author names in the list to the token segment
         '''
