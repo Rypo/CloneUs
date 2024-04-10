@@ -1,32 +1,50 @@
 import re
+import typing
 import datetime
+from enum import Enum
 from pathlib import Path
 
 import more_itertools
 from omegaconf import OmegaConf
 
-import config.settings as settings
+
+class RunLevel(Enum):
+    '''Represents the last four constituents parts of a checkpoint path location.
+    i.e. path/to/.../cloneus/runs/full/MODEL/DATASET/RUNNAME/CHECKPOINT
+    '''
+    MODEL = -4
+    DATASET = -3
+    RUNNAME = -2
+    CHECKPOINT = -1
 
 # def gb_part(candidates, part, part_max=5):
 #     return dict(more_itertools.groupby_transform(candidates, lambda c: c.parts[part], None, (lambda ncands: gb_part(ncands, part+1) if part < part_max else list(ncands))))
 
-def gb_part(candidates:list[Path], part:int, max_depth=5, return_type=list):
-    '''recursive groupby subparts of paths 
-    Note: structure [(part, [(part, ...)]] can be {part: {part: {part: []}}} if change recurse-case list -> dict
-    '''
-    if part > max_depth:
-        return list(candidates)
-    return return_type(more_itertools.groupby_transform(candidates, lambda c: c.parts[part], None, 
-                                                        lambda ncands: gb_part(ncands, part+1, max_depth, return_type)))
+# TODO: group_level != model seems pointless. Needs rework. Setting group_level to anything else with return_type=dict will clobber values
+def gb_part(checkpoint_paths:list[Path], group_level:typing.Literal['model','dataset','runname','checkpoint']='model', final_level:typing.Literal['model','dataset','runname','checkpoint']='runname', return_type=list):
+    '''Recursively group by subparts of checkpoint run paths.
 
-def print_basic_ckpttree(candidates:list[Path], init_part=3, max_depth=5):
+    Args:
+        checkpoint_paths: Flat list of for absolute or relative checkpoint paths
+        group_level: Directory level to group checkpoints by
+        final_level: Level to stop nesting groups and return a list of remaining paths
+        return_type: Output structure. If list, groups are lists of tuples. If dict, groups are dicts of dicts
+            e.g. [(part, [(part, [...,])]] or {part: {part: {part: [...,]}}}
+    '''
+    part = RunLevel[group_level.upper()].value if isinstance(group_level, str) else group_level
+    max_depth = RunLevel[final_level.upper()].value if isinstance(final_level, str) else final_level
+    if part > max_depth:
+        return list(checkpoint_paths)
+    return return_type(more_itertools.groupby_transform(checkpoint_paths, lambda c: c.parts[part], None, lambda ncands: gb_part(ncands, part+1, max_depth, return_type)))
+
+def print_basic_ckpttree(candidates:list[Path], group_level='model', final_level='runname'):
     '''../runs/full/ - skip
     mistral-7b-i4/
      chunk4h_eos/
       cnk8192-cosine-wu0.1-lora_a64_r32_d0.5_kgqvoud/
        checkpoint-380'''
     spc=' '
-    for model,datasets in gb_part(candidates, init_part, max_depth, return_type=list):
+    for model,datasets in gb_part(candidates, group_level, final_level, return_type=list):
         print(f'{model}')
         for dataset,modelbases in datasets:
             print(f'{spc*2}- {dataset}')
@@ -75,6 +93,7 @@ def find_checkpoints(search_path: Path, include_pattern:str|re.Pattern=None, exc
 
 class PersistentStorage:
     def __init__(self, pstore_file=None) -> None:
+        import config.settings as settings
         self.pstore_file = pstore_file if pstore_file is not None else settings.CONFIG_DIR/'persistent_storage.yaml'
         try:
             self.persistent_storage = OmegaConf.load(self.pstore_file)
