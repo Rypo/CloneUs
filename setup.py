@@ -40,6 +40,8 @@ setup(
             'auto-gptq',
             'autoawq',
             'exllamav2',
+            'hqq',
+            'aqlm[gpu,cpu]'
         ],
     },
     url='https://github.com/Rypo/CloneUs',
