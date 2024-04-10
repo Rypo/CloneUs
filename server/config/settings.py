@@ -49,10 +49,11 @@ def _read_models(models_file='models.json'):
         trained_models = json.load(f)
     return trained_models
 
-TRAINED_MODELS = _read_models(models_file='models.json')
-ACTIVE_MODEL_CKPT = RUNS_DIR/TRAINED_MODELS[-1]["ckpt"] # Use the last added model by default
+ALL_MODELS = _read_models(models_file='models.json')
+BEST_MODELS = ALL_MODELS['BEST']
+YEAR_MODELS = ALL_MODELS['ERA']
 
-
+ACTIVE_MODEL_CKPT = RUNS_DIR/BEST_MODELS[-1]["ckpt"].split('runs/full/')[-1] # Use the last added model by default, split just in case
 
 
 

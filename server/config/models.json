@@ -1,8 +1,16 @@
-[
-    {
-        "name": "example1",
-        "desc": "A user-friendly memorable description of your model < 100 chars",
-        "ckpt": "relativepath/to/your/model_checkpoint-999"
-    }
-
-]
+{
+    "BEST": [
+        {
+            "name": "example1",
+            "desc": "A user-friendly memorable description of your model < 100 chars",
+            "ckpt": "relativepath/to/your/model_checkpoint-999"
+        }
+    ],
+    "ERA": [
+        {
+            "years": "2020-2022",
+            "gconf": "ms",
+            "ckpt": "relativepath/to/your/yearfiltered/model_checkpoint-999"
+        }
+    ]
+}

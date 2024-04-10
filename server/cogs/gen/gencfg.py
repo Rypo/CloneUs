@@ -1,3 +1,4 @@
+import random
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -44,6 +45,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
     # discord.utils.MISSING 
     #self.cfgmgr = ConfigManager(STATE_CONFIG)
     default_system_msg: str = None
+    model_randomize_proba: float = None
 
     def check_state(self):
         # TODO: check streaming mode/num beams
@@ -183,11 +185,48 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             version: The model that said that line
         """
 
-        genmap = {m['name']: settings.RUNS_DIR/m['ckpt'].split('runs/full/')[-1] for m in settings.TRAINED_MODELS} 
+        genmap = {m['name']: settings.RUNS_DIR/m['ckpt'].split('runs/full/')[-1] for m in settings.BEST_MODELS} 
         await ctx.defer()
         await self.clomgr.load(genmap[version.value], gconfig_fname='best_generation_config.json')
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')
+    
+    @setarg.command(name='randomode')
+    async def set_randomode(self, ctx: commands.Context, change_rate: int = 5):
+        """Enabled random swapping between trained models mid conversation.
+        
+        Args:
+            change_rate: Average number of messages between model swaps. Set=0 to disable.
+        """
+        if change_rate == 0:
+            self.model_randomize_proba = None
+            self.clomgr.model_randomize_proba = self.model_randomize_proba
+            return await ctx.send('Took meds. Sticking to 1 personality.')
+        self.model_randomize_proba = 1/change_rate
+        self.clomgr.model_randomize_proba = self.model_randomize_proba
 
+        return await ctx.send(f'Brain swap on average every {change_rate} messages.')
+
+    @setarg.command(name='era')
+    @app_commands.choices(period=cmd_choices.MODEL_YEARS)
+    async def set_era(self, ctx: commands.Context, period: app_commands.Choice[str]):
+        """Wind back the clock and talk to our past selves.
+        
+        Args:
+            period: The years the model has been trained on.
+        """
+        
+        yearmap = {m['years']: settings.RUNS_DIR/m['ckpt'].split('runs/full/')[-1] for m in settings.YEAR_MODELS}
+        if period.value == 'random':
+            rperiod=random.choice(list(yearmap))
+            model_path = yearmap[rperiod]
+            period_msg = f'||{rperiod}||'
+        else: 
+            model_path = yearmap[period.value] #settings.RUNS_DIR/period.value['ckpt'].split('runs/full/')[-1]
+            period_msg = period.name
+        await ctx.defer()
+        await self.clomgr.load(model_path, gconfig_fname=None)
+        _ = self.clomgr.update_genconfig({"top_k": 80, "top_p": 0.9, "repetition_penalty": 1.1, "temperature": 1.2})
+        await ctx.send(f"Traveled back to {period_msg}. _Paradoxes will void warranty_")
 
     @commands.hybrid_command(name='gc')
     async def genconfig(self, ctx: commands.Context, *, flags: cmd_flags.GenerationFlags):
