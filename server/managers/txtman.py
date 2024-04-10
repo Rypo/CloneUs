@@ -1,8 +1,9 @@
 import re
-
+import gc
 import datetime
 import subprocess
 from pathlib import Path
+from functools import cached_property
 import random
 import typing
 
@@ -39,9 +40,10 @@ class CloneusManager():
     def __init__(self, bot):
         '''Handler/Middleware for all interactions with Cloneus class and between discord. Importantly, does NOT have commands'''
         self.bot = bot
+        self.all_checkpoints = io_utils.find_checkpoints(settings.RUNS_DIR, require_config=True) # .relative_to(settings.ROOT_DIR)
         # self._load_nowait = load_nowait
         self.clo = None
-        self.mdir_comps = None
+        self.path_data = None
         
         self.tts_mode = False
         self.emojis = self.bot.guilds[0].emojis
@@ -64,6 +66,12 @@ class CloneusManager():
     def is_ready(self):
         return self.status == 'up'
     
+    @cached_property
+    def hot_swappable_checkpoints(self):
+        if self.is_ready:
+            return [c for c in self.all_checkpoints if self.path_data.base_model_alias in str(c)]
+        return []
+    
     def list_status(self, stored_yt_quota=0):
         '''Check bot status.'''
         # ✅⚠❌🛑💯🟥🟨🟩⬛✔🗯💭💬👁‍🗨🗨
@@ -72,9 +80,9 @@ class CloneusManager():
         gconf_settings.pop('sequence_bias',None)
         vram_use, vram_total = get_gpu_memory()
         model_name,checkpoint='',''
-        if self.mdir_comps:
-            model_name = self.mdir_comps.basedir_path.name
-            checkpoint = self.mdir_comps.ckpt_subdir
+        if self.path_data:
+            model_name = self.path_data.checkpoint_path
+            checkpoint = self.path_data.checkpoint_name
         statuses = [
             ('Bot status', self.status.title(), " ✔" if self.status=="up" else " ✖"),
             ('Model', model_name, f"/{checkpoint}"),
@@ -104,7 +112,7 @@ class CloneusManager():
             if gconfig_fname is None:
                 gconfig_fname = 'generation_config.json'
             self.clo = Cloneus(model_dir=model_dir, ckpt_subdir=ckpt_subdir, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
-        self.mdir_comps = self.clo.mdir_comps
+        self.path_data = self.clo.path_data
 
     @async_wrap_thread
     def load(self, model_dir: str|Path, ckpt_subdir=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
@@ -115,9 +123,9 @@ class CloneusManager():
                                      dtype=dtype, attn_implementation=attn_implementation)
             self.clo.load_model()
         else:
-            self.clo.switch_model(model_dir, ckpt_subdir, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
+            self.clo.swap_model(model_dir, ckpt_subdir, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
         
-        self.mdir_comps = self.clo.mdir_comps
+        self.path_data = self.clo.path_data
         self.status = 'up'
         
         esc_authtags = [re.escape(roles.format_author_tag(u, self.clo.author_tag)) for u in roles.author_display_names]
@@ -125,26 +133,62 @@ class CloneusManager():
         
         model_logger.info(f'Using model:\n - {str(self.clo.model_dir)} - ({self.clo.dtype} / {self.clo.attn_implementation})')
         model_logger.info(f'Generation mode init: "{self.clo.gen_alias}"\n - {self.clo.get_genconf(verbose=True)}\n')
-
-    def modelview(self, modelname_filter=None, remove_empty=True):
-        pages = {}
-        for model_pardir in settings.RUNS_DIR.iterdir():
-            title=str(model_pardir.relative_to(settings.RUNS_DIR))
-            pages[title] = []
-            for dataset_pardir in model_pardir.iterdir():
-                field_title = str(dataset_pardir.relative_to(model_pardir))
-                model_outpaths = sorted([p.parent for p in dataset_pardir.rglob('config.yaml') if any(p.parent.glob('checkpoint*'))])
-                if modelname_filter:
-                    model_outpaths = [o for o in model_outpaths if o.match(f'*{modelname_filter}*')]
-                if model_outpaths:
-                    data = '\n'.join('{}{}'.format(*io_utils.find_checkpoints(cand, dataset_pardir, True, False)) for cand in model_outpaths)
-                    fdata = f'```\n{data}\n```'
-                    pages[title].append((field_title, fdata))
+        gc.collect()
+    
+    async def load_random_model(self, fast_proba=0.5):
+        # TODO: determine if swapping between 2 different mistral models is faster mistral->llama
+        # e.g. OpenHeremes -> mistral-instruct-v1 faster than llama2-13b -> mistral7b 
+        # If so, can factor that in to probablities as well.
         
+        # model_ckpt_groups = io_utils.gb_part(self.all_checkpoints, 'model', 'model')
+        # total_ckpts = sum(len(cg) for m,cg in model_ckpt_groups)
+        # for modelname,ckptgrp in model_ckpt_groups: print((modelname, len(ckptgrp), len(ckptgrp)/total_ckpts))
+
+        gconfig = self.gen_config
+        fast_ckpts = self.hot_swappable_checkpoints
+        if random.random() < fast_proba and len(fast_ckpts) > 1:
+            options = fast_ckpts #[settings.RUNS_DIR/m['ckpt'] for m in settings.TRAINED_MODELS]
+        else:
+            options = self.all_checkpoints
+        
+        next_model = random.choice(options)
+            
+        await self.load(next_model)
+        self.clo.gen_config = gconfig
+        print(f'CHANGE PLACES: {next_model}')
+
+    def modelview_data(self, name_filter=None, remove_empty=True):
+        '''Format checkpoints for use in list/switch model view'''
+        pages = {}
+        inc_pat = (f'.*{name_filter}.*' if name_filter else None)
+        rel_runs_dir = settings.RUNS_DIR#.relative_to(settings.ROOT_DIR) # runs/full
+        all_ckpts = io_utils.find_checkpoints(rel_runs_dir, include_pattern=inc_pat, require_config=True)
+        ckpt_grps = io_utils.gb_part(all_ckpts, 'model', 'runname', list)
+        
+        for model_name, dataset_runs in ckpt_grps:
+            title=model_name
+            pages[title] = []
+            for dataset_name, run_sets in dataset_runs:
+                field_title = dataset_name
+                data_segments = []
+                for run_name, ckptlist in run_sets:
+                    ckpt_md_list = ''.join(['\n- {}'.format(o.name) for o in sorted(ckptlist, key=lambda c: int(c.name.split('-')[1]) ) ])
+                    md_list_segment = f'{run_name}{ckpt_md_list}'
+                    data_segments.append(md_list_segment)
+                    
+                    #print(model_name, dataset_name, run_name, len(md_list_segment))
+                    
+                data = '\n\n'.join(data_segments)
+                fdata = f'```\n{data}\n```'
+                
+                pages[title].append((field_title, fdata))
+                #print('fdata len:',len(fdata))
+                    
         if remove_empty:
             return [(k,v) for k,v in pages.items() if v]
         
         return list(pages.items())
+    
     
     def set_guidance_phrase(self, author:str, phrase:str, guidance_scale:float=None):
         prev_phrase = self.clo.guidance_phrases[author]
@@ -192,7 +236,7 @@ class CloneusManager():
     @async_wrap_thread
     def predict_author(self, message_cache:list[discord.Message],  autoreply_mode: str, author_candidates: list[str]=None) -> str:
         llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False)
-        author_probas = self.clo.next_author_probs(llm_input_messages, top_k_next_tokens=5, author_list=roles.author_display_names)
+        author_probas = self.clo.next_author_probs(llm_input_messages, top_k_next_tokens=len(roles.author_display_names), author_list=roles.author_display_names)
         
         model_logger.info(f'Autobot Probablities: {author_probas}')
         if author_candidates:
@@ -215,6 +259,10 @@ class CloneusManager():
             case 'urand':
                 author_choice = random.choices(authors, None)[0]
         
+        if not author_choice.isalnum():  
+            # failsafe against empty/punctuation brackets
+            author_choice = random.choice(roles.author_display_names)
+
         return author_choice
     
 
@@ -503,5 +551,8 @@ class CloneusManager():
                 #await self.send_collect(ctx, discord_outs, char_limit=2000)
                 messages = await self.send_collect(ctx, discord_outs, char_limit=2000)
         
+        if self.model_randomize_proba and random.random() < self.model_randomize_proba: 
+            await self.load_random_model()
+
         return messages
 
