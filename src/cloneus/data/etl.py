@@ -34,15 +34,17 @@ def ids_to_displaynames() -> tuple[dict,int]:
 
     id2display = {**user_id_display, **bot_id_display}
     
-    
     return id2display, cloneus_bot_id
 
 
-def _targeted_chat_filter(df_chat):
-     # Drop very specific instance in 2018 when Char RNN trained on chat was dumped in chat (= 8 rows)
-    mask_user_colon = df_chat['Content'].str.contains('|'.join(u + ':' for u in roles.author_display_names), case=False)
-    mask_23ju18 = df_chat['Date'].dt.date == pd.to_datetime('2018-07-23').date()
-    df_chat = df_chat.drop(index=df_chat[mask_user_colon & mask_23ju18].index)
+def _targeted_chat_filter(df_chat, enable=False):
+    '''Drop very specific instance in 2018 when Char RNN trained on chat was dumped in chat.
+    Nothing will be dropped unless these conditions apply, but set enable=False to bypass.
+    '''
+    if enable:
+        mask_user_colon = df_chat['Content'].str.contains('|'.join(u + ':' for u in roles.author_display_names), case=False)
+        mask_23ju18 = df_chat['Date'].dt.date == pd.to_datetime('2018-07-23').date()
+        df_chat = df_chat.drop(index=df_chat[mask_user_colon & mask_23ju18].index)
     return df_chat
 
 def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
@@ -58,7 +60,8 @@ def preprocess_df(chat_csv: str, cmd_prefixes=('!','/')):
     df_chat['Content'] = df_chat['Content'].str.replace('(https://cdn.discordapp.com\S+)','', regex=True).replace('',None) 
     df_chat = df_chat.dropna(subset='Content').reset_index(drop=True)
 
-    #df_chat = _targeted_chat_filter(df_chat)
+    # Feel free to set enable=False unless you also happen to have spammed your server with a CharRNN July 23, 2018
+    df_chat = _targeted_chat_filter(df_chat, enable=True)
     
     id2display, cloneus_bot_id = ids_to_displaynames()
     df_chat['user'] = df_chat['AuthorId'].map(id2display)
@@ -175,6 +178,9 @@ def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_t
     Returns:
         pd.DataFrame: A DataFrame with the formatted text and session splits for training and evaluation.
     """
+    # TODO: Argument to allow for data subset training 
+    # df_proc = df_proc[(df_proc.Date > '2020') & (df_proc.Date < '2022')].copy()
+
     df_chats = df_proc.groupby('user_sequence', as_index=False)[
         ['user', 'Date', 'time_gap', 'text','pre_bot']].agg(
         {'user':'first', 'Date':'last', 'time_gap':'first', 'text':list, 'pre_bot':'first'})

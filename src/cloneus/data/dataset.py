@@ -163,11 +163,11 @@ def group_chatml_format(df_all:pd.DataFrame, tokenizer:PreTrainedTokenizerFast, 
     return ds_syschats
 
 
-def author_role_dataset(chat_csv, tokenizer, cfg, custom_chat_template=None):
+def author_role_dataset(chat_csv, tokenizer, cfg):
     role_tag = cfg.author_tag
     fprompt = cfg.fprompt
     max_len = cfg.chunk_size
-
+    custom_chat_template = cfg.custom_chat_template
     prompt_length = tokenizer(fprompt, return_length=True).length[0]
 
     max_len-=prompt_length
