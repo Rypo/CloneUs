@@ -37,14 +37,17 @@ from managers.msgman import MessageManager
 from run import BotUs
 
 from .gencfg import SetConfig
-from .initials import InitialsMixin
+
+# Determine if initials based commmands can be used.
+AUTHOR_INITALS = list(roles.initial_to_author)
+ICMD_ENABLED = any(AUTHOR_INITALS)
 
 #model_logger = settings.logging.getLogger('model')
 cmds_logger = settings.logging.getLogger('cmds')
 event_logger = settings.logging.getLogger('event')
 
 
-class TextGen(commands.Cog, SetConfig, InitialsMixin):
+class TextGen(commands.Cog, SetConfig):
     '''Imitate a user or chat with the base model.'''
     def __init__(self, bot: BotUs, pstore:io_utils.PersistentStorage, clomgr: CloneusManager, msgmgr:MessageManager):
         self.bot = bot
@@ -490,17 +493,20 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
                 await self.msgmgr.add_message(msg)
 
 
-    @commands.hybrid_command(name='mbot')
+    @commands.hybrid_command(name='ibot', enabled=ICMD_ENABLED, hidden=(not ICMD_ENABLED))
     @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
-    async def mbot(self, ctx: commands.Context, author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer], seed_text: str=None):
-        """Run multiple bots at once by passing in author initials
+    async def initials_bot(self, ctx: commands.Context, author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer], *, seed_text: str=None):
+        """Call one or more bots using author initials
         
         Args:
-            author_initials: Unordered sequence of author initials (no spaces).
-            seed_text: Text to start off with.
+            author_initials: Unordered sequence of 1+ author initials.
+            seed_text: Text to start off responses with.
         """
         
         authors = [roles.initial_to_author[i] for i in author_initials]
+        
+        if len(authors)==1:
+            return await self.anybot(ctx, authors[0], seed_text=seed_text)
         
         if self.streaming_mode:
             return await self.batch_streambot(ctx, authors, seed_text)
@@ -514,8 +520,21 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'gen_batch')
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
+            
+    @commands.command(name='author_initial', enabled=ICMD_ENABLED, hidden=(not ICMD_ENABLED), aliases=AUTHOR_INITALS)
+    async def author_initial_commands(self, ctx: commands.Context, *, seed_text:str = None):
+        """(pseudo-command). Call a bot by initial. e.g: `!a seed some text`.
         
-
+        Args:
+            seed_text: Text to start off response with.
+        """
+        
+        if ctx.invoked_with == ctx.command.name:
+            return await ctx.send('Command should not be called directly. Use `!<initial> [SEED_TEXT]`. Options: '+' '.join(f'`!{i}`' for i in AUTHOR_INITALS))
+        
+        print(ctx.prefix, ctx.invoked_with, ctx.args[2:], ctx.kwargs)
+        author_initial = ctx.invoked_with
+        await self.anybot(ctx, roles.initial_to_author[author_initial], seed_text=seed_text)
 
     @commands.hybrid_command(name='xbot')
     @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
@@ -524,7 +543,7 @@ class TextGen(commands.Cog, SetConfig, InitialsMixin):
         
         Args:
             author: A custom discord username.
-            seed_text: Text to start off with.
+            seed_text: Text to start off response with.
         """
         await self.anybot(ctx, author, seed_text=seed_text)
 
