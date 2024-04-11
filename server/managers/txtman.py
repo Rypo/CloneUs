@@ -50,6 +50,7 @@ class CloneusManager():
         self.status = 'down'
         self.last_run = None
         self.run_count = 0
+        self.model_randomize_proba = None
 
         self.banned_words: list[str] = []
         self.weighted_words: list[tuple[str,float]] = []
@@ -552,7 +553,7 @@ class CloneusManager():
                 messages = await self.send_collect(ctx, discord_outs, char_limit=2000)
         
         if self.model_randomize_proba and random.random() < self.model_randomize_proba: 
-            await self.load_random_model()
+            await self.load_random_model(fast_proba=0.5)
 
         return messages
 
