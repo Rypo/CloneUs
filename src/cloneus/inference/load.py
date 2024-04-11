@@ -126,18 +126,25 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implem
 
     return model, tokenizer
 
+@cleanup
+def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
+    from llama_cpp import Llama
+    llm = Llama(str(gguf_filepath), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
+    #llm.create_chat_completion
+    return llm
+
 
 def load_unsloth(checkpoint_dirpath):
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
-    warnings.warn('As of patch 2024.2, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
-    
-    # can't use unsloths tokenizer without overiding chat_template, padding side, etc.
-    model, _tknzr = FastLanguageModel.from_pretrained(
+    warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
+    # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
+    model, tokenizer = FastLanguageModel.from_pretrained(
         model_name = checkpoint_dirpath,
         max_seq_length = tokenizer.model_max_length,
         dtype = None,
         load_in_4bit = True,
     )
+    
     FastLanguageModel.for_inference(model)
 
     return model, tokenizer
@@ -147,11 +154,11 @@ def load_unsloth(checkpoint_dirpath):
 def load_any_inference(model_savedir, **kwargs):
     '''Attempt to load any type of model based on model dir structure
     
-    if "merged/awq" in model_savedir -> awq
+    if "awq" in model_savedir -> awq
     if "merged" in model_savdir -> merged model
+    if "gptq" -> gptq
     (eventually)
-    if "merged/gptq" -> gptq
-    if "merged/gguf" -> ctransfromers
+    if "gguf" -> llama_cpp
     '''
     dirstr = str(model_savedir)
 
@@ -168,6 +175,8 @@ def load_any_inference(model_savedir, **kwargs):
         defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
         kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
         return load_gptq(model_savedir, **kargs)
+    #else:
+    #    return load_unsloth(model_savedir)
     else:
         quant_method = 'aqlm' if 'aqlm' in dirstr else 'bnb4'
         #defaults = dict(quant_method=quant_method, dtype='auto', attn_implementation="flash_attention_2")

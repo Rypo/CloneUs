@@ -9,6 +9,7 @@ from peft import AutoPeftModelForCausalLM
 import awq
 from awq import AutoAWQForCausalLM
 from awq.models.base import BaseAWQForCausalLM
+from unsloth import FastLanguageModel
 
 from cloneus.inference import load
 
@@ -110,15 +111,35 @@ def awq_from_merged(merged_dirpath, quant_config, awq_outpath=None):
     model.save_quantized(awq_outpath, safetensors=True)
     tokenizer.save_pretrained(awq_outpath)
 
+@torch.inference_mode()
+def unsloth_save_gguf(checkpoint_dirpath:str, quantization_method="q4_k_m", gguf_outpath=None):
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name = checkpoint_dirpath,
+        max_seq_length = tokenizer.model_max_length,
+        dtype = None,
+        load_in_4bit = True,
+    )
+    #from unsloth.save import save_to_gguf, unsloth_save_pretrained_gguf
+    checkpoint_dirpath = Path(checkpoint_dirpath)
+    
+    if gguf_outpath is None:
+        gguf_outpath = checkpoint_dirpath.with_name(checkpoint_dirpath.name+'-gguf')
+    
+    model.save_pretrained_gguf(gguf_outpath, tokenizer, quantization_method = quantization_method)
+    return outpath
 
 def get_parser():
-    parser = argparse.ArgumentParser(description='Merge a trained model checkpoint.')
+    parser = argparse.ArgumentParser(description='Quantize or merge a trained model checkpoint.')
     parser.add_argument('checkpoint_path', metavar='PATH', type=str, 
                         help='path/to/runs/model/.../checkpoint-xxxx')
-    parser.add_argument('--merge',  default=False, action='store_true', 
+    parser.add_argument('--merge', default=False, action='store_true', 
                         help='merge peft model and save the weights')
     parser.add_argument('--awq', default=False, action='store_true', 
                         help='quantize a model with AWQ')
+    parser.add_argument('--gguf', metavar='QUANT_METHOD', type=str, default=False, nargs='?',
+                        help="quantize a model with unsloth's gguf utility")
     return parser
 
 
@@ -127,10 +148,18 @@ if __name__ == '__main__':
     ckpt_path = Path(args.checkpoint_path)
     
     merge_path = ckpt_path.with_name(ckpt_path.name+'-merged')
-    awq_path = ckpt_path.with_name(ckpt_path.name+'-awq')
+    awq_path   = ckpt_path.with_name(ckpt_path.name+'-awq')
+    gguf_path  = ckpt_path.with_name(ckpt_path.name+'-gguf')
 
     has_merged = merge_path.exists() and any(merge_path.iterdir())
     
+    if args.gguf is None: # empty flag passed
+        args.gguf = 'q4_k_m'
+
+    if args.gguf: # no flag = False
+        print('GGUF Quantization Method:',args.gguf)
+        outpath = unsloth_save_gguf(ckpt_path, quantization_method=args.gguf, gguf_outpath=gguf_path)
+
     if args.merge:
         mergepath = load.load_merge_save(ckpt_path, args.mergedir)
         has_merged = True
@@ -143,5 +172,5 @@ if __name__ == '__main__':
         else:
             awq_from_checkpoint(ckpt_path, awq_outpath = awq_path)
 
-    if not (args.merge or args.awq):
-        print('No action taken. Merge and AWQ = false')
+    if not any([args.merge, args.awq, args.gguf]):
+        print('No flags set. No action taken.')
