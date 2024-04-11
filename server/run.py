@@ -42,14 +42,15 @@ class BotUs(commands.Bot):
 
         # This copies the global commands over to your guild.
         self.tree.copy_global_to(guild=settings.GUILDS_ID)
-        await self.tree.sync() #await self.tree.sync(guild=settings.GUILDS_ID)
+        await self.tree.sync(guild=settings.GUILDS_ID)
+        #await self.tree.sync() #await self.tree.sync(guild=settings.GUILDS_ID)
 
-    async def gsync(self, guild:discord.Guild, spec: typing.Literal["~", "*", "^"] = "*"):
+    async def gsync(self, guild:discord.Guild, spec: typing.Literal["*", "~", "^"] = "*"):
         # https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#sync-command-example
-        if spec == "~":
-            synced = await self.tree.sync(guild=guild)
-        elif spec == "*":
+        if spec == "*":
             self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+        elif spec == "~":
             synced = await self.tree.sync(guild=guild)
         elif spec == "^":
             self.tree.clear_commands(guild=guild)
@@ -150,11 +151,23 @@ def main():
         os.environ.pop('EAGER_LOAD')
 
 
-    @bot.command(name='gsync')
+    @bot.command(name='gsync', aliases=['sync'])
     #@commands.guild_only()
     @commands.is_owner()
     async def sync_treecmds(ctx: commands.Context, spec: typing.Literal["~", "*", "^"] = None) -> None:
-        
+        '''Attempt to synchronize bot commands.
+
+        Use when:
+            1. Not seeing commands that should be available.
+            2. Command has outdated parameters/functionality.
+            2. Seeing duplicates in app command auto completions. 
+
+        Args:
+            spec: Changes how commands are updated (options {"*", "~", "^"})
+                "*" - copy and sync
+                "~" - sync only
+                "^" - clear and sync
+        '''
         synced = await bot.gsync(ctx.guild, spec=spec)
         
         synced_md = '\n- ' + '\n- '.join([s.name for s in synced])
