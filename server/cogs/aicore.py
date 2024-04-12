@@ -1,20 +1,13 @@
 import os
 import gc
-import re
 import typing
-import asyncio
 import datetime
-
 import functools
-from pathlib import Path
 
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 
 import torch
-
-from cloneus.data import roles
 
 import config.settings as settings
 
@@ -74,18 +67,12 @@ class AICore(commands.Cog):
         self.clomgr = CloneusManager(self.bot,)
         self.msgmgr = MessageManager(self.bot, n_init_messages=15, message_cache_limit=31)
                 
-        # very close between these two.
-        #self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_udovkqg/checkpoint-3500'
-        #self.init_model = settings.RUNS_DIR/'solar-10b-inst-hermes2/chunk135h/cnk4096-cosine-wu0.03-lora_a32_r16_d0.0_ovugdkq/checkpoint-4500'
         self.cog_textgen = TextGen(self.bot, pstore=self.pstore, clomgr=self.clomgr, msgmgr=self.msgmgr)
         
-
         
     async def cog_load(self):
-        #self.pstore.update(youtube_quota = self.pstore.get('youtube_quota', 0))
         await self.bot.wait_until_ready()
-        #await self.bot.add_cog(TextGen(self.bot, pstore=self.pstore, clomgr=self.clomgr, msgmgr=self.msgmgr), override=True) #load_nowait=self._load_nowait
-        await self.bot.add_cog(self.cog_textgen, override=True) #load_nowait=self._load_nowait
+        await self.bot.add_cog(self.cog_textgen, override=True, guild=settings.GUILDS_ID)
         release_memory()
         
         self.autoloader.start()
@@ -93,8 +80,7 @@ class AICore(commands.Cog):
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
-        #self.pstore.update(youtube_quota = self.youtube_quota)
-        #await self.txtdown(self._channel, announce=False)
+
         self.autoloader.cancel()
         self.cleaner.cancel()
         #self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
@@ -105,14 +91,7 @@ class AICore(commands.Cog):
 
     @tasks.loop(minutes=1.0)
     async def autoloader(self):
-        #if not self.message_caches[self._channel.id]:
-        #    self.message_caches[self._channel.id] = await self.get_history(self._channel)
-        #self.message_caches.setdefault(self._channel.id, await self.get_history(self._channel))
         await self.msgmgr.set_default(self._channel)
-        #self.clomgr._preload(self.init_model, gconfig_fname='best_generation_config.json')
-        # if self._load_nowait:
-        #     await self.txtup(self._channel, announce=False, load=True)
-        #     self.autoloader.stop()
         
         uptime = (datetime.datetime.now()-self._start_time).total_seconds()
         if uptime >= (30*1):
@@ -127,7 +106,6 @@ class AICore(commands.Cog):
 
     @tasks.loop(minutes=5.0)
     async def cleaner(self):
-        #print('RunCount:',self.run_count)
         if self.clomgr.run_count > 0:
             inactive_duration = (datetime.datetime.now(datetime.timezone.utc) - self.bot.cached_messages[-1].created_at)
             
@@ -148,7 +126,6 @@ class AICore(commands.Cog):
         if not message.author.bot:
             if self.bot.user.mentioned_in(message) and message.clean_content.startswith(f'@{self.bot.user.name}'):
                 await message.channel.send('Hello')
-
 
     # @commands.Cog.listener('on_message')
     # async def on_message(self, message: discord.Message):
@@ -186,9 +163,6 @@ class AICore(commands.Cog):
 
     @commands.Cog.listener('on_thread_create')
     async def on_thread_create(self, thread: discord.Thread):
-        #members = await thread.fetch_members()
-        #membernames = [self.bot.get_user(m.id).name for m in members]
-        #if not self.message_caches[thread.id]
         await thread.join()
         if thread.starter_message:
             await self.msgmgr.add_message(thread.starter_message)
@@ -204,7 +178,6 @@ class AICore(commands.Cog):
                          '- [CALL] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.name})" args:({args}, {c.kwargs})'.format(a=ctx.author, c=ctx, args=pos_args))
         
     async def cog_after_invoke(self, ctx: commands.Context) -> None:
-        #print('after invoke', datetime.datetime.now())
         cmd_status = 'FAIL' if ctx.command_failed else 'PASS'
         pos_args = [a for a in ctx.args[2:] if a]
 
@@ -239,8 +212,6 @@ class AICore(commands.Cog):
         ]
         msg = '\n'.join(f'{label}: **{desc}**{post}' if label else desc for label, desc, post in statuses)
         await ctx.send(msg)
-
-
 
 
 async def setup(bot):
