@@ -156,9 +156,20 @@ def get_model(model_id,
 
 
 def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
+    #if (name_or_path := cfg.resume_from_checkpoint) is None:
+    name_or_path = cfg.model_id
+    #print('Getting model from:', name_or_path)
+    
+    # TODO: Resuming from a path should work. But it will break if tokens have been added.
+    # AutoPeftModelForCausalLM resizes embedding automatically, but it's unclear how to make this work with unsloth
+    # Resuming using model id does work.
+    # But, at least for unsloth, it is slower and uses more vRAM compared to init
+    # It may have to do with Trainer's _load_from_checkpoint overwriting pieces of unsloth's patch, but just speculation. 
+    # TODO: Investigate. Trainer/Unsloth/Peft checkpoint resume behavior
+
     if cfg.flashattn_lib=='huggingface':
         if cfg.quant_method =='awq':
-            model, tokenizer = get_awq(cfg.model_id, 
+            model, tokenizer = get_awq(name_or_path, 
                                         peft_config, 
                                         max_seq_len=cfg.chunk_size, 
                                         batch_size=cfg.batch_size,
@@ -168,7 +179,7 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
                                         custom_chat_template=cfg.custom_chat_template,
                                         attn_implementation=cfg.attn_implementation, ) #custom_token_map
         else:
-            model, tokenizer = get_model(cfg.model_id, 
+            model, tokenizer = get_model(name_or_path, 
                                         peft_config, 
                                         quant_config=cfg.quant_method, 
                                         attn_implementation=cfg.attn_implementation, 
@@ -179,9 +190,8 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
 
             
     elif cfg.flashattn_lib=='unsloth':
-        # TODO: investigate why PAD = <unk> again (should be </s> if chat_ml) and if that is causing problems
         print('peft before:',peft_config)
-        model, tokenizer = get_unsloth(cfg.model_id, 
+        model, tokenizer = get_unsloth(name_or_path, 
                                        peft_config, 
                                        max_seq_length=cfg.chunk_size, 
                                        tune_type = cfg.tune_type, 

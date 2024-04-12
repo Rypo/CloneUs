@@ -57,6 +57,7 @@ def main(args):
     
     
     resume_ckpt = None
+    # command line resume path takes precedence over config
     if args.resume:
         resume_ckpt = args.resume
         resume_cfgpath = os.path.join(os.path.dirname(args.resume), 'config.yaml')
@@ -85,33 +86,37 @@ def main(args):
         'ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf': 'mixtral-inst-8x7b-aqlm-2bit', # instruct
         'NousResearch/Nous-Hermes-2-Mistral-7B-DPO': 'mistral-7b-hermes2-dpo', # chatml
         #'solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ':'mistral-7b-hermes2-dpo-awq'
+        'alpindale/Mistral-7B-v0.2-hf': 'mistral-7b-v2', # foundation
+        'unsloth/Hermes-2-Pro-Mistral-7B-bnb-4bit': 'mistral-7b-hermes2-pro-4bit', # chatml (with tools)
+        'rhysjones/phi-2-orange-v2':'phi2-orange-v2' # chatml
+        
         # Add aliases for new models here
     }
-    # https://huggingface.co/NousResearch/Hermes-2-Pro-Mistral-7B
+
     model_name = model_map.get(cfg.model_id, cfg.model_id.split('/')[-1])  
     
-    target_modules = (cfg.lora_target_modules if isinstance(cfg.lora_target_modules, str) else list(cfg.lora_target_modules)) # all-linear
-    peft_config = LoraConfig(
-        r=cfg.lora_r,
-        lora_alpha=cfg.lora_alpha,
-        target_modules=target_modules, 
-        lora_dropout=cfg.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        inference_mode = False,
-        use_rslora=cfg.lora_use_rslora,
-        init_lora_weights=('loftq' if cfg.lora_use_loftq else True),
-        #loftq_config=
-        use_dora=cfg.lora_use_dora
+    if resume_ckpt:
+        peft_config = LoraConfig.from_pretrained(resume_ckpt)
+        peft_config.inference_mode = False
+    else:
+        target_modules = (cfg.lora_target_modules if isinstance(cfg.lora_target_modules, str) else list(cfg.lora_target_modules)) # all-linear
+        peft_config = LoraConfig(
+            r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            target_modules=target_modules, 
+            lora_dropout=cfg.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            inference_mode = False,
+            use_rslora=cfg.lora_use_rslora,
+            init_lora_weights=('loftq' if cfg.lora_use_loftq else True),
+            #loftq_config=
+            use_dora=cfg.lora_use_dora
     )
     
     # This does nothing currently.
     num_custom_tokens = tokenization.apply_special_tokens(tokenizer=None, custom_tokens=cfg.custom_tokens, pad_vocab_to=cfg.pad_vocab_to)
 
-    if cfg.resume_from_checkpoint is not None:
-        peft_config = LoraConfig.from_pretrained(cfg.resume_from_checkpoint)
-        peft_config.inference_mode = False
-    
         
     if cfg.dataset.name == 'chunkh': # append hours_between_session
         hbs = cfg.dataset.hours_between_sessions
@@ -149,7 +154,7 @@ def main(args):
         logging_first_step=True,
         #torch_compile=True,
         save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
-        resume_from_checkpoint=cfg.resume_from_checkpoint,
+        resume_from_checkpoint=resume_ckpt,
     )
 
     model, tokenizer = mllm.model_tokenizer_from_config(peft_config, cfg)
@@ -182,9 +187,6 @@ def main(args):
         dset = dataset.dataset_timechunk(data_file_path, tokenizer, cfg, text_only=False)
     
     
-    if cfg.resume_from_checkpoint is not None:
-       load_model_safetensors(model, os.path.join(cfg.resume_from_checkpoint, 'model.safetensors'))
-    
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]
     if cfg.use_sft_trainer:
         trainer = mtrain.get_sft_trainer(model, dset, tokenizer, train_args, peft_config, callbacks=callbacks, max_packed_seqlength=cfg.chunk_size)
@@ -197,7 +199,7 @@ def main(args):
     if num_custom_tokens:
         tokenization.save_embeddings(model, train_args.output_dir)
 
-    safe_train(trainer, cfg.resume_from_checkpoint)
+    safe_train(trainer, resume_ckpt)
     
     try:
         penult_state = trainer.state.log_history[-2]

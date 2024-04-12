@@ -87,7 +87,6 @@ class CTrainer(Trainer):
         self.args.lr_scheduler_type == 'warmup_const_cosine'
         return self.lr_scheduler
         
-        #return super().create_scheduler(num_training_steps=num_training_steps, optimizer=optimizer)
 
     
 def formatfunc(sample):
@@ -129,7 +128,7 @@ def get_sft_trainer(model, data, tokenizer, args, peft_config, callbacks=None, m
     return trainer
 
 
-def save_last_step(trainer):
+def save_last_step(trainer:Trainer|SFTTrainer):
     try:
         ckpt = f'checkpoint-{trainer.state.global_step}'
     except Exception as e:
@@ -138,22 +137,18 @@ def save_last_step(trainer):
         
     checkpoint_path = os.path.join(trainer.args.output_dir, ckpt)
         
-    trainer.model.save_pretrained(checkpoint_path, safe_serialization=True)
+    trainer.model.save_pretrained(checkpoint_path, safe_serialization=True) # trainer.save_model(checkpoint_path)
     trainer.tokenizer.save_pretrained(checkpoint_path)
-    trainer.state.save_to_json(os.path.join(checkpoint_path, 'trainer_state.json'))
+    trainer.state.save_to_json(os.path.join(checkpoint_path, 'trainer_state.json')) # trainer.save_state()
     torch.save(trainer.args, os.path.join(checkpoint_path,'training_args.bin'))
-    
-    save_model_safetensors(trainer.model,  os.path.join(checkpoint_path, "model.safetensors"))
+    #save_model_safetensors(trainer.model,  os.path.join(checkpoint_path, "model.safetensors"))
 
 
-def create_resumable_save(trainer):
-    args = trainer.args
-    
+def create_resumable_save(trainer:Trainer|SFTTrainer):    
+    # The underscore prefix implies this is not a recommended way to save, but it works for now.
+    # TODO: look in to implications
     if trainer.state.global_step:
-        ki_checkpoint_path = os.path.join(args.output_dir,f'checkpoint-{trainer.state.global_step}')
-        trainer.save_model(ki_checkpoint_path)
-        trainer.save_state()
-        save_model_safetensors(trainer.model,  os.path.join(ki_checkpoint_path, "model.safetensors"))
+        trainer._save_checkpoint(trainer.model, trainer._trial, metrics=None)
 
 
 def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens, attn_implementation, custom_scheduler):
@@ -234,7 +229,7 @@ def create_args(base_outdir, peft_config: LoraConfig, chunk_size=512,  n_custom_
         fp16=kwargs.pop('fp16', False), # https://huggingface.co/docs/transformers/perf_train_gpu_one#mixed-precision-training
         tf32=kwargs.pop('tf32', True), # add (IMPLICATIONS WITH BF16,gradaccum: https://github.com/huggingface/transformers/issues/14608#issuecomment-1004392537 )
         logging_steps=kwargs.pop('logging_steps', 5),
-        output_dir='{base_outdir}/{tnow}_cnk{chunksize}{ctk_pad}-{scheduler}{warmup}--a{lora_a}r{lora_r}_{lora_modules}{lora_layers}', # -sft256
+        output_dir='{base_outdir}/{tnow}_cnk{chunksize}{ctk_pad}-{scheduler}{warmup}--r{lora_r}a{lora_a}_{lora_modules}{lora_layers}', # -sft256
         optim=kwargs.pop('optim', 'paged_adamw_32bit'),#'paged_adamw_8bit',# #"adamw_hf"
         max_grad_norm=kwargs.pop('max_grad_norm', 0.3),
         warmup_ratio=warmup_ratio,#kwargs.pop('warmup_ratio', 0.00),
