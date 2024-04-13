@@ -18,6 +18,7 @@ from omegaconf import OmegaConf, DictConfig
 
 import torch
 from transformers import (
+    AutoConfig,
     AutoTokenizer,
     GenerationConfig,
     TextIteratorStreamer
@@ -115,10 +116,9 @@ def batchsafe_tokenizer(tokenizer):
         tokenizer.pad_token_id = pad_tokenid
 
 
-class Cloneus:
-    def __init__(self, model_dir: str|Path = None, ckpt_subdir: str=None, gconfig_fname=None, **kwargs) -> None:
-        self.config = self._config_init(model_dir, ckpt_subdir, gconfig_fname=gconfig_fname, **kwargs)
-        self.ckpt_subdir = ckpt_subdir
+class BaseCloneus:
+    def __init__(self, checkpoint_path: str|Path = None, gconfig_fname=None, **kwargs) -> None:
+        self.cfg = self._config_init(checkpoint_path, gconfig_fname=gconfig_fname, **kwargs)
         self.model = None
         self.tokenizer = None
         self.ytm = youtube.YouTubeManager()
@@ -131,49 +131,50 @@ class Cloneus:
         #self.gen_config=None
         
 
-    def _config_init(self, model_dir, ckpt_subdir, gconfig_fname=None, **kwargs):
+    def _config_init(self, checkpoint_path:str|Path, gconfig_fname:str=None, **kwargs):
 
         # if we don't filter out None from kwargs, config is over written with None
         kwargs = {k:v for k,v in kwargs.items() if v is not None}
-        ckpt_path = Path(model_dir)/ckpt_subdir if ckpt_subdir else Path(model_dir)
-        self.path_data = ModelPathComponents.from_checkpoint(ckpt_path)
+        #ckpt_path = Path(model_dir)/ckpt_subdir if ckpt_subdir else Path(model_dir)
+        self.path_data = ModelPathComponents.from_checkpoint(Path(checkpoint_path))
         
         config = OmegaConf.load(self.path_data.config_path)
         config.update(model_dir = self.path_data.checkpoint_path, **kwargs)
         
-        self.model_dir = config.model_dir
-        self.ctx_len = config.ctx_len
+        #self.model_dir = config.model_dir
+        #self.cfg.ctx_len = config.ctx_len
         
-        self.tag_sep = config.tag_sep
-        self.postfix = config.postfix
-        self.author_tag = config.author_tag
+        # = config.tag_sep
+        #self.cfg.postfix = config.postfix
+        #self.cfg.author_tag = config.author_tag
         # weird NOTE: if custom special tokens, decode skip_special_tokens **must**=FALSE. But encode add_special_tokens = (True | False), doesn't mater will be added regardless
-        self.has_custom_tokens = config.has_custom_tokens 
+        #self.cfg.has_custom_tokens = config.has_custom_tokens 
         
-        self.dtype = dtype_to(config.get('dtype'), 'torch', default=None)
-        self.attn_implementation = config.get('attn_implementation', None)
+        self.torch_dtype = dtype_to(config.dtype, 'torch', default=None)
+        #self.cfg.attn_implementation = config.attn_implementation
         
-        self.prompt = config.get('prompt') if config.get('prompt') is not None else {}
-        self.fprompt = config.get('fprompt')
-        self._prompt_append_msg = self.prompt.get('append_msg')
-
-        self._is_instruct_model = config.get('instruct_model')
-        self._is_chat_model = config.get('custom_chat_template') is not None
+        #self.cfg.prompt = config.prompt
+        #self.cfg.fprompt = config.fprompt
+        
+        #self.base_tune_type: typing.Literal['foundation','instruct','chat'] = config.base_tune_type
+        #self._is_instruct_model = config.instruct_model
+        self.use_custom_roles = (config.custom_chat_template is not None)
 
         #self.guidance_phrases=dict.fromkeys(userutils.author_display_names)
-        print(self.dtype, self.attn_implementation)
+        print(self.torch_dtype, config.attn_implementation)
         if gconfig_fname is not None or not hasattr(self,'gen_config'):
             self.gen_config, self._author_gen_config = self.load_genconf(gconfig_fname)
 
         return config
 
     @load.cleanup
-    def swap_model(self, model_dir:(str|Path), ckpt_subdir:str=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname:str=None) -> None:
-        last_model_id = self.config.model_id
+    def swap_model(self, checkpoint_path:(str|Path), dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname:str=None) -> None:
+        last_model_id = self.cfg.model_id
         last_has_adapter = self.path_data.has_adapter
-        self.config = self._config_init(model_dir, ckpt_subdir, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
         
-        base_unchanged = self.config.model_id==last_model_id
+        self.cfg = self._config_init(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
+        
+        base_unchanged = self.cfg.model_id==last_model_id
         lora_to_lora = self.path_data.has_adapter and last_has_adapter
         
         if self.model and base_unchanged and lora_to_lora:
@@ -197,24 +198,30 @@ class Cloneus:
     @load.cleanup
     def load_model(self):
         
-        #if self.model is None or dtype != self.dtype or attn_implementation != self.attn_implementation:
-        self.model, self.tokenizer = load.load_any_inference(self.model_dir, dtype=self.dtype, attn_implementation=self.attn_implementation)
+        #if self.model is None or dtype != self.dtype or attn_implementation != self.cfg.attn_implementation:
+        self.model, self.tokenizer = load.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         #self.model, self.tokenizer = minfer.load_unmerged_lowrsc(self.model_dir, dtype=None, attn_implementation='sdpa')
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
-        self.base_dtype = transformers.AutoConfig.from_pretrained(self.model.config._name_or_path).torch_dtype
+        self.base_dtype = AutoConfig.from_pretrained(self.model.config._name_or_path).torch_dtype
         if self.base_dtype not in [torch.float16, torch.bfloat16]: 
             self.base_dtype = torch.bfloat16 # Avoid ever running as float32
-
-        self._is_instruct_model = self.tokenizer.chat_template is not None
+        
+        # 'aligned' here meaning QA/Instruct/Chat tuned, for lack of a better word
+        #self.base_model_aligned = self.base_tokenizer.chat_template is not None
+        
+        #self._is_instruct_model = self.tokenizer.chat_template is not None
         # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
-        self.has_sysprompt = self.tokenizer.use_default_system_prompt or self.config.get('tune_type') == 'chatml' 
-        self._use_sysprompt = self.has_sysprompt and not self.config.prompt.append_msg
+        self.base_has_system = self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template))
+        #self.base_has_system = self.tokenizer.use_default_system_prompt or 'system' in str(self.tokenizer.chat_template) or self.base_tune_type=='chat' or self.config.get('tune_type') == 'chatml' 
+        self.use_sysprompt = self.cfg.fprompt is not None and not self.cfg.prompt.append_msg
         
         print(self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, 
-              f'Instruct: {self._is_instruct_model}, has_system: {self.has_sysprompt} (use: {self._use_sysprompt}), chat: {self._is_chat_model}')
+              f'base_tune_type: {self.cfg.base_tune_type}, has_system: {self.base_has_system} (use: {self.use_sysprompt}), custom_roles: {self.use_custom_roles}')
 
-        self.stop_criteria = None if (self._is_instruct_model or '</s>' in self.postfix) else [
-            genconfig.NewLineTokensCriteria(self.tokenizer('\n\n', add_special_tokens=False, return_tensors='pt')['input_ids'][0,1:].to(0))]
+        self.stop_criteria = None
+        if self.cfg.postfix == '\n\n':
+            self.stop_criteria = [genconfig.NewLineTokensCriteria(self.tokenizer('\n\n', add_special_tokens=False, return_tensors='pt')['input_ids'][0,1:].to(0))]
+        
         
         self.model.eval()
 
@@ -237,16 +244,18 @@ class Cloneus:
         if gconfig_fname is None:
             gconfig_fname = 'generation_config.json'
 
-        gconf_path = Path(self.model_dir)/gconfig_fname
-        if not gconf_path.exists():
-            print(f'No GenConfig found at: {gconf_path}')
+        ckpt_path = self.path_data.checkpoint_path
+
+        # gconf_path = Path(ckpt_path)/gconfig_fname
+        # if not gconf_path.exists():
+        #     print(f'No GenConfig found at: {gconf_path}')
         
         try:
-            self.gen_config = GenerationConfig.from_pretrained(self.model_dir, gconfig_fname, local_files_only=True)
-            print(f'Found GenerationConfig: {Path(self.model_dir)/gconfig_fname}')
+            self.gen_config = GenerationConfig.from_pretrained(ckpt_path, config_file_name=gconfig_fname, local_files_only=True)
+            print(f'Found GenerationConfig: {Path(ckpt_path)/gconfig_fname}')
         except OSError as e:
             print('No existing GenerationConfig found, defaulting to GENOPTS (multinomial_sampling)')
-            tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+            tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
             gcdefault = genconfig.GENOPT_DEFAULTS.copy()
             gcdefault.update(pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
             self.gen_config = GenerationConfig.from_dict(gcdefault) 
@@ -278,7 +287,6 @@ class Cloneus:
             return {tuple(t):w for t,w in zip(tokens,weights)}
         
         return tokens
-    
     
     def neg_inpids(self, author: str):
         authvibe = self.guidance_phrases.get(author)
@@ -344,92 +352,42 @@ class Cloneus:
             self.gen_config.sequence_bias=sequence_bias
         
         return changes
-
-
-
-    def discrete_front_truncate(self, input_text: str, new_tokbuf: int = 256):
-        '''Truncate full samples split on postfix from left side of text to max_len'''
-        # split keep ends so they are included in token lengths. NOTE: without the "if t", will have a double postfix. No clue how that bug slipped by.
-        split_text = [t+self.postfix for t in input_text.split(self.postfix) if t] #
-        #split_text = input_text.split(self.postfix)
-        lengths = self.tokenizer(split_text, return_length=True).length
-        # argmax returns first index of True, so we need to reverse the cumsum and then reverse the argmax
-        first_idx = (np.cumsum(lengths[::-1]) <= self.ctx_len-new_tokbuf)[::-1].argmax()
-        
-        trunc_text = ''.join(split_text[first_idx:])
-        #trunc_text = self.postfix.join(split_text[first_idx:])
-
-        return trunc_text
-
-
-    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        if self._is_instruct_model:
-            if self._is_chat_model:
-                return self.chat_to_text(author_messages, prompt_author_seedtext)
-            
-            return self.instruct_to_text(author_messages, prompt_author_seedtext)
-        return self.foundation_to_text(author_messages, prompt_author_seedtext)
-
-
-    def apply_template(self, author, text_content, tag_sep, postfix):
-        atag=roles.format_author_tag(author, self.author_tag)
-        #atag=self.author_tag.format(author=author, lauthor=author.lower(), fname=crew.author_to_fname[author])
-        return f'{atag}{tag_sep}{text_content}{postfix}'
     
 
-    def to_foundation_format(self, author_messages: list[tuple[str,str]]):
-        # why Foundation?
-        # https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation
-        
-        input_text = ''.join([self.apply_template(a,t, self.tag_sep, postfix=self.postfix) for a,t in author_messages])
-        return input_text
+class Cloneus(BaseCloneus):
 
+    @staticmethod
+    def from_pretrained(checkpoint_path:str|Path, gconfig_fname: None, **kwargs):
+        checkpoint_path = Path(checkpoint_path)
+        path_data = ModelPathComponents.from_checkpoint(checkpoint_path)
+        
+        config = OmegaConf.load(path_data.config_path)
 
-    def to_instruct_format(self, author_messages: list[tuple[str,str]]):
-        if not author_messages:
-            author_messages = [self.filler_message]
-        
-        elif len(author_messages) % 2 == 0:
-            author_messages=[self.filler_message,*author_messages]
-            #author_messages = author_messages[1:]
-        
-        rolecycle = itertools.cycle(['user','assistant'])
+        if config.base_tune_type == 'chat' or config.custom_chat_template:
+            return CloneusChat(path_data.checkpoint_path, gconfig_fname=gconfig_fname, **kwargs)
+        elif config.base_tune_type == 'instruct':
+            return CloneusInstruct(path_data.checkpoint_path, gconfig_fname=gconfig_fname, **kwargs)
+        elif config.base_tune_type == 'foundation':
+            return CloneusFoundation(path_data.checkpoint_path, gconfig_fname=gconfig_fname, **kwargs)
 
-        if self.has_sysprompt:
-            chat_content = [{"role": "system", "content": self.fprompt}]
-        else:
-            pcontent = self.fprompt
-            if self._prompt_append_msg:
-                # TODO: Assess if it's okay to pop(0) even though it will always be the filler message if even
-                pcontent += self.apply_template(*author_messages.pop(0), tag_sep=self.tag_sep, postfix='')
-            
-            chat_content = [{"role": next(rolecycle), "content": pcontent}]
         
-        for auth,msg in author_messages:
-            message = self.apply_template(auth, msg, tag_sep=self.tag_sep, postfix='')
-            chat_content.append({"role": next(rolecycle), "content": message})
-        
-        return chat_content
-       
-    def to_chat_format(self, author_messages: list[tuple[str,str]]):
-        '''For chatml with custom roles as usernames'''
-        # if not author_messages:
-        #     author_messages = [self.filler_message]
-        
-        chat_content = []
 
-        if self.has_sysprompt:
-            chat_content.append({"role": "system", "content": self.fprompt})
-        
-        for author,message in author_messages:
-            role_tag = roles.format_author_tag(author, self.author_tag)
-            chat_content.append({"role": role_tag, "content": message})
-        
-        return chat_content
+    def apply_template(self, author, text_content, tag_sep, postfix):
+        atag=roles.format_author_tag(author, self.cfg.author_tag)
+        return f'{atag}{tag_sep}{text_content}{postfix}'
+
+    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        raise NotImplementedError('Cloneus class not called directly')
+        # if self.use_custom_roles:
+        #     return self.chat_to_text(author_messages, prompt_author_seedtext)
+        # if self._is_instruct_model:
+        #     return self.instruct_to_text(author_messages, prompt_author_seedtext)
+        # return self.foundation_to_text(author_messages, prompt_author_seedtext)
+
 
     def append_author_seedtext(self, text: str, prompt_author_seedtext: tuple[str,str], tag_sep:str=None):
         if tag_sep is None:
-            tag_sep = self.tag_sep
+            tag_sep = self.cfg.tag_sep
 
         if prompt_author_seedtext is not None:
             author, seedtext = prompt_author_seedtext
@@ -439,45 +397,7 @@ class Cloneus:
 
         return text
 
-    def foundation_to_text(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        text = self.to_foundation_format(author_messages)
-        text = self.ytm.encode(text)
 
-        if (text_len:=self.tokenizer(text, return_length=True).length[0]) >= self.ctx_len:
-            # technically this can still go over the limit undetected after adding author tag/ seed text, but going to let it slide for now unless it becomes an issue.
-            print(f'MAX CONTENT LENGTH EXCEEDED. Front Truncating. {text_len} ≥ {self.ctx_len}')
-            text = self.discrete_front_truncate(text, self.gen_config.max_new_tokens)
-        
-        text = self.append_author_seedtext(text, prompt_author_seedtext)
-        
-        if f'{self.postfix}{self.postfix}' in text:
-            print('ERROR: Double postfix found in input text')
-            print(repr(text))
-
-        
-        return text
-
-    ################################################################
-    #
-    # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
-    #
-    ################################################################
-    def instruct_to_text(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        # add_generation_prompt will = '' if doesnt have, like mistral. So, always okay to add?
-        text = self.tokenizer.apply_chat_template(self.to_instruct_format(author_messages), tokenize=False, add_generation_prompt=True)
-        text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext)
-    
-        return text
-    
-    def chat_to_text(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        # add_generation_prompt will = '' if doesnt have, like mistral. So, always okay to add?
-        text = self.tokenizer.apply_chat_template(self.to_chat_format(author_messages), tokenize=False, add_generation_prompt=True)
-        text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep='\n') # ChatML always has \n after role
-    
-        return text
-    
     def get_top_tokprobs(self, out_score, k=5) -> list[tuple[str, float]]:
         probs = torch.nn.functional.softmax(out_score.squeeze(),dim=0)
         top_probs,top_toks = torch.topk(probs, k)
@@ -499,7 +419,7 @@ class Cloneus:
         # leave this as max_new_tokens because assume setting to 1 could include context that changes the author
         #trunc_input_text = self.discrete_front_truncate(input_text, self.gen_config.max_new_tokens) 
         # fill tag to split on a known fixed value. Allows author_tag to change without breaking.
-        trunc_input_text += self.author_tag.format(author='#DUMMY', lauthor='#DUMMY', fname='#NAME').split('#DUMMY',1)[0]
+        trunc_input_text += self.cfg.author_tag.format(author='#DUMMY', lauthor='#DUMMY', fname='#NAME').split('#DUMMY',1)[0]
         inputs = self.tokenizer(trunc_input_text, return_tensors="pt")
 
         
@@ -526,7 +446,6 @@ class Cloneus:
         return authtok_prob_pairs
 
 
-        
     @torch.inference_mode()
     def _batched_helper(self, msg_batch, true_batch_generate=False):
         t0 = time.perf_counter()
@@ -564,12 +483,12 @@ class Cloneus:
         trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
         if prompt_seedtext is None: prompt_seedtext = ''
         # IFF using ' ' as tag_sep, should NOT trail with it
-        author_prompts = [self.apply_template(author, prompt_seedtext, self.tag_sep, postfix='').strip(' ') for author in prompt_authors]
+        author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep, postfix='').strip(' ') for author in prompt_authors]
 
         true_batched = (self.gen_alias == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
         output_texts,input_len = self._batched_helper([trunc_context+ap for ap in author_prompts], true_batch_generate=true_batched)
         
-        out_texts = [ot.split(self.postfix)[0] for ot in output_texts]
+        out_texts = [ot.split(self.cfg.postfix)[0] for ot in output_texts]
         output_lens = self.tokenizer(out_texts, add_special_tokens=False, return_length=True)['length']
 
         return trunc_context, author_prompts, out_texts, input_len, output_lens
@@ -588,17 +507,16 @@ class Cloneus:
         output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
-        out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.has_custom_tokens))
+        out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.cfg.has_custom_tokens))
 
         return trunc_input_text, out_text, input_len, output_len
-    
     
     
     @torch.inference_mode()
     def stream_generate(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]):
         # https://huggingface.co/docs/transformers/internal/generation_utils#transformers.TextStreamer
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
-        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=(not self.has_custom_tokens))
+        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=(not self.cfg.has_custom_tokens))
 
         trunc_input_text = self.to_text_input(author_messages, prompt_author_seedtext)
         inputs = self.tokenizer(trunc_input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
@@ -618,7 +536,6 @@ class Cloneus:
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
 
     
-
     @torch.inference_mode()
     def stream_batch_generate(self, author_messages, prompt_authors, prompt_seedtext):
         # https://huggingface.co/docs/transformers/internal/generation_utils#transformers.TextStreamer
@@ -629,13 +546,12 @@ class Cloneus:
         trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
         if prompt_seedtext is None: prompt_seedtext = ''
         # IFF using ' ' as tag_sep, should NOT trail with it
-        author_prompts = [self.apply_template(author, prompt_seedtext, self.tag_sep, postfix='').strip(' ') for author in prompt_authors]
+        author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep, postfix='').strip(' ') for author in prompt_authors]
         #inputs, author_prompts = self._batch_process(trunc_context, prompt_authors, prompt_seedtext)
         #inputs, trunc_context, author_prompts = self._batch_process(author_messages, prompt_authors, prompt_seedtext)
         msg_batch = [trunc_context+ap for ap in author_prompts]
         #input_len = inputs.pop('length')[0].item()
         
-
         #inps=inputs.to(0)
 
         for i, inptext in enumerate(msg_batch):
@@ -675,7 +591,7 @@ class Cloneus:
         rolecycle = itertools.cycle(['user','assistant'])
         chat_content = []
 
-        if sys_prompt is not None and self.has_sysprompt:
+        if sys_prompt is not None and self.base_has_system:
             chat_content.append({"role": "system", "content": sys_prompt})
 
         for message in chat_history:
@@ -702,7 +618,7 @@ class Cloneus:
         self.model.to(dtype = self.base_dtype)
         with self.model.disable_adapter():
             output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
-        self.model.to(dtype = self.dtype)
+        self.model.to(dtype = self.torch_dtype)
         #output = base_model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
@@ -712,7 +628,6 @@ class Cloneus:
         
         return trunc_input_text, out_text, input_len, output_len
     
-
 
     @torch.inference_mode()
     def base_stream_generate(self, input_text:str|list[str], sys_prompt:str=None):
@@ -740,8 +655,120 @@ class Cloneus:
             for new_text in streamer:
                 generated_text += new_text
                 yield new_text
-        self.model.to(dtype = self.dtype)
+        self.model.to(dtype = self.torch_dtype)
         output_len = self.base_tokenizer(generated_text, return_length=True).length
 
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
         #self.model.set_adapter(adapters)
+
+
+
+class CloneusFoundation(Cloneus):
+    def discrete_front_truncate(self, input_text: str, new_tokbuf: int = 256):
+        '''Truncate full samples split on postfix from left side of text to max_len'''
+        # split keep ends so they are included in token lengths. NOTE: without the "if t", will have a double postfix. No clue how that bug slipped by.
+        split_text = [t+self.cfg.postfix for t in input_text.split(self.cfg.postfix) if t] #
+        #split_text = input_text.split(self.cfg.postfix)
+        lengths = self.tokenizer(split_text, return_length=True).length
+        # argmax returns first index of True, so we need to reverse the cumsum and then reverse the argmax
+        first_idx = (np.cumsum(lengths[::-1]) <= self.cfg.ctx_len-new_tokbuf)[::-1].argmax()
+        
+        trunc_text = ''.join(split_text[first_idx:])
+        #trunc_text = self.cfg.postfix.join(split_text[first_idx:])
+
+        return trunc_text
+
+    def to_foundation_format(self, author_messages: list[tuple[str,str]]):
+        # why Foundation?
+        # https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation
+        
+        input_text = ''.join([self.apply_template(a,t, self.cfg.tag_sep, postfix=self.cfg.postfix) for a,t in author_messages])
+        return input_text
+    
+    def foundation_to_text(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        text = self.to_foundation_format(author_messages)
+        text = self.ytm.encode(text)
+
+        if (text_len:=self.tokenizer(text, return_length=True).length[0]) >= self.cfg.ctx_len:
+            # technically this can still go over the limit undetected after adding author tag/ seed text, but going to let it slide for now unless it becomes an issue.
+            print(f'MAX CONTENT LENGTH EXCEEDED. Front Truncating. {text_len} ≥ {self.cfg.ctx_len}')
+            text = self.discrete_front_truncate(text, self.gen_config.max_new_tokens)
+        
+        text = self.append_author_seedtext(text, prompt_author_seedtext)
+        
+        if f'{self.cfg.postfix}{self.cfg.postfix}' in text:
+            print('ERROR: Double postfix found in input text')
+            print(repr(text))
+
+        return text
+    
+    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        return self.foundation_to_text(author_messages, prompt_author_seedtext)
+
+class CloneusInstruct(Cloneus):
+    def to_instruct_format(self, author_messages: list[tuple[str,str]]):
+        if not author_messages:
+            author_messages = [self.filler_message]
+        
+        elif len(author_messages) % 2 == 0:
+            author_messages=[self.filler_message,*author_messages]
+            #author_messages = author_messages[1:]
+        
+        rolecycle = itertools.cycle(['user','assistant'])
+
+        if self.base_has_system:
+            chat_content = [{"role": "system", "content": self.cfg.fprompt}]
+        else:
+            pcontent = self.cfg.fprompt
+            if self.cfg.prompt.append_msg:
+                # TODO: Assess if it's okay to pop(0) even though it will always be the filler message if even
+                pcontent += self.apply_template(*author_messages.pop(0), tag_sep=self.cfg.tag_sep, postfix='')
+            
+            chat_content = [{"role": next(rolecycle), "content": pcontent}]
+        
+        for auth,msg in author_messages:
+            message = self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep, postfix='')
+            chat_content.append({"role": next(rolecycle), "content": message})
+        
+        return chat_content
+
+    def instruct_to_text(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
+        # add_generation_prompt will = '' if doesnt have, like mistral. So, always okay to add?
+        text = self.tokenizer.apply_chat_template(self.to_instruct_format(author_messages), tokenize=False, add_generation_prompt=True)
+        text = self.ytm.encode(text)
+        text = self.append_author_seedtext(text, prompt_author_seedtext)
+    
+        return text
+    
+    def to_text_input(self, author_messages: list[tuple[str, str]], prompt_author_seedtext: tuple[str, str] = None):
+        return self.instruct_to_text(author_messages, prompt_author_seedtext)
+    
+class CloneusChat(Cloneus):
+    def to_chat_format(self, author_messages: list[tuple[str,str]]):
+        '''For chatml with custom roles as usernames'''
+        # if not author_messages:
+        #     author_messages = [self.filler_message]
+        
+        chat_content = []
+
+        if self.use_sysprompt:
+            chat_content.append({"role": "system", "content": self.cfg.fprompt})
+        
+        for author,message in author_messages:
+            role_tag = roles.format_author_tag(author, self.cfg.author_tag)
+            chat_content.append({"role": role_tag, "content": message})
+        
+        return chat_content
+    
+    def chat_to_text(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
+        # add_generation_prompt will = '' if doesnt have, like mistral. So, always okay to add?
+        text = self.tokenizer.apply_chat_template(self.to_chat_format(author_messages), tokenize=False, add_generation_prompt=True)
+        text = self.ytm.encode(text)
+        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep='\n') # ChatML always has \n after role
+    
+        return text
+
+    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        return self.chat_to_text(author_messages, prompt_author_seedtext)

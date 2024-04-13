@@ -87,8 +87,8 @@ class CloneusManager():
         statuses = [
             ('Bot status', self.status.title(), " ✔" if self.status=="up" else " ✖"),
             ('Model', model_name, f"/{checkpoint}"),
-            ('Instruct-Tuned', self.clo._is_instruct_model, f""),
-            ('Flash_dtype', f'{self.clo.attn_implementation}', f' - {self.clo.dtype}'),
+            ('Base tune type', self.clo.cfg.base_tune_type, f""),
+            ('Flash_dtype', f'{self.clo.cfg.attn_implementation}', f' - {self.clo.torch_dtype}'),
             ('vRAM usage', f'{vram_use:,}MiB', f' / {vram_total:,}MiB'),
             ('YouTube quota', self.yt_session_quota+stored_yt_quota,' / 10000',),
             ('Latency', f'{round(self.bot.latency * 1000)}ms',''),
@@ -108,31 +108,31 @@ class CloneusManager():
             self.clo.unload_model()
         self.status = 'down'
 
-    def _preload(self, model_dir: str|Path, ckpt_subdir=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
+    def _preload(self, checkpoint_path: str|Path, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
         if self.clo is None:
             if gconfig_fname is None:
                 gconfig_fname = 'generation_config.json'
-            self.clo = Cloneus(model_dir=model_dir, ckpt_subdir=ckpt_subdir, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
+            #self.clo = Cloneus(model_dir=model_dir, ckpt_subdir=ckpt_subdir, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
         self.path_data = self.clo.path_data
 
     @async_wrap_thread
-    def load(self, model_dir: str|Path, ckpt_subdir=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
+    def load(self, checkpoint_path: str|Path, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
         if self.clo is None:
             if gconfig_fname is None:
                 gconfig_fname = 'generation_config.json'
-            self.clo = Cloneus(model_dir=model_dir, ckpt_subdir=ckpt_subdir, gconfig_fname=gconfig_fname, 
-                                     dtype=dtype, attn_implementation=attn_implementation)
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
             self.clo.load_model()
         else:
-            self.clo.swap_model(model_dir, ckpt_subdir, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
+            self.clo.swap_model(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
         
         self.path_data = self.clo.path_data
         self.status = 'up'
         
-        esc_authtags = [re.escape(roles.format_author_tag(u, self.clo.author_tag)) for u in roles.author_display_names]
-        self.RE_ANY_USERTAG = re.compile(r'(^{}){}'.format('|'.join(esc_authtags), self.clo.tag_sep), re.MULTILINE) # NOTE: will NOT work if decide to use UPPER or lower case names
+        esc_authtags = [re.escape(roles.format_author_tag(u, self.clo.cfg.author_tag)) for u in roles.author_display_names]
+        self.RE_ANY_USERTAG = re.compile(r'(^{}){}'.format('|'.join(esc_authtags), self.clo.cfg.tag_sep), re.MULTILINE) # NOTE: will NOT work if decide to use UPPER or lower case names
         
-        model_logger.info(f'Using model:\n - {str(self.clo.model_dir)} - ({self.clo.dtype} / {self.clo.attn_implementation})')
+        model_logger.info(f'Using model:\n - {str(self.clo.path_data.checkpoint_path)} - ({self.clo.torch_dtype} / {self.clo.cfg.attn_implementation})')
         model_logger.info(f'Generation mode init: "{self.clo.gen_alias}"\n - {self.clo.get_genconf(verbose=True)}\n')
         gc.collect()
     
@@ -415,7 +415,7 @@ class CloneusManager():
         model_output = text_utils.splitout_tag(model_output, self.RE_ANY_USERTAG)
         if self.clo.postfix in model_output:
             print('WARNING: postfix detected in model_output, removing')
-            model_output = model_output.replace(self.clo.postfix, '')
+            model_output = model_output.replace(self.clo.cfg.postfix, '')
         # space at the end of a sentence encodes a special token (28705). Shouldn't pass space in seed text or results are sub optimal  
         text_out = (seed_text + ' ' + model_output) if seed_text else model_output
         text_out = self.clo.ytm.decode(text_out)
