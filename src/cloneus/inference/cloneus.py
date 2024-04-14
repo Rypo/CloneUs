@@ -207,7 +207,7 @@ class Cloneus:
 
         self._is_instruct_model = self.tokenizer.chat_template is not None
         # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
-        self.has_sysprompt = self.tokenizer.use_default_system_prompt or self.config.get('tune_type') == 'chatml' 
+        self.has_sysprompt = self.config.get('tune_type') == 'chatml' or self.config.base_tune_type=='chat' or ('system' in str(self.base_tokenizer.chat_template))  
         self._use_sysprompt = self.has_sysprompt and not self.config.prompt.append_msg
         
         print(self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, 
