@@ -1,5 +1,6 @@
 import os
 import typing
+from contextlib import contextmanager
 import torch
 import transformers
 
@@ -145,4 +146,28 @@ def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
         print('Using custom chat template')
         tokenizer.chat_template = custom_chat_template
 
+    return tokenizer
+
+@contextmanager
+def batchsafe_tokenizer(tokenizer):
+    # TODO: In retrospect, this is not necessary. Could just set this on init. 
+    # Any batch will *always* use this,
+    # Any Non-batched won't use padding at all, so side/token is irrelevant anyway.
+    # That said, still need to test this assertion before removing
+    pad_side = tokenizer.padding_side
+    pad_tokenid = tokenizer.pad_token_id
+    
+    tokenizer.padding_side  = 'left'
+    # for non-chat_ml models, we set pad=unk, but batch needs pad=eos to work properly
+    if tokenizer.pad_token_id == tokenizer.unk_token_id:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    try:
+        yield tokenizer
+    finally:
+        tokenizer.padding_side = pad_side
+        tokenizer.pad_token_id = pad_tokenid
+
+def set_tokenizer_inference(tokenizer):
+    tokenizer.padding_side = 'left'
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     return tokenizer
