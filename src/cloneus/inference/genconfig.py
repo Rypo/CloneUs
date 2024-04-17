@@ -1,4 +1,5 @@
 import typing
+from pathlib import Path
 import torch
 import transformers
 from transformers import GenerationConfig, StoppingCriteria
@@ -46,31 +47,32 @@ GENOPTS = {
 }
 GENOPT_DEFAULTS = {k: v['default'] for k,v in GENOPTS.items()}
 
-def get_gencofs(pad_token_id, eos_token_id, include=('cs','bsms','dbsd','ms','gd'), max_new_tokens=256, **kwargs):
+GENMODE_ALIASES = {
+    'ms': 'multinomial_sampling',
+    'cs': 'contrastive_search',
+    'gd': 'greedy_decoding',
+    'bsd': 'beam_search_decoding',
+    'bsms': 'beam_search_multinomial_sampling',
+    'dbsd': 'diverse_beam_search_decoding'
+ }
 
-    # https://huggingface.co/docs/transformers/main_classes/text_generation
+def load_gen_config(gen_config_path:str|Path, gen_config_name:str=None):
+    gen_config_path = Path(gen_config_path)
+    
+    if gen_config_name is not None:
+        if gen_config_path.suffix == '.json':
+            gen_config_path = gen_config_path.with_name(gen_config_name)
+        else:
+            gen_config_path = gen_config_path/gen_config_name
+    
+    try:
+        gen_config = GenerationConfig.from_pretrained(gen_config_path, config_file_name=gen_config_name, local_files_only=True)
+        print(f'Found GenerationConfig: {gen_config_path}')
+    except OSError as e:
+        print('No existing GenerationConfig found, defaulting to GENOPTS (multinomial_sampling)')
+        gen_config = GenerationConfig.from_dict(GENOPT_DEFAULTS.copy()) 
 
-    #if pad_token_id is None:
-    #    pad_token_id = eos_token_id
-    if isinstance(include, str):
-        include = (include,)
-    shared_genargs = dict(
-        max_new_tokens=max_new_tokens,
-        renormalize_logits=True,
-        repetition_penalty=1.1,
-        eos_token_id=eos_token_id, #model.config.eos_token_id,
-        pad_token_id=pad_token_id, #model.config.pad_token_id,
-    )
-    shared_genargs.update(kwargs)
-    # https://github.com/oobabooga/text-generation-webui/blob/main/presets/Contrastive%20Search.yaml
-    cs_genconf = GenerationConfig(do_sample=False, penalty_alpha=0.6, top_k=4, **shared_genargs) #   #contrastive -- Low memory cuts memory usage in ~half, makes shorter outputs with similar content, but slow
-    bsms_genconf = GenerationConfig(do_sample=True, top_p=1, temperature=1, num_beams=4, early_stopping=True, **shared_genargs)
-    dbsd_genconf = GenerationConfig(do_sample=False, num_beams=4, num_beam_groups=4, early_stopping=True, diversity_penalty=0.5, **shared_genargs)
-    ms_genconf = GenerationConfig(do_sample=True, top_p=1, temperature=1, num_beams=1, **shared_genargs)
-    gd_genconf = GenerationConfig(do_sample=False, num_beams=1, **shared_genargs)
-
-    confmap = {k:v for k,v in zip(('cs','bsms','dbsd','ms','gd'),(cs_genconf,bsms_genconf,dbsd_genconf,ms_genconf,gd_genconf))}
-    return [confmap[k] for k in include]
+    return gen_config
 
 def get_config(tokenizer, alias:typing.Literal['cs','ms','gd'], **kwargs):
     print(f'eos: {tokenizer.eos_token!r} ({tokenizer.eos_token_id}), pad: {tokenizer.pad_token!r} ({tokenizer.pad_token_id}), padside: {tokenizer.padding_side}')
@@ -83,6 +85,9 @@ def get_config(tokenizer, alias:typing.Literal['cs','ms','gd'], **kwargs):
         pad_token_id=tokenizer.pad_token_id,
         **kwargs,
     )
+    # https://huggingface.co/docs/transformers/main_classes/text_generation
+    # https://github.com/oobabooga/text-generation-webui/blob/main/presets/Contrastive%20Search.yaml
+     #contrastive -- Low memory cuts memory usage in ~half, makes shorter outputs with similar content, but slow
     #shared=dict(repetition_penalty=1.1, max_new_tokens=256, eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, **kwargs)
     if alias=='cs':
         gen_config = GenerationConfig(penalty_alpha=0.6, top_k=4, low_memory=False, **shared)
@@ -94,6 +99,7 @@ def get_config(tokenizer, alias:typing.Literal['cs','ms','gd'], **kwargs):
         gen_config = GenerationConfig.from_dict(shared)
     
     return gen_config
+
 
 
 def create_genconf(alias, pad_token_id, eos_token_id, **kwargs):
@@ -153,54 +159,23 @@ def create_genconf(alias, pad_token_id, eos_token_id, **kwargs):
     
     return genconfig
 
-def get_generation_mode(generation_config:GenerationConfig, assistant_model:transformers.PreTrainedModel=None):
-    """
-    Returns the generation mode triggered by a [`GenerationConfig`] instance.
-    """
-
-    # https://github.com/huggingface/transformers/blob/v4.36.1/src/transformers/generation/utils.py#L939
-    if generation_config.constraints is not None or generation_config.force_words_ids is not None:
-        generation_mode = GenerationMode.CONSTRAINED_BEAM_SEARCH
-    elif generation_config.num_beams == 1:
-        if generation_config.do_sample is False:
-            if (
-                generation_config.top_k is not None
-                and generation_config.top_k > 1
-                and generation_config.penalty_alpha is not None
-                and generation_config.penalty_alpha > 0
-            ):
-                generation_mode = GenerationMode.CONTRASTIVE_SEARCH
-            else:
-                generation_mode = GenerationMode.GREEDY_SEARCH
-        else:
-            generation_mode = GenerationMode.SAMPLE
-    else:
-        if generation_config.num_beam_groups > 1:
-            generation_mode = GenerationMode.GROUP_BEAM_SEARCH
-        elif generation_config.do_sample is True:
-            generation_mode = GenerationMode.BEAM_SAMPLE
-        else:
-            generation_mode = GenerationMode.BEAM_SEARCH
-
-    # Assisted generation may extend some generation modes
-    if assistant_model is not None:
-        if generation_mode in ("greedy_search", "sample"):
-            generation_mode = GenerationMode.ASSISTED_GENERATION
-        else:
-            raise ValueError(
-                "You've set `assistant_model`, which triggers assisted generate. Currently, assisted generate "
-                "is only supported with Greedy Search and Sample."
-            )
-    return generation_mode
-
-
-class NewLineTokensCriteria(StoppingCriteria):
-    def __init__(self, stop_tokens):
-        self.stop_tokens = stop_tokens
+class WordListCriteria(StoppingCriteria):
+    # https://discuss.huggingface.co/t/implimentation-of-stopping-criteria-list/20040/19
+    # https://github.com/nestordemeure/stop_word/blob/main/stop_word_criteria.py
+    def __init__(self, stop_token_ids: list[torch.Tensor]):
+        self.stop_token_ids = stop_token_ids
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
+        for stop_ids in self.stop_token_ids:
+            if torch.all(input_ids[0, -stop_ids.shape[0]:] == stop_ids): 
+                return True
+        return False
+    
+    @classmethod
+    def from_words(cls, word_list:list[str], tokenizer:transformers.PreTrainedTokenizer, device=0):
+        # NOTE: The intentional space prefix on words. Different tokens may be used at sentence start vs first mid/end.
+        # This is paricularily problematic when \n is part of a stop word
+        # To normalize for this, add a space prefix and trim it off [0,1:]
         
-        #last_tokens = input_ids[0,-2:]
-        # this also works, but can't gaurentee output is identical in all circumstances. Seems like in the batch case, padding token would interfere 
-        last_tokens = input_ids[:,-2:] 
-        return torch.all(last_tokens==self.stop_tokens)
+        stop_token_ids = [tokenizer(' ' + x, return_tensors='pt', add_special_tokens=False)['input_ids'][0,1:].to(device) for x in word_list]
+        return cls(stop_token_ids)
