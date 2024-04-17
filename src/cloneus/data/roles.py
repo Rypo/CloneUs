@@ -52,6 +52,20 @@ BOT_NAME = USER_DATA['BOT']['displayName']
 def format_author_tag(user_display_name:str, author_tag:str):
     return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=author_to_fname.get(user_display_name,user_display_name))
 
+def to_jinja_template(tag_sep:str, postfix:str):
+    # role will be the pre-formated author tag
+    template=(
+        "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}"
+        "{% for message in messages %}"
+        "{{ message['role'] + '__TAG_SEP__' + message['content'] + '__POSTFIX__' }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ '' }}"
+        "{% endif %}"
+    )
+    template = template.replace('__TAG_SEP__',tag_sep).replace('__POSTFIX__', postfix)
+    return template
+
 def check_author_initials():
     if initial_to_author:
         assert len(set([i.lower() for i in initial_to_author])-set(['i','m','p','x'])) == len(author_display_names), 'Each user must be assigned a unique, case-insensitive initial ∉ {"i","m","p","x"} or char+num(s).'
