@@ -39,27 +39,7 @@ class BotUs(commands.Bot):
         print('ready')
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         await self.toggle_extensions(extdir='cogs', state='on')
-
-        # This copies the global commands over to your guild.
-        self.tree.copy_global_to(guild=settings.GUILDS_ID)
-        await self.tree.sync(guild=settings.GUILDS_ID)
-        #await self.tree.sync() #await self.tree.sync(guild=settings.GUILDS_ID)
-
-    async def gsync(self, guild:discord.Guild, spec: typing.Literal["*", "~", "^"] = "*"):
-        # https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#sync-command-example
-        if spec == "*":
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-        elif spec == "~":
-            synced = await self.tree.sync(guild=guild)
-        elif spec == "^":
-            self.tree.clear_commands(guild=guild)
-            await self.tree.sync(guild=guild)
-            synced = []
-        else:
-            synced = await self.tree.sync()
-        return synced
-
+    
     @asynccontextmanager
     async def writing_status(self, presence_busy:str='busy', presense_done:str='ready'):        
         await self.change_presence(**settings.BOT_PRESENCE.get(presence_busy, 
@@ -138,7 +118,7 @@ def main():
     @app_commands.choices(cog=[app_commands.Choice(name=cog, value=cog) for cog in cog_list])
     async def reload(interaction: discord.Interaction, cog: str):
         """Reload a command set."""
-        await bot.reload_extension(f'server.cogs.{cog.lower()}')
+        await bot.reload_extension(f'cogs.{cog.lower()}')
         await interaction.response.send_message(f'Reloaded: {cog}', ephemeral=True, delete_after=1)
     
 
@@ -154,7 +134,7 @@ def main():
     @bot.command(name='gsync', aliases=['sync'])
     #@commands.guild_only()
     @commands.is_owner()
-    async def sync_treecmds(ctx: commands.Context, spec: typing.Literal["~", "*", "^"] = None) -> None:
+    async def sync_treecmds(ctx: commands.Context, spec: typing.Literal["+", "-", "~","."] = None) -> None:
         '''Attempt to synchronize bot commands.
 
         Use when:
@@ -163,16 +143,47 @@ def main():
             2. Seeing duplicates in app command auto completions. 
 
         Args:
-            spec: Changes how commands are updated (options {"*", "~", "^"})
-                "*" - copy and sync
-                "~" - sync only
-                "^" - clear and sync
+            spec: Changes how commands are updated (options {"+", "-", "~", "."})
+                "+" - copy global commands to guild
+                "-" - clear guild commands
+                "~" - sync global commands
+                "." - sync guild commands
+                None - sync global and guild commands
         '''
-        synced = await bot.gsync(ctx.guild, spec=spec)
+        # https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#sync-command-example
+        # - https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#syncing-gotchas
+        if (guild := ctx.guild) is None:
+            guild = settings.GUILDS_ID 
         
-        synced_md = '\n- ' + '\n- '.join([s.name for s in synced])
-        await ctx.send(f"Synced {len(synced)} commands {'globally' if spec is None else 'to the current guild.'}{synced_md}")
-        return
+        #synced = await bot.gsync(guild, spec=spec)
+        if spec == "+": 
+            bot.tree.copy_global_to(guild=guild) # this causes duplicatation after sync
+        elif spec == "-":
+            bot.tree.clear_commands(guild=guild) # removes duplicate command but needs sync anyway, no point in clear global
+        elif spec == "~":
+            await bot.tree.sync(guild=None)
+            synced = []
+        elif spec == ".":
+            synced = await bot.tree.sync(guild=guild)
+        else:
+            # Double sync: clears dupes, adds new, removes old. It is the way. 
+            global_synced = await bot.tree.sync()
+            #await bot.wait_until_ready()
+            guild_synced = await bot.tree.sync(guild=guild)
+            synced = list(set(global_synced+guild_synced))
+        
+        synced_md = '\n- ' + '\n- '.join([s.name for s in synced]) if synced else ''
+        if spec is None:
+            where = ' globally and to the guild.'
+        elif spec == '~':
+            where = ' globally.'
+        elif spec == '.':
+            where = ' to the current guild.'
+        else:
+            where = ''
+        return await ctx.send(f"Synced {len(synced)} commands{where}{synced_md}")
+        
+
     
     bot.run(settings.BOT_TOKEN)
 

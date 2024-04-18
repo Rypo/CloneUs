@@ -51,7 +51,7 @@ def check_up(attr_name:str, msg:str='❗ Model not loaded.'):
 class AICore(commands.Cog):
     '''Central Command, the AI choreographer if you will..'''
     
-    def __init__(self, bot: commands.Bot, load_nowait=False):
+    def __init__(self, bot: commands.Bot, cog_textgen: TextGen, load_nowait=False):
         self.bot = bot
         self._load_nowait = load_nowait
 
@@ -61,18 +61,21 @@ class AICore(commands.Cog):
         self._changelog_shown = False
         self._channel=self.bot.get_channel(settings.CHANNEL_ID)
 
-        self.pstore = io_utils.PersistentStorage()
+        self.cog_textgen = cog_textgen # TextGen(self.bot, pstore=self.pstore, clomgr=self.clomgr, msgmgr=self.msgmgr)
         
-        
-        self.clomgr = CloneusManager(self.bot,)
-        self.msgmgr = MessageManager(self.bot, n_init_messages=15, message_cache_limit=31)
+        self.pstore = self.cog_textgen.pstore
+        self.clomgr =self.cog_textgen.clomgr
+        self.msgmgr = self.cog_textgen.msgmgr
                 
-        self.cog_textgen = TextGen(self.bot, pstore=self.pstore, clomgr=self.clomgr, msgmgr=self.msgmgr)
+        
         
         
     async def cog_load(self):
         await self.bot.wait_until_ready()
-        await self.bot.add_cog(self.cog_textgen, override=True, guild=settings.GUILDS_ID)
+        
+        if self.cog_textgen.qualified_name not in self.bot.cogs:
+            print('ADDING TEXT GEN COG IN cog_load AiCore')
+            await self.bot.add_cog(self.cog_textgen, override=True)#, guild=settings.GUILDS_ID)
         release_memory()
         
         self.autoloader.start()
@@ -215,7 +218,18 @@ class AICore(commands.Cog):
 
 
 async def setup(bot):
-    load_nowait = bool(os.getenv('EAGER_LOAD',False))
+    load_nowait = bool(os.getenv('EAGER_LOAD',False))            
+    cog_textgen = TextGen(
+        bot, 
+        pstore=io_utils.PersistentStorage(), 
+        clomgr=CloneusManager(bot,), 
+        msgmgr=MessageManager(bot, n_init_messages=15, message_cache_limit=31)
+    )
     
-    await bot.add_cog(AICore(bot, load_nowait=load_nowait))
-    #await bot.sync(guild=settings.GUILDS_ID, spec="*")
+    ai_core = AICore(bot, cog_textgen, load_nowait=load_nowait)
+
+    await bot.add_cog(cog_textgen)
+    await bot.add_cog(ai_core)
+    # A lot of folks tend to sync before loading their extensions… which means their commands aren’t loaded into their CommandTree yet.
+    # - https://about.abstractumbra.dev/discord.py/2023/01/30/app-command-basics.html#caveats
+    
