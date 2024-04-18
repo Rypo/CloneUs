@@ -43,7 +43,7 @@ class CloneusManager():
         self.all_checkpoints = io_utils.find_checkpoints(settings.RUNS_DIR, require_config=True) # .relative_to(settings.ROOT_DIR)
         # self._load_nowait = load_nowait
         self.clo = None
-        self.path_data = None
+        #self.path_data = None
         
         self.tts_mode = False
         self.emojis = self.bot.guilds[0].emojis
@@ -68,22 +68,22 @@ class CloneusManager():
         return self.status == 'up'
     
     @cached_property
-    def hot_swappable_checkpoints(self):
+    def hot_swappable_checkpoints(self) -> list[Path] | list:
         if self.is_ready:
-            return [c for c in self.all_checkpoints if self.path_data.base_model_alias in str(c)]
+            return [c for c in self.all_checkpoints if self.clo.path_data.base_model_alias in str(c)]
         return []
     
     def list_status(self, stored_yt_quota=0):
         '''Check bot status.'''
         # ✅⚠❌🛑💯🟥🟨🟩⬛✔🗯💭💬👁‍🗨🗨
-        gconf_settings = self.clo.get_genconf(verbose=False)
+        gconf_settings = self.clo.get_genconfig(verbose=False)
         gconf_settings.pop('ban_words_ids',None)
         gconf_settings.pop('sequence_bias',None)
         vram_use, vram_total = get_gpu_memory()
         model_name,checkpoint='',''
-        if self.path_data:
-            model_name = self.path_data.checkpoint_path
-            checkpoint = self.path_data.checkpoint_name
+        if self.clo:
+            model_name = self.clo.path_data.checkpoint_path
+            checkpoint = self.clo.path_data.checkpoint_name
         statuses = [
             ('Bot status', self.status.title(), " ✔" if self.status=="up" else " ✖"),
             ('Model', model_name, f"/{checkpoint}"),
@@ -104,36 +104,34 @@ class CloneusManager():
         return statuses
     
     def unload(self):
+        prekwargs = {'checkpoint_path':self.clo.path_data.checkpoint_path, 'gen_config':self.clo.gen_config, 
+                     'dtype':self.clo.cfg.dtype, 'attn_implementation':self.clo.cfg.attn_implementation}
         if self.clo is not None:
             self.clo.unload_model()
         self.status = 'down'
+        self._preload(**prekwargs)
 
-    def _preload(self, checkpoint_path: str|Path, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
+    def _preload(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None):
         if self.clo is None:
-            if gconfig_fname is None:
-                gconfig_fname = 'generation_config.json'
-            #self.clo = Cloneus(model_dir=model_dir, ckpt_subdir=ckpt_subdir, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
-            self.clo = Cloneus.from_pretrained(checkpoint_path, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
-        self.path_data = self.clo.path_data
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation)
 
     @async_wrap_thread
-    def load(self, checkpoint_path: str|Path, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None, gconfig_fname=None):
+    def load(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None ):
         if self.clo is None:
-            if gconfig_fname is None:
-                gconfig_fname = 'generation_config.json'
-            self.clo = Cloneus.from_pretrained(checkpoint_path, gconfig_fname=gconfig_fname, dtype=dtype, attn_implementation=attn_implementation)
+            #if gen_config is None:
+            #    gen_config = 'generation_config.json'
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation)
             self.clo.load_model()
         else:
-            self.clo.swap_model(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation, gconfig_fname=gconfig_fname)
+            self.clo = self.clo.swap_model(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, )
         
-        self.path_data = self.clo.path_data
         self.status = 'up'
         
         esc_authtags = [re.escape(roles.format_author_tag(u, self.clo.cfg.author_tag)) for u in roles.author_display_names]
         self.RE_ANY_USERTAG = re.compile(r'(^{}){}'.format('|'.join(esc_authtags), self.clo.cfg.tag_sep), re.MULTILINE) # NOTE: will NOT work if decide to use UPPER or lower case names
         
         model_logger.info(f'Using model:\n - {str(self.clo.path_data.checkpoint_path)} - ({self.clo.torch_dtype} / {self.clo.cfg.attn_implementation})')
-        model_logger.info(f'Generation mode init: "{self.clo.gen_alias}"\n - {self.clo.get_genconf(verbose=True)}\n')
+        model_logger.info(f'Generation mode init: "{self.clo.gen_alias}"\n - {self.clo.get_genconfig(verbose=True)}\n')
         gc.collect()
     
     async def load_random_model(self, fast_proba=0.5):
@@ -153,10 +151,10 @@ class CloneusManager():
             options = self.all_checkpoints
         
         next_model = random.choice(options)
-            
-        await self.load(next_model)
-        self.clo.gen_config = gconfig
-        print(f'CHANGE PLACES: {next_model}')
+        print(f'CHANGE PLACES: {next_model.relative_to(settings.RUNS_DIR)}')
+        await self.load(next_model, gen_config=gconfig)
+        #self.clo.gen_config = gconfig
+        #print(f'CHANGE PLACES: {next_model}')
 
     def modelview_data(self, name_filter=None, remove_empty=True):
         '''Format checkpoints for use in list/switch model view'''
@@ -224,13 +222,13 @@ class CloneusManager():
     def update_genconfig(self, new_config: dict):
         """Set a Generation Configuration value. Changes """
         
-        changed = self.clo.set_genconf(**new_config)
+        changed = self.clo.set_genconfig(**new_config)
         
         if changed:
-            model_logger.info(f'Generation args update\n - {self.clo.get_genconf(verbose=True)}\n')
+            model_logger.info(f'Generation args update\n - {self.clo.get_genconfig(verbose=True)}\n')
             update_message = ("Updated: "+ ', '.join(f"`{a}: ({changed[a]['prev']} -> {changed[a]['new']})`" for a in changed))
         else:
-            update_message = ("No Δ: " + ', '.join(f"`{k}: {v}`" for k,v in self.clo.get_genconf(False).items()))
+            update_message = ("No Δ: " + ', '.join(f"`{k}: {v}`" for k,v in self.clo.get_genconfig(False).items()))
         
         return update_message
 
@@ -413,7 +411,7 @@ class CloneusManager():
 
     def to_discord_output(self, model_output, author, seed_text):
         model_output = text_utils.splitout_tag(model_output, self.RE_ANY_USERTAG)
-        if self.clo.postfix in model_output:
+        if self.clo.cfg.postfix in model_output:
             print('WARNING: postfix detected in model_output, removing')
             model_output = model_output.replace(self.clo.cfg.postfix, '')
         # space at the end of a sentence encodes a special token (28705). Shouldn't pass space in seed text or results are sub optimal  

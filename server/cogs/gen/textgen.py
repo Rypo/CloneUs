@@ -67,7 +67,7 @@ class TextGen(commands.Cog, SetConfig):
         await self.bot.wait_until_ready()
         self.pstore.update(youtube_quota = self.pstore.get('youtube_quota', 0))
         #self.bot.tree.add_command(self.ctx_menu)
-        self.clomgr._preload(self.init_model, gconfig_fname='best_generation_config.json')
+        self.clomgr._preload(self.init_model, gen_config='best_generation_config.json')
         
 
     async def cog_unload(self):
@@ -163,7 +163,7 @@ class TextGen(commands.Cog, SetConfig):
             msg = await ctx.send('Powering up....',  silent=True)
         
         if load and not self.clomgr.is_ready:
-            await self.clomgr.load(self.init_model, gconfig_fname='best_generation_config.json')
+            await self.clomgr.load(self.init_model, gen_config='best_generation_config.json')
             
         await self.bot.change_presence(**settings.BOT_PRESENCE['chat'])
             
@@ -199,80 +199,53 @@ class TextGen(commands.Cog, SetConfig):
         ppview = cview.PrePagedView(ckpt_list, timeout=180)
 
         msg = 'All Valid Model Options' if name_filter is None else f'Model options matching {name_filter!r}'
+        # if len(matches)>1:
+        #     ppview = cview.PrePagedView(self.clomgr.modelview_data(name_filter=model_runname, remove_empty=True))
+        #     #matchemb = discord.Embed(title="Matching Options", description="".join(io_utils.find_checkpoints(m, allmodelpath) for m in matches))
+        #     return await ppview.send(ctx,f'Multiple matches found for "{model_runname}", specify harder')#, embed=matchemb)
 
+        # if checkpoint_name is None:
+        #     ckpts = io_utils.find_checkpoints(model_basedir)
+        #     emb=discord.Embed(title='Options', description=io_utils.fmt_checkpoints(model_basedir, ckpts, md_format=True, wrapcodeblock=True))
+        #     return await ctx.send('Active Model Checkpoints', embed=emb)
         return await ppview.send(ctx, msg)
         
     
     @commands.hybrid_command(name='switchmodel')
     async def switch_model(self, ctx: commands.Context, 
-                           checkpoint_name: str = None, 
-                           model_runname: str = None, 
+                           modelpath_filter: str = None, 
+                           #checkpoint_name: str = None, 
                            dtype: typing.Literal['bfloat16','float16']=None, 
                            attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None):
         '''Change the underlying model. Violently user unfriendly at the moment'''
-        allmodelpath = settings.RUNS_DIR 
-        # model_outpaths = sorted([p.parent for p in allmodelpath.rglob('config.yaml') if any(p.parent.glob('checkpoint*'))])
-        model_basedir = None
-        # None passed
-        if model_runname is None and checkpoint_name is None: 
+        
+
+        if modelpath_filter is None:
             if dtype or attn_implementation:
                 await ctx.defer()
                 await self.txtdown(ctx, False, False)
                 
-                await self.clomgr.load(self.clomgr.path_data.checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
+                await self.clomgr.load(self.clomgr.clo.path_data.checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
                 await self.txtup(ctx, False, False)
                 #await self.status_report(ctx) # TODO: FIX 
-                
                 #await self.up(ctx, True)
-                return
+                return await ctx.send(content='Done.', delete_after=3)
             
             return await self.show_models(ctx)
-
-        # checkpoint passed
-        if checkpoint_name:
-            if not checkpoint_name.startswith('checkpoint-'):
-                checkpoint_name = 'checkpoint-'+checkpoint_name
-            if model_runname is None: 
-                model_basedir = self.clomgr.path_data.run_path
-
-        if model_basedir is None: 
-            # model_run passed or both passed
-            #model_outpaths = sorted([p.parent for p in allmodelpath.rglob('config.yaml') if any(p.parent.glob('checkpoint*'))])
-            #matches = [o for o in model_outpaths if o.match(f'*{model_runname}*')]
-            matches = sorted([p.parent for p in allmodelpath.rglob('config.yaml') if any(p.parent.glob('checkpoint*')) and model_runname in str(p)])
-            if len(matches) != 1:
-                return await self.show_models(name_filter=model_runname)
-            # if not matches:
-            #     ppview = cview.PrePagedView(self.clomgr.modelview_data(remove_empty=True))
-            #     await ppview.send(ctx, f'No match for "{model_runname}"')
-            #     return
             
-            # if len(matches)>1:
-            #     ppview = cview.PrePagedView(self.clomgr.modelview_data(name_filter=model_runname, remove_empty=True))
-            #     #matchemb = discord.Embed(title="Matching Options", description="".join(io_utils.find_checkpoints(m, allmodelpath) for m in matches))
-            #     await ppview.send(ctx,f'Multiple matches found for "{model_runname}", specify harder')#, embed=matchemb)
-            #     return
-                
-            model_basedir = matches[0]
+        matches = sorted([p for p in settings.RUNS_DIR.rglob('*checkpoint*') if (p.parent/'config.yaml').exists() and modelpath_filter in str(p)])
+        if len(matches) != 1:
+            print(matches)
+            return await self.show_models(ctx, name_filter=modelpath_filter)
 
-        if checkpoint_name is None:
-            ckpts = io_utils.find_checkpoints(model_basedir)
-            emb=discord.Embed(title='Options', description=io_utils.fmt_checkpoints(model_basedir, ckpts, md_format=True, wrapcodeblock=True))
-            await ctx.send('Active Model Checkpoints', embed=emb)
-            return 
-
-        full_model_path = (model_basedir/checkpoint_name)
-        if not full_model_path.exists():
-            ckpts = io_utils.find_checkpoints(model_basedir)
-            emb=discord.Embed(title='Options', description=io_utils.fmt_checkpoints(model_basedir, ckpts, md_format=True, wrapcodeblock=True))
-            await ctx.send(f'No Model Found "{full_model_path.relative_to(allmodelpath)}"', embed=emb)
-            return
-
-        await ctx.send(f'Switching to model at {full_model_path.relative_to(allmodelpath)}')
+        full_model_path = matches[0]
+            
+        msg = await ctx.send(f'Switching to model: {full_model_path.relative_to(settings.RUNS_DIR)} ...')
         
         await self.txtdown(ctx, False, False)
-        await self.clomgr.load(model_basedir, checkpoint_name, dtype=dtype, attn_implementation=attn_implementation)
+        await self.clomgr.load(full_model_path, dtype=dtype, attn_implementation=attn_implementation)
         await self.txtup(ctx, False, False)
+        await msg.edit(content='Done.', delete_after=3)
         #await self.status_report(ctx) # TODO: FIX
         #await self.down(ctx, False)
         #await self.up(ctx, True)

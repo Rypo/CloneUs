@@ -121,7 +121,7 @@ def eval_ckpt(clo:Cloneus, checkpoint_path:Path,  genconfig_modes:list[str], pro
     gc_inps_outs = {} # {gmode1 : {input_text: [out1, out2, ... ]}}
     for gmode in genconfig_modes:
         clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
-        gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconf(True)), '-', 176, 0)
+        gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconfig(True)), '-', 176, 0)
         inps_outs = gc_inps_outs.setdefault(gconf_line, {})
         
         for prompt in tqdm(prompts, leave=False):
@@ -219,7 +219,7 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
             f.write(textborder('INPUT: '+ repr(input_text), '=', 88, 0))
             for pset in param_sets:
                 f.write('\n'+ json.dumps(pset))
-                delt=clo.set_genconf(**pset)
+                delt=clo.set_genconfig(save_on_change=False, **pset)
                 seed_everything(42)
             
                 input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
