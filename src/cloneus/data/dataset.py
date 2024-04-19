@@ -131,59 +131,117 @@ def dataset_timechunk(chat_csv, tokenizer, cfg, text_only=False):
 
 
 
-def split_over(fchatformat:list[str], max_len:int, tokenizer, formatted_system: str, special_tokens_counted=True):
-    r'''Takes a list of messages with ALL formatting <|im_start|>, [INST], </s>\n ... etc. 
-    and splits into into multiple lists if the total token length exceeds `max_len`
+# def split_over(fchatformat:list[str], max_len:int, tokenizer, formatted_system: str, special_tokens_counted=True):
+#     r'''Takes a list of messages with ALL formatting <|im_start|>, [INST], </s>\n ... etc. 
+#     and splits into into multiple lists if the total token length exceeds `max_len`
 
-    Note: special_tokens_counted is kind of a hack. It will add a <s> to EVERY message, therefore adding +1 to EVERY message in the chunk
-    This will deflate the max length significantly, but I can't figure out why it's going ~15 tokens over length without out (4111 vs 4096) 
-    '''
-    return [''.join((formatted_system,*cb) if cb[0] != formatted_system else cb )
-     for cb in more_itertools.constrained_batches(fchatformat, max_len, get_len=lambda t: tokenizer(t, return_length=True, add_special_tokens=special_tokens_counted)['length'][0])]
+#     Note: special_tokens_counted is kind of a hack. It will add a <s> to EVERY message, therefore adding +1 to EVERY message in the chunk
+#     This will deflate the max length significantly, but I can't figure out why it's going ~15 tokens over length without out (4111 vs 4096) 
+#     '''
+#     return [''.join((formatted_system,*cb) if cb[0] != formatted_system else cb )
+#      for cb in more_itertools.constrained_batches(fchatformat, max_len, get_len=lambda t: tokenizer(t, return_length=True, add_special_tokens=special_tokens_counted)['length'][0])]
 
 
-def group_chatml_format(df_all:pd.DataFrame, tokenizer:PreTrainedTokenizerFast, max_len:int, role_tag:str, fprompt:str, custom_chat_template:str=None) -> pd.Series:
-    # NOTE: This can only work with chat_ml format
-    if custom_chat_template is None:
-        # Same as chat_ml but removed "assistant\n" from add_generation_prompt
-        custom_chat_template="{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
+# def group_chat_format(df_all:pd.DataFrame, tokenizer:PreTrainedTokenizerFast, max_len:int, role_tag:str, fprompt:str, custom_chat_template:str) -> pd.Series:
     
-    formatted_system = tokenizer.apply_chat_template([{"role": "system", "content": fprompt}], tokenize=False)
+#     formatted_system = tokenizer.apply_chat_template([{"role": "system", "content": fprompt}], tokenize=False)
+
+#     df_all['role'] = df_all['user'].apply(roles.format_author_tag, author_tag=role_tag)
+    
+#     df_rolechat = df_all[['role','text','split','chat_session']].rename(columns={'text':'content'}).copy()
+
+#     df_rolechat['chatfmt'] = df_rolechat[['role','content']].apply(lambda x: tokenizer.apply_chat_template([dict(x)], custom_chat_template, tokenize=False), axis=1)
+#     # insert formatted system message as first item in formatted message list groups. Drop duplicates created if list of hours_between_sessions 
+#     ds_session_syschats = df_rolechat.groupby(['split','chat_session'])['chatfmt'].agg(lambda x: [formatted_system,*list(x)]).drop_duplicates()
+#     # Explode out overlength lists, drop chat_session index as it's no longer needed
+#     ds_syschats = ds_session_syschats.apply(split_over, max_len=max_len, tokenizer=tokenizer, formatted_system=formatted_system).explode().droplevel(1)
+
+#     return ds_syschats
+
+def sanity_check(tokenizer, orig_convo:list[dict], convo_splits:list[list[dict]], sys_role_msg:dict,):
+    sys_ntokens = token_cnt([sys_role_msg], tokenizer, sys_role_msg, count_special=True)
+    orig_ntokens = token_cnt(orig_convo, tokenizer, sys_role_msg, count_special=True)
+    
+    n_partitions = len(convo_splits)
+    new_ntokens = sum([token_cnt(s, tokenizer, sys_role_msg, count_special=True) for s in convo_splits])
+    n_added_systokens = (n_partitions-1)*sys_ntokens # -1 for the original system message before splitting
+
+    return new_ntokens - n_added_systokens == orig_ntokens
+    
+def token_cnt(convo:list[dict], tokenizer, sys_role_msg:dict, count_special=True):
+    convo = list(convo)
+    if convo[0]!=sys_role_msg:
+        # include added system msg in partition length
+        convo = [sys_role_msg]+convo
+    text = tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False)
+    return tokenizer(text, return_length=True, add_special_tokens=count_special)['length'][0]
+
+def split_convo(over_len_convo: list[dict[str,str]], max_len:int, tokenizer, count_special=True, verify=True)-> list[list[dict[str,str]]]:
+    sys_role_msg = over_len_convo[0]
+    # if under max length, return as its own partion of size 1. The list wrap ensures it's not exploded into dicts
+    if token_cnt(over_len_convo, tokenizer, sys_role_msg, count_special)<=max_len:
+        return [over_len_convo]
+        
+    assert sys_role_msg['role']=='system', 'First message not a system role!'
+    cbatches = []
+    for cb in more_itertools.constrained_batches(over_len_convo, max_size=max_len, get_len=lambda t: token_cnt([t], tokenizer, sys_role_msg, count_special)):
+        cbatches.append(list(cb))
+       
+    # append system to each if not already
+    cbatches = [cb if cb[0] == sys_role_msg else [sys_role_msg]+cb for cb in cbatches] 
+    if verify:
+        assert sanity_check(tokenizer, over_len_convo, cbatches, sys_role_msg), 'Verification Failed! Some tokens cannot be accounted for.'
+    
+    return cbatches
+
+def group_role_replace(df_all:pd.DataFrame, tokenizer:PreTrainedTokenizerFast, max_len:int, role_tag:str, fprompt:str) -> pd.Series:
+    # NOTE: last implementation was wrong. Some chat templates have special behavior for index0.
+    # So, was getting special behavior twice, for formatted_system + first user message
+    
+    system_entry = {"role": "system", "content": fprompt}
+    #formatted_system = tokenizer.apply_chat_template([{"role": "system", "content": fprompt}], tokenize=False)
 
     df_all['role'] = df_all['user'].apply(roles.format_author_tag, author_tag=role_tag)
     
     df_rolechat = df_all[['role','text','split','chat_session']].rename(columns={'text':'content'}).copy()
+    
+    # insert system message as first item in chat convos groups.
+    conversations = df_rolechat.groupby(['split','chat_session'])[['role','content']].apply(lambda df: [system_entry] + df.to_dict(orient='records'))
 
-    df_rolechat['chatfmt'] = df_rolechat[['role','content']].apply(lambda x: tokenizer.apply_chat_template([dict(x)], custom_chat_template, tokenize=False), axis=1)
-    # insert formatted system message as first item in formatted message list groups. Drop duplicates created if list of hours_between_sessions 
-    ds_session_syschats = df_rolechat.groupby(['split','chat_session'])['chatfmt'].agg(lambda x: [formatted_system,*list(x)]).drop_duplicates()
-    # Explode out overlength lists, drop chat_session index as it's no longer needed
-    ds_syschats = ds_session_syschats.apply(split_over, max_len=max_len, tokenizer=tokenizer, formatted_system=formatted_system).explode().droplevel(1)
+    # Drop duplicates created if list of hours_between_sessions 
+    conversations.drop_duplicates(inplace=True)
 
-    return ds_syschats
+    # split any groups that have total tokens exceeding max_len into sub groups, drop chat_session index as it's no longer needed
+    conversations = conversations.apply(split_convo, max_len=max_len, tokenizer=tokenizer, count_special=True, verify=True).explode().droplevel(1)
 
+
+    return conversations
 
 def author_role_dataset(chat_csv, tokenizer, cfg):
     role_tag = cfg.author_tag
     fprompt = cfg.fprompt
     max_len = cfg.chunk_size
-    custom_chat_template = cfg.custom_chat_template
     prompt_length = tokenizer(fprompt, return_length=True).length[0]
 
     max_len-=prompt_length
     eval_frac = cfg.dataset.eval_frac
 
+    if cfg.custom_chat_template:
+        assert tokenizer.chat_template == cfg.custom_chat_template, 'Custom chat template not assigned to tokenizer!'
+
     # https://old.reddit.com/r/LocalLLaMA/comments/1aiz6zu/roleplaying_system_prompts/
     
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), cfg.tag_sep, postfix='not_used', author_tag=role_tag, 
+    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), '<IGNORED>', postfix='<not_used>', author_tag=role_tag, 
                                     hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=eval_frac)
     
-    # use max_len-2 in split threshold to account for <s> </s> tokens in final tokenization
-    ds_chatml = group_chatml_format(df_all, tokenizer, max_len=max_len, role_tag=role_tag, fprompt=fprompt, custom_chat_template=custom_chat_template)
+    
+    ds_chat = group_role_replace(df_all, tokenizer, max_len=max_len, role_tag=role_tag, fprompt=fprompt)
+
+    ds_chat = ds_chat.apply(tokenizer.apply_chat_template, tokenize=False)
 
     ds_timechunk_chatml = datasets.DatasetDict({
-        'train': datasets.Dataset.from_pandas(ds_chatml['train'].to_frame(name='text').reset_index(drop=True).copy(), split='train', preserve_index=False),
-        'validation': datasets.Dataset.from_pandas(ds_chatml['eval'].to_frame(name='text').reset_index(drop=True).copy(), split='validation', preserve_index=False),
+        'train': datasets.Dataset.from_pandas(ds_chat['train'].to_frame(name='text').reset_index(drop=True).copy(), split='train', preserve_index=False),
+        'validation': datasets.Dataset.from_pandas(ds_chat['eval'].to_frame(name='text').reset_index(drop=True).copy(), split='validation', preserve_index=False),
     })
 
     ds_timechunk_chatml = ds_timechunk_chatml.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, return_length=True, truncation=False), batched=True)
