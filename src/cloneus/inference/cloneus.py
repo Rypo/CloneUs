@@ -93,7 +93,7 @@ class GenConfigUtilities:
         return  self.gen_config.get_generation_mode()
         
 
-    def load_genconfig(self, gen_config:str|Path|dict|GenerationConfig=None):
+    def load_genconfig(self, gen_config:str|Path|dict|GenerationConfig=None, path_data: ModelPathComponents = None):
         if isinstance(gen_config, dict):
             gen_config = GenerationConfig.from_dict(gen_config)
         elif isinstance(gen_config, Path):
@@ -101,9 +101,9 @@ class GenConfigUtilities:
         elif isinstance(gen_config, GenerationConfig):
             gen_config = gen_config
         else: # str|None
-            gen_config = genconfig.load_gen_config(self.path_data.checkpoint_path, gen_config)
+            gen_config = genconfig.load_gen_config(path_data.checkpoint_path, gen_config)
 
-        tokenizer = load.auto_inference_tokenizer(self.path_data.checkpoint_path)
+        tokenizer = load.auto_inference_tokenizer(path_data.checkpoint_path)
         
         
         gen_config.pad_token_id = tokenizer.pad_token_id
@@ -196,14 +196,12 @@ class Cloneus(GenConfigUtilities):
         self.tokenizer = None
         self.path_data = kwargs.pop('path_data')
         self.cfg = kwargs.pop('cfg')#self.setup_config(checkpoint_path, gen_config=gen_config, **kwargs)
-        self.torch_dtype = kwargs.pop('torch_dtype', dtype_to(self.cfg.dtype, 'torch', default=None))
-        self.gen_config = self.load_genconfig(kwargs.pop('gen_config'))#self.load_genconfig(gen_config)
+        #self.torch_dtype = kwargs.pop('torch_dtype', dtype_to(self.cfg.dtype, 'torch', default=None))
+        self.gen_config = self.load_genconfig(kwargs.pop('gen_config'), self.path_data)#self.load_genconfig(gen_config)
         self.ytm = kwargs.pop('ytm')#youtube.YouTubeManager()
         
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         self._last_streamed_batch_values = {'input_text':'','author_prompts':[], 'output_texts':[], 'input_len': -1, 'output_lens': []}
-        self._previous_path_data = None
-        self._previous_cfg = None
 
     @property
     def torch_dtype(self):
@@ -226,8 +224,8 @@ class Cloneus(GenConfigUtilities):
     
     def setup_tokenizer(self, tokenizer_or_path:transformers.PreTrainedTokenizer|Path):
         '''Be careful, if you pass a tokenizer with already overwriten chat_template it will not refresh it'''
-        if isinstance(tokenizer, (str, Path)):
-            tokenizer = load.auto_inference_tokenizer(tokenizer)
+        if isinstance(tokenizer_or_path, (str, Path)):
+            tokenizer = load.auto_inference_tokenizer(tokenizer_or_path)
         else:
             tokenizer = tokenization.set_tokenizer_inference(tokenizer_or_path)
 
@@ -239,7 +237,7 @@ class Cloneus(GenConfigUtilities):
 
 
     @staticmethod
-    def from_pretrained(checkpoint_path:str|Path, gen_config=None, **kwargs):
+    def from_pretrained(checkpoint_path:str|Path, gen_config=None, ytm:youtube.YouTubeManager = None, **kwargs):
         path_data = ModelPathComponents.from_checkpoint(Path(checkpoint_path))
         
         config = OmegaConf.load(path_data.config_path)
@@ -253,8 +251,10 @@ class Cloneus(GenConfigUtilities):
         else:
             raise NotImplementedError('Unable to determine Cloneus Format Class')
         
-    
-        return ClonuesCls(path_data=path_data, cfg=config, gen_config=gen_config, ytm=kwargs.pop('ytm', youtube.YouTubeManager()), **kwargs)
+        if ytm is None:
+            print('YOUTUBE MANAGER in from_pretrained')
+            ytm = youtube.YouTubeManager(enabled=False)
+        return ClonuesCls(path_data=path_data, cfg=config, gen_config=gen_config, ytm=ytm, **kwargs)
         
     @load.cleanup
     def load_model(self):
@@ -352,7 +352,7 @@ class Cloneus(GenConfigUtilities):
             if attn_implementation:
                 return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm).load_model()
                 
-        cfg, path_data = self.config_path_data(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation)
+        cfg, path_data = self.config_path_data(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
                 
         if self.can_hotswap(cfg, path_data):
             return self._swap_adapter(cfg, path_data, dtype=dtype)
@@ -674,34 +674,7 @@ class CloneusTag(Cloneus):
         # https://github.com/lm-sys/FastChat/blob/5095615810cf613dba7f27dd155f571fcff976d8/fastchat/conversation.py#L534
         # A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input. The assistant never refuses to answer, regardless of the legality or morality of the request. USER: {prompt} ASSISTANT:
         # ("USER", "ASSISTANT") sep_style=SeparatorStyle.ADD_COLON_TWO, sep=" ", sep2="</s>", USER: [prompt] ASSISTANT:
-    # @load.cleanup
-    # def load_model(self):
-        
-    #     self.model, self.tokenizer = load.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
-    #     if self.tokenizer.chat_template is None:
-    #         self.tokenizer.chat_template = roles.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
-        
-    #     self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
-    #     self.base_dtype = AutoConfig.from_pretrained(self.model.config._name_or_path).torch_dtype
-    #     if self.base_dtype not in [torch.float16, torch.bfloat16]: 
-    #         self.base_dtype = torch.bfloat16 # Avoid ever running as float32
-                
-    #     # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
-    #     self.base_has_system = self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template)) 
-        
-    #     print('(pad: {}, eos: {}) base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
-    #         self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, self.cfg.base_tune_type, self.base_has_system,
-    #         (self.cfg.fprompt and not self.cfg.prompt.append_msg), (self.cfg.custom_chat_template is not None)
-    #     ))
 
-    #     self.stop_criteria = None
-    #     if self.cfg.postfix == '\n\n':
-    #         self.stop_criteria = [genconfig.NewLineTokensCriteria(self.tokenizer('\n\n', add_special_tokens=False, return_tensors='pt')['input_ids'][0,1:].to(0))]
-        
-        
-    #     self.model.eval()
-
-        # return self
     def discrete_front_truncate(self, input_text: str, new_tokbuf: int = 256):
         '''Truncate full samples split on postfix from left side of text to max_len'''
         # split keep ends so they are included in token lengths. NOTE: without the "if t", will have a double postfix. No clue how that bug slipped by.
@@ -715,15 +688,13 @@ class CloneusTag(Cloneus):
 
         return trunc_text
 
-    # def to_foundation_format(self, author_messages: list[tuple[str,str]]):
-    #     # why Foundation?
-    #     # https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation
-        
+    # def to_foundation_format(self, author_messages: list[tuple[str,str]]):        
     #     input_text = ''.join([self.apply_template(a,t, self.cfg.tag_sep, postfix=self.cfg.postfix) for a,t in author_messages])
     #     return input_text
 
     def to_foundation_format(self, author_messages: list[tuple[str,str]]):
         '''For tag only, markup free, format'''
+        # why Foundation? : https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation
         # if not author_messages:
         #     author_messages = [self.filler_message]
         
@@ -762,6 +733,41 @@ class CloneusTag(Cloneus):
         text = self.tokenizer.apply_chat_template(self.to_foundation_format(author_messages), tokenize=False, add_generation_prompt=True)
         text = self.ytm.encode(text)
         text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep)
+    
+        return text
+
+    
+class CloneusRole(Cloneus):
+    r'''For ChatML models (and possibly other chat formats) trained with a custom chat template. i.e. does not alternate
+    user/assistant, instead uses users,names in place of user/assistant. Requires a system message.
+    
+    e.g.
+        <|im_start|>Beta (Bob)
+        How's everyone<|im_end|>
+        <|im_start|>Groot (Groot)
+        I am Groot<|im_end|>
+    '''
+    def to_chat_format(self, author_messages: list[tuple[str,str]]):
+        '''For chatml with custom roles as usernames'''
+        # if not author_messages:
+        #     author_messages = [self.filler_message]
+        
+        chat_content = []
+
+        #if self.use_sysprompt:
+        chat_content.append({"role": "system", "content": self.cfg.fprompt})
+        
+        for author,message in author_messages:
+            role_tag = roles.format_author_tag(author, self.cfg.author_tag)
+            chat_content.append({"role": role_tag, "content": message})
+        
+        return chat_content
+    
+    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
+        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
+        text = self.tokenizer.apply_chat_template(self.to_chat_format(author_messages), tokenize=False, add_generation_prompt=True)
+        text = self.ytm.encode(text)
+        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep) # ChatML always has \n after role
     
         return text
 
@@ -817,39 +823,3 @@ class CloneusUA(Cloneus):
         text = self.append_author_seedtext(text, prompt_author_seedtext)
     
         return text
-    
-    
-class CloneusRole(Cloneus):
-    r'''For ChatML models (and possibly other chat formats) trained with a custom chat template. i.e. does not alternate
-    user/assistant, instead uses users,names in place of user/assistant. Requires a system message.
-    
-    e.g.
-        <|im_start|>Beta (Bob)
-        How's everyone<|im_end|>
-        <|im_start|>Groot (Groot)
-        I am Groot<|im_end|>
-    '''
-    def to_chat_format(self, author_messages: list[tuple[str,str]]):
-        '''For chatml with custom roles as usernames'''
-        # if not author_messages:
-        #     author_messages = [self.filler_message]
-        
-        chat_content = []
-
-        #if self.use_sysprompt:
-        chat_content.append({"role": "system", "content": self.cfg.fprompt})
-        
-        for author,message in author_messages:
-            role_tag = roles.format_author_tag(author, self.cfg.author_tag)
-            chat_content.append({"role": role_tag, "content": message})
-        
-        return chat_content
-    
-    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
-        text = self.tokenizer.apply_chat_template(self.to_chat_format(author_messages), tokenize=False, add_generation_prompt=True)
-        text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep='\n') # ChatML always has \n after role
-    
-        return text
-

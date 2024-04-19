@@ -19,6 +19,7 @@ from utils.globthread import async_wrap_thread
 
 from cloneus import Cloneus
 from cloneus.data import roles
+from cloneus.plugins import youtube
 
 def get_gpu_memory():
     try:
@@ -43,11 +44,11 @@ class CloneusManager():
         self.all_checkpoints = io_utils.find_checkpoints(settings.RUNS_DIR, require_config=True) # .relative_to(settings.ROOT_DIR)
         # self._load_nowait = load_nowait
         self.clo = None
-        #self.path_data = None
+        self.ytm = youtube.YouTubeManager(enabled=True)
         
         self.tts_mode = False
         self.emojis = self.bot.guilds[0].emojis
-        self.status = 'down'
+        #self.status = 'down'
         self.last_run = None
         self.run_count = 0
         self.model_randomize_proba = None
@@ -65,7 +66,8 @@ class CloneusManager():
     
     @property
     def is_ready(self):
-        return self.status == 'up'
+        return self.clo is not None and self.clo.model is not None
+        #return self.status == 'up'
     
     @cached_property
     def hot_swappable_checkpoints(self) -> list[Path] | list:
@@ -82,10 +84,10 @@ class CloneusManager():
         vram_use, vram_total = get_gpu_memory()
         model_name,checkpoint='',''
         if self.clo:
-            model_name = self.clo.path_data.checkpoint_path
+            model_name = self.clo.path_data.run_path.relative_to(settings.RUNS_DIR)
             checkpoint = self.clo.path_data.checkpoint_name
         statuses = [
-            ('Bot status', self.status.title(), " ✔" if self.status=="up" else " ✖"),
+            ('Bot status', 'Up' if self.is_ready else 'Down', " ✔" if self.is_ready else " ✖"),
             ('Model', model_name, f"/{checkpoint}"),
             ('Base tune type', self.clo.cfg.base_tune_type, f""),
             ('Flash_dtype', f'{self.clo.cfg.attn_implementation}', f' - {self.clo.torch_dtype}'),
@@ -108,24 +110,24 @@ class CloneusManager():
                      'dtype':self.clo.cfg.dtype, 'attn_implementation':self.clo.cfg.attn_implementation}
         if self.clo is not None:
             self.clo.unload_model()
-        self.status = 'down'
+        #self.status = 'down'
         self._preload(**prekwargs)
 
     def _preload(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None):
-        if self.clo is None:
-            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation)
+        if self.clo is None or self.clo.model is None:
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation)
 
     @async_wrap_thread
     def load(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None ):
         if self.clo is None:
             #if gen_config is None:
             #    gen_config = 'generation_config.json'
-            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation)
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation)
             self.clo.load_model()
         else:
             self.clo = self.clo.swap_model(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, )
         
-        self.status = 'up'
+        #self.status = 'up'
         
         esc_authtags = [re.escape(roles.format_author_tag(u, self.clo.cfg.author_tag)) for u in roles.author_display_names]
         self.RE_ANY_USERTAG = re.compile(r'(^{}){}'.format('|'.join(esc_authtags), self.clo.cfg.tag_sep), re.MULTILINE) # NOTE: will NOT work if decide to use UPPER or lower case names
@@ -151,6 +153,10 @@ class CloneusManager():
             options = self.all_checkpoints
         
         next_model = random.choice(options)
+        # aqlm causes memory to run out and break things
+        while 'aqlm' in str(next_model):
+            next_model = random.choice(options)
+
         print(f'CHANGE PLACES: {next_model.relative_to(settings.RUNS_DIR)}')
         await self.load(next_model, gen_config=gconfig)
         #self.clo.gen_config = gconfig
