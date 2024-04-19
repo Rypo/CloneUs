@@ -144,41 +144,51 @@ def main():
 
         Args:
             spec: Changes how commands are updated (options {"+", "-", "~", "."})
-                "+" - copy global commands to guild
-                "-" - clear guild commands
+                "+" - copy global commands to guild, sync guild
+                "-" - clear guild commands, sync guild
                 "~" - sync global commands
                 "." - sync guild commands
                 None - sync global and guild commands
         '''
         # https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#sync-command-example
         # - https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#syncing-gotchas
+        await bot.wait_until_ready()
         if (guild := ctx.guild) is None:
             guild = settings.GUILDS_ID 
         
+        print(guild, bot.guilds)
+        
         #synced = await bot.gsync(guild, spec=spec)
+        synced = []
         if spec == "+": 
             bot.tree.copy_global_to(guild=guild) # this causes duplicatation after sync
+            synced = await bot.tree.sync(guild=guild)
         elif spec == "-":
             bot.tree.clear_commands(guild=guild) # removes duplicate command but needs sync anyway, no point in clear global
+            synced = await bot.tree.sync(guild=guild)
         elif spec == "~":
-            await bot.tree.sync(guild=None)
-            synced = []
+            synced = await bot.tree.sync(guild=None)
         elif spec == ".":
             synced = await bot.tree.sync(guild=guild)
         else:
             # Double sync: clears dupes, adds new, removes old. It is the way. 
-            global_synced = await bot.tree.sync()
-            #await bot.wait_until_ready()
+            
+            global_synced = await bot.tree.sync(guild=None)
+            await bot.wait_until_ready()
+            bot.tree.copy_global_to(guild=guild)
             guild_synced = await bot.tree.sync(guild=guild)
+            bot.tree.clear_commands(guild=guild)
+            await bot.wait_until_ready()
+            guild_synced += await bot.tree.sync(guild=guild)
             synced = list(set(global_synced+guild_synced))
         
         synced_md = '\n- ' + '\n- '.join([s.name for s in synced]) if synced else ''
         if spec is None:
-            where = ' globally and to the guild.'
+            where = f' globally and to the guild ({guild.name}).'
         elif spec == '~':
             where = ' globally.'
         elif spec == '.':
-            where = ' to the current guild.'
+            where = f' to the current guild ({guild.name}).'
         else:
             where = ''
         return await ctx.send(f"Synced {len(synced)} commands{where}{synced_md}")
