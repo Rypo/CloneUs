@@ -14,10 +14,11 @@ model_id: teknium/OpenHermes-2.5-Mistral-7B
 # model_id: ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf
 
 model_type: MistralForCausalLM # LlamaForCausalLM, MistralForCausalLM, MixtralForCausalLM
-instruct_model: true
-tune_type: chatml # foundation, instruct, chat, chatml 
-quant_method: bnb4 # bnb4, aqlm, gptq
+base_tune_type: chat # foundation, instruct, chat
+chat_template_format: # chatml or blank for no override
+tag_placement: replace_role # tag_only, content_prefix, replace_role
 
+quant_method: bnb4 # bnb4, aqlm, gptq
 flashattn_lib: unsloth # huggingface, unsloth
 attn_implementation: flash_attention_2 # flash_attention_2, sdpa, eagar
 
@@ -49,9 +50,9 @@ dataset:
   eval_frac: 0.005 # or 'after_bot' to use all messages after the first time your bot sent a message in chat. 
 
 # Separator between author_tag and start of text
-tag_sep: "\n" # MUST be "\n" when chat_ml
+tag_sep: "\n" # MUST be "\n" when chatml
 # Separator between end of text and the next author_tag
-postfix: "</X/>" # NOT USED when using chat_ml format. For others, "</s>\n" works well.
+postfix: "</X/>" # NOT USED when using chatml format. For others, "</s>\n" works well.
 # For chat_ml format, "{author} ({fname})" works well. 
 # For non-chat_ml format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]" or "[{author}, {fname}]:"
 # fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)

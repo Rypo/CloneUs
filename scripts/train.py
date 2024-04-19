@@ -37,14 +37,16 @@ def verify_config(cfg):
         for dispname, fname in roles.author_to_fname.items():
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
-    
+    if cfg.chat_template_format == 'chatml' and cfg.tag_sep != '\n':
+        print('NOTE: for chat_template_format=chatml, tag_sep must = \\n. Setting tag_sep=\\n')
+        cfg.tag_sep = '\n'
     if cfg.flashattn_lib == 'unsloth': 
         if cfg.quant_method != 'bnb4':
             raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
         if cfg.lora_use_dora:
             raise ValueError('Unsloth does not support DoRA training. Set lora_use_dora: false to use unsloth')
         if cfg.lora_target_modules == 'all-linear':
-            print('Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
+            print('NOTE: Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
             cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
 
@@ -88,7 +90,12 @@ def main(args):
         #'solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ':'mistral-7b-hermes2-dpo-awq'
         'alpindale/Mistral-7B-v0.2-hf': 'mistral-7b-v2', # foundation
         'unsloth/Hermes-2-Pro-Mistral-7B-bnb-4bit': 'mistral-7b-hermes2-pro-4bit', # chatml (with tools)
-        'rhysjones/phi-2-orange-v2':'phi2-orange-v2' # chatml
+        'rhysjones/phi-2-orange-v2':'phi2-orange-v2', # chatml
+        'unsloth/llama-3-8b-bnb-4bit': 'llama3-8b-4bit',
+        'unsloth/llama-3-8b-Instruct-bnb-4bit': 'llama3-8b-instruct-4bit',
+        'meta-llama/Meta-Llama-3-8B': 'llama3-8b',
+        'meta-llama/Meta-Llama-3-8B-Instruct': 'llama3-8b-instruct'
+        
         
         # Add aliases for new models here
     }
@@ -166,7 +173,7 @@ def main(args):
     cfg.fprompt = None
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    if cfg.instruct_model:
+    if cfg.prompt.template:
         name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
         cfg.prompt.name_mapping = name_mapping
         cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
@@ -179,9 +186,10 @@ def main(args):
         dset = dataset.dataset_ungrouped(data_file_path, tokenizer, cfg, text_only=False)
     elif cfg.dataset.name == 'chunk_maxlen':
         dset = dataset.dataset_all_chunks(data_file_path, tokenizer, cfg)
-    elif cfg.tune_type in ['chatml', 'chat']:
+    
+    elif cfg.tag_placement == 'replace_role':
         dset = dataset.author_role_dataset(data_file_path, tokenizer, cfg)
-    elif cfg.tune_type == 'instruct':
+    elif cfg.tag_placement == 'content_prefix':
         dset = dataset.instruct_dataset_timechunks(data_file_path, tokenizer, cfg, has_system=None)    
     else:
         dset = dataset.dataset_timechunk(data_file_path, tokenizer, cfg, text_only=False)
