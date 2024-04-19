@@ -101,17 +101,6 @@ def apply_special_tokens(tokenizer=None, custom_tokens=None, pad_vocab_to=None) 
         custom_token_map = author_special_tokens(custom_tokens, pad_vocab_to=pad_vocab_to) if custom_tokens else None
         num_custom_tokens = tokenizer.add_special_tokens(custom_token_map)
     
-    # if custom_token_map: 
-    #     # this should now be handled automatically as of peft 0.8.0
-    #     # https://github.com/huggingface/peft/releases/tag/v0.8.0
-    #     for modu in ["embed_tokens", "lm_head"]:
-    #         if modu not in peft_config.target_modules:
-    #             peft_config.target_modules.add(modu)
-    #         #if modu not in peft_config.modules_to_save: peft_config.modules_to_save.append(modu)
-    #     #peft_config.modules_to_save = ["embed_tokens", "lm_head"]
-    
-    #tokenizer = tokenization.get_tokenizer(cfg.model_id, padding_side=cfg.padding_side)
-    #num_custom_tokens = None # DISABLE. this feature for now. #
 
     return num_custom_tokens
 
@@ -132,15 +121,18 @@ def get_tokenizer(model_id, padding_side=None):
 
 def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
     if tokenizer.pad_token_id == tokenizer.eos_token_id:
-        print('Warning: PAD = EOS. Overriding with UNK token.')
-        tokenizer.pad_token_id = tokenizer.unk_token_id
+        msg = 'Warning: PAD = EOS.'
+        if tokenizer.unk_token:
+            tokenizer.pad_token_id = tokenizer.unk_token_id
+            msg += ' Overriding with UNK token.'
+        print(msg)
 
     if padding_side and padding_side != tokenizer.padding_side:
-            print(f'tokenizer.padding_side ({tokenizer.padding_side}) != config padding_side ({padding_side}). Setting padding_side={padding_side}.')
-            tokenizer.padding_side = padding_side
+        print(f'NOTE: tokenizer.padding_side ({tokenizer.padding_side}) != config padding_side ({padding_side}). Setting padding_side={padding_side}.')
+        tokenizer.padding_side = padding_side
 
-    if tokenizer.padding_side != 'left':
-        print(f'Warning: padding_side({tokenizer.padding_side}) != left. This has inference implications. Proceed with caution:\nsee: https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side')
+    #if tokenizer.padding_side != 'left':
+    #    print(f'Warning: padding_side({tokenizer.padding_side}) != left. This has inference implications. Proceed with caution:\nsee: https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side')
 
     if custom_chat_template:
         print('Using custom chat template')
