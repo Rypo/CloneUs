@@ -120,8 +120,13 @@ def get_tokenizer(model_id, padding_side=None):
 
 
 def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
+    if tokenizer.pad_token is None:
+        # Llama 3 has no pad/unk, but has effectively has 2 eos. <|eot_id|> and <|end_of_text|>
+        # The later is not used in the chat template
+        tokenizer.pad_token=tokenizer.eos_token
+    
     if tokenizer.pad_token_id == tokenizer.eos_token_id:
-        msg = 'Warning: PAD = EOS.'
+        msg = f'Warning: PAD = EOS: {tokenizer.eos_token}({tokenizer.eos_token_id}'
         if tokenizer.unk_token:
             tokenizer.pad_token_id = tokenizer.unk_token_id
             msg += ' Overriding with UNK token.'
