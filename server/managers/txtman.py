@@ -426,6 +426,7 @@ class CloneusManager():
         
         llm_output = text_utils.llm_output_transform(text_out, self.emojis)
         
+        llm_output=llm_output.strip()
         
         discord_out = f'[{author}] {llm_output}'
 
