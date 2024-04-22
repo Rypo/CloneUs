@@ -1,51 +1,39 @@
 import typing
+from dataclasses import dataclass, asdict
 from pathlib import Path
 import torch
 import transformers
 from transformers import GenerationConfig, StoppingCriteria
-from transformers.generation.utils import GenerationMode
-
-
 
 # THIS IS THE SINGLE SOURCE OF TRUTH NOW
-GENOPTS = {
-    'max_new_tokens': {'default': 256, 'type': int},
-    'min_new_tokens': {'default': None, 'type': int}, # 'default': None,
-    'temperature': {'default': 0.8, 'type': float}, # 'default': 1.0,
-    'top_k': {'default': 50, 'type': int},
-    'top_p': {'default': 1.0, 'type': float},
-    
-    'penalty_alpha': {'default': None, 'type': float},
-    'low_memory': {'default': None, 'type': bool},
-    
-    'do_sample': {'default': True, 'type': bool}, # 'default': False,
-    'repetition_penalty': {'default': 1.1, 'type': float}, # default: 1.0
-    
-    'typical_p': {'default': 1.0, 'type': float},
-    'epsilon_cutoff': {'default': 0.0, 'type': float},
-    'eta_cutoff': {'default': 0.0, 'type': float},
-    
-    
-    'num_beams': {'default': 1, 'type': int},
-    'num_beam_groups': {'default': 1, 'type': int},
-    'diversity_penalty': {'default': 0.0, 'type': float},
-    'length_penalty': {'default': 1.0, 'type': float},
-    'early_stopping': {'default': False, 'type': bool},
-    
-    'no_repeat_ngram_size': {'default': 0, 'type': int},
-    'renormalize_logits': {'default': True, 'type': bool}, # 'default': False,
-    'exponential_decay_length_penalty': {'default': None, 'type': tuple[int, float]},
-    
-    'bad_words_ids': {'default': None, 'type': list[list[int]]},
-    'force_words_ids': {'default': None, 'type': list[list[int]] | list[list[list[int]]]},
-    'sequence_bias': {'default': None, 'type': dict[tuple[int], float]},
-    
-    'suppress_tokens': {'default': None, 'type': list[int]},
-    'begin_suppress_tokens': {'default': None, 'type': list[int]},
-    
-    'guidance_scale': {'default': None, 'type': float}
-}
-GENOPT_DEFAULTS = {k: v['default'] for k,v in GENOPTS.items()}
+@dataclass
+class GenOpts:
+    max_new_tokens: int = 256
+    min_new_tokens: int = None # 'default': None,
+    temperature: float = 0.8 # 'default': 1.0,
+    top_k: int = 50
+    top_p: float = 1.0
+    penalty_alpha: float = None
+    low_memory: bool = None
+    do_sample: bool = True # 'default': False,
+    repetition_penalty: float = 1.1 # default: 1.0
+    typical_p: float = 1.0
+    epsilon_cutoff: float = 0.0
+    eta_cutoff: float = 0.0
+    num_beams: int = 1
+    num_beam_groups: int = 1
+    diversity_penalty: float = 0.0
+    length_penalty: float = 1.0
+    early_stopping: bool = False
+    no_repeat_ngram_size: int = 0
+    renormalize_logits: bool = True  # 'default': False,
+    exponential_decay_length_penalty: tuple[int, float] = None
+    bad_words_ids: list[list[int]] = None
+    force_words_ids: list[list[int]] | list[list[list[int]]] = None
+    sequence_bias: dict[tuple[int], float] = None
+    suppress_tokens: list[int] = None
+    begin_suppress_tokens: list[int] = None
+    guidance_scale: float = None
 
 GENMODE_ALIASES = {
     'ms': 'multinomial_sampling',
@@ -56,67 +44,43 @@ GENMODE_ALIASES = {
     'dbsd': 'diverse_beam_search_decoding'
  }
 
-def load_gen_config(gen_config_path:str|Path, gen_config_name:str=None):
+def load_gen_config(gen_config_path:str|Path, gen_config_name:str="generation_config.json"):
     gen_config_path = Path(gen_config_path)
     
-    if gen_config_name is not None:
-        if gen_config_path.suffix == '.json':
-            gen_config_path = gen_config_path.with_name(gen_config_name)
-        else:
-            gen_config_path = gen_config_path/gen_config_name
+   # GenerationConfig.from_pretrained expects dir and a str name
+    if gen_config_path.suffix == '.json':
+        if gen_config_name == "generation_config.json": # default used by from_pretraiend
+            gen_config_name = gen_config_path.name
+        gen_config_path = gen_config_path.parent
     
     try:
         gen_config = GenerationConfig.from_pretrained(gen_config_path, config_file_name=gen_config_name, local_files_only=True)
-        print(f'Found GenerationConfig: {gen_config_path}')
+        print(f'Found GenerationConfig: {gen_config_path/gen_config_name}')
     except OSError as e:
-        print('No existing GenerationConfig found, defaulting to GENOPTS (multinomial_sampling)')
-        gen_config = GenerationConfig.from_dict(GENOPT_DEFAULTS.copy()) 
+        print('No existing GenerationConfig found, using GenOpts defaults (multinomial_sampling)')
+        gen_config = GenerationConfig.from_dict(asdict(GenOpts())) 
 
     return gen_config
 
-def get_config(tokenizer, alias:typing.Literal['cs','ms','gd'], **kwargs):
-    print(f'eos: {tokenizer.eos_token!r} ({tokenizer.eos_token_id}), pad: {tokenizer.pad_token!r} ({tokenizer.pad_token_id}), padside: {tokenizer.padding_side}')
 
-    shared = dict(
-        max_new_tokens=256,
-        renormalize_logits=True,
-        repetition_penalty=1.1, # Setting this too high may prevent sequential same-author messages. 
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-        **kwargs,
-    )
+def create_genconf(alias:typing.Literal['ms','cs','gd','bsd','bsms','dbsd'], pad_token_id:int, eos_token_id:int|list[int], **kwargs):
     # https://huggingface.co/docs/transformers/main_classes/text_generation
     # https://github.com/oobabooga/text-generation-webui/blob/main/presets/Contrastive%20Search.yaml
      #contrastive -- Low memory cuts memory usage in ~half, makes shorter outputs with similar content, but slow
-    #shared=dict(repetition_penalty=1.1, max_new_tokens=256, eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id, **kwargs)
-    if alias=='cs':
-        gen_config = GenerationConfig(penalty_alpha=0.6, top_k=4, low_memory=False, **shared)
-    elif alias=='ms':
-        gen_config = GenerationConfig(do_sample=True, top_p=1, temperature=1, top_k=50, **shared)
-    elif alias=='gd':
-        gen_config = GenerationConfig(do_sample=False, **shared)
-    else:
-        gen_config = GenerationConfig.from_dict(shared)
-    
-    return gen_config
-
-
-
-def create_genconf(alias, pad_token_id, eos_token_id, **kwargs):
-    #eos_token_id = kwargs.get('eos_token_id', pad_token_id)
+    default_gc = GenOpts()
     shared_args = dict(
-        max_new_tokens=kwargs.get('max_new_tokens', GENOPTS['max_new_tokens']['default']),
+        max_new_tokens=kwargs.get('max_new_tokens', default_gc.max_new_tokens),
         min_new_tokens=kwargs.get('min_new_tokens', None),
-        renormalize_logits=kwargs.get('renormalize_logits', GENOPTS['renormalize_logits']['default']),
-        repetition_penalty=kwargs.get('repetition_penalty', GENOPTS['repetition_penalty']['default']),
-        eos_token_id=eos_token_id, 
-        pad_token_id=pad_token_id, 
+        renormalize_logits=kwargs.get('renormalize_logits', default_gc.renormalize_logits),
+        repetition_penalty=kwargs.get('repetition_penalty', default_gc.repetition_penalty),
+        eos_token_id=eos_token_id, #tokenizer.eos_token_id,
+        pad_token_id=pad_token_id, # tokenizer.pad_token_id,
     )
 
     
-    top_k = kwargs.get('top_k', GENOPTS['top_k']['default'])
-    top_p = kwargs.get('top_p', GENOPTS['top_p']['default'])
-    temperature = kwargs.get('temperature', GENOPTS['temperature']['default'])
+    top_k = kwargs.get('top_k', default_gc.top_k)
+    top_p = kwargs.get('top_p', default_gc.top_p)
+    temperature = kwargs.get('temperature', default_gc.temperature)
     
     num_beams=kwargs.get('num_beams', 5)
     early_stopping = kwargs.get('early_stopping', False)

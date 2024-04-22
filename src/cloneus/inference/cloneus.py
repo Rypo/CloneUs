@@ -93,21 +93,28 @@ class GenConfigUtilities:
         return  self.gen_config.get_generation_mode()
         
 
-    def load_genconfig(self, gen_config:str|Path|dict|GenerationConfig=None, path_data: ModelPathComponents = None):
+    def load_genconfig(self, gen_config:str|Path|dict|GenerationConfig, path_data: ModelPathComponents):
         if isinstance(gen_config, dict):
             gen_config = GenerationConfig.from_dict(gen_config)
         elif isinstance(gen_config, Path):
             gen_config = genconfig.load_gen_config(gen_config)
         elif isinstance(gen_config, GenerationConfig):
             gen_config = gen_config
-        else: # str|None
+        elif isinstance(gen_config, str): 
             gen_config = genconfig.load_gen_config(path_data.checkpoint_path, gen_config)
+        else:
+            raise RuntimeError(f'Unable to process gen_config of type {type(gen_config)!r}')
 
         tokenizer = load.auto_inference_tokenizer(path_data.checkpoint_path)
         
-        
         gen_config.pad_token_id = tokenizer.pad_token_id
-        gen_config.eos_token_id = tokenizer.eos_token_id
+        
+        # Llama3 workaround
+        base_gen_config  = GenerationConfig.from_pretrained(OmegaConf.load(path_data.config_path).model_id)
+        if base_gen_config.eos_token_id != gen_config.eos_token_id:
+            print(f'Overriding gen_config eos_token ({gen_config.eos_token_id}) with base gen_config eos_token ({base_gen_config.eos_token_id}) ')
+            gen_config.eos_token_id = base_gen_config.eos_token_id
+        
         
         return gen_config
             
@@ -146,14 +153,13 @@ class GenConfigUtilities:
         https://huggingface.co/docs/transformers/main_classes/text_generation#transformers.GenerationConfig'''
         
         alias = kwargs.pop('alias',None)
-        print(kwargs)
         prev_conf = self.gen_config.to_dict()
         #prev_vals = {k:curconf.get(k) for k in kwargs}
         # NOTE: this prevents a value from being set to the default value, which isn't great, but can't think of a work around.
-        #filt_kwargs = {k:v for k,v in kwargs.items() if v != GENOPT_DEFAULTS[k] and v != prev_conf[k]}
-
+        
+        default_gc = genconfig.GenOpts()
         if alias is not None:
-            self.gen_config = genconfig.create_genconf(genconfig.GENMODE_ALIASES.get(alias, alias), pad_token_id=self.tokenizer.pad_token_id, eos_token_id=self.tokenizer.eos_token_id, **kwargs) 
+            self.gen_config = genconfig.create_genconf(alias, pad_token_id=self.gen_config.pad_token_id, eos_token_id=self.gen_config.eos_token_id, **kwargs) 
         else:
             # if penalty_alpha is passed, make sure top_k isn't too high
             if kwargs.get('penalty_alpha') and kwargs.get('top_k', self.gen_config.top_k) > 9:
@@ -163,7 +169,7 @@ class GenConfigUtilities:
                 kwargs.setdefault('penalty_alpha', None) # if it is explicitly passed alongside one of those, then let it be
                 kwargs.setdefault('do_sample', True) # if it is explicitly set, let it ride. Important if need to do beam decoding for some reason
                 if kwargs.get('top_k') is None and self.gen_config.top_k <= 9: # if it is explicitly passed a low top_k, let it be
-                    kwargs['top_k'] = genconfig.GENOPT_DEFAULTS['top_k']
+                    kwargs['top_k'] = default_gc.top_k
             
             self.gen_config.update(**kwargs)
         
@@ -217,8 +223,6 @@ class Cloneus(GenConfigUtilities):
 
         print(self.torch_dtype, config.attn_implementation) # Don't stop printing until fixed double call issue
         
-        # if gen_config is not None or not hasattr(self,'gen_config'):
-        #    self.gen_config = self.load_genconfig(gen_config)
 
         return config,path_data
     
@@ -251,9 +255,11 @@ class Cloneus(GenConfigUtilities):
         else:
             raise NotImplementedError('Unable to determine Cloneus Format Class')
         
+        if gen_config is None:
+            gen_config = 'generation_config.json'
+        
         if ytm is None:
-            print('YOUTUBE MANAGER in from_pretrained')
-            ytm = youtube.YouTubeManager(enabled=False)
+            ytm = youtube.YouTubeManager(enabled=True)
         return ClonuesCls(path_data=path_data, cfg=config, gen_config=gen_config, ytm=ytm, **kwargs)
         
     @load.cleanup
@@ -270,8 +276,10 @@ class Cloneus(GenConfigUtilities):
         # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
         self.base_has_system = self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template)) 
         
-        print('(pad: {}, eos: {}) base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
-            self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, self.cfg.base_tune_type, self.base_has_system,
+        print('T:(pad: {}, eos: {}) [G:(pad: {}, eos: {})] base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
+            self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, 
+            self.gen_config.pad_token_id, self.gen_config.eos_token_id,
+            self.cfg.base_tune_type, self.base_has_system,
             (self.cfg.fprompt and not self.cfg.prompt.append_msg), (self.cfg.custom_chat_template is not None)
         ))
 
@@ -319,10 +327,10 @@ class Cloneus(GenConfigUtilities):
         return same_base_model and lora_to_lora
 
 
-    def _swap_adapter(self, cfg, path_data:ModelPathComponents, dtype=None):
-        adapter_name = (path_data.run_name + '-' + path_data.checkpoint_name).replace('.','')
+    def _swap_adapter(self, new_cfg, new_path_data:ModelPathComponents, gen_config:str=None, dtype=None):
+        adapter_name = (new_path_data.run_name + '-' + new_path_data.checkpoint_name).replace('.','')
         if not adapter_name in self.model.peft_config:
-            self.model.load_adapter(path_data.checkpoint_path, adapter_name=adapter_name)
+            self.model.load_adapter(new_path_data.checkpoint_path, adapter_name=adapter_name)
         
         self.model.set_adapter(adapter_name)
         # necessary -- https://huggingface.co/docs/peft/v0.10.0/en/package_reference/lora#peft.LoraModel.set_adapter
@@ -330,21 +338,24 @@ class Cloneus(GenConfigUtilities):
             if hasattr(param,'requires_grad'):
                 param.requires_grad_(False)
         
+        if gen_config is not None:
+            self.load_genconfig(gen_config, new_path_data)
+
         if dtype is not None:
             self.cast_dtype(dtype=dtype)
 
         # For foundation models, changing the config changes how the tokenizer should behave.
         # So, to be safe just reload the tokenizer if config changes
-        if self.path_data.config_path != path_data.config_path:
-            self.tokenizer = self.setup_tokenizer(self.path_data.checkpoint_path)
+        if self.path_data.config_path != new_path_data.config_path:
+            self.tokenizer = self.setup_tokenizer(new_path_data.checkpoint_path)
 
-        self.cfg, self.path_data = cfg, path_data
+        self.cfg, self.path_data = new_cfg, new_path_data
         
         return self
 
 
     @load.cleanup
-    def swap_model(self, checkpoint_path:(str|Path), gen_config:str=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None) -> None:
+    def swap_model(self, checkpoint_path:(str|Path), gen_config:GenerationConfig|Path=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None) -> None:
         # If the path is the same, assume that either want a dtype change or attn_impl change
         if Path(checkpoint_path) == self.path_data.checkpoint_path:
             if dtype:
@@ -355,7 +366,7 @@ class Cloneus(GenConfigUtilities):
         cfg, path_data = self.config_path_data(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
                 
         if self.can_hotswap(cfg, path_data):
-            return self._swap_adapter(cfg, path_data, dtype=dtype)
+            return self._swap_adapter(cfg, path_data, gen_config=gen_config, dtype=dtype)
         
         if self.cfg.quant_method != cfg.quant_method:
             self.unload_model()
