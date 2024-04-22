@@ -1,4 +1,5 @@
 import typing
+from pathlib import Path
 import torch
 from transformers import (
     AutoTokenizer,
@@ -9,7 +10,7 @@ from transformers import (
 )
 from transformers.utils.quantization_config import  QuantizationConfigMixin
 import transformers
-from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
+from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model, AutoPeftModelForCausalLM
 from unsloth import FastLanguageModel
 from trl import setup_chat_format
 from awq import AutoAWQForCausalLM
@@ -26,9 +27,6 @@ def adjust_chat_format(model, tokenizer, chat_template_format:typing.Literal['ch
             print('NOTE: chat_template_format=chatml but detected non-chatml format. Missing chatml tokens will be added.')
             # tweaked based on Hermes models
             model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlX')
-            if tokenizer.pad_token != '</s>':
-                print(f'Using </s> for pad instead of {tokenizer.pad_token}.')
-                tokenizer.pad_token = '</s>'
     else:
         raise ValueError(f'Unsupported chat_template_format: {chat_template_format!r}')
     
@@ -45,6 +43,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         fix_tokenizer=True,
         load_in_4bit = (peft_config.init_lora_weights != 'loftq'),
         device_map = "sequential",
+        use_gradient_checkpointing = True, #"unsloth",
     )
     
     model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
@@ -58,7 +57,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         lora_alpha = peft_config.lora_alpha,
         lora_dropout = 0, # Currently only supports dropout = 0
         bias = "none",    # Currently only supports bias = "none"
-        use_gradient_checkpointing = "unsloth",#True,
+        use_gradient_checkpointing = True, #"unsloth",
         random_state = 3407,
         max_seq_length = max_seq_length,
         use_rslora=peft_config.use_rslora,
@@ -66,7 +65,6 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         loftq_config=peft_config.loftq_config,
     )
     
-    model.config.pretraining_tp = 1  # should already be =1,  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/configuration_llama.py#L79
     return model, tokenizer
 
 def get_awq(model_id, peft_config, max_seq_len:int, batch_size:int, chat_template_format=None, padding_side=None, custom_chat_template=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
@@ -123,8 +121,6 @@ def get_model(model_id,
         quant_config = None
     elif quant_config=='awq':
         raise NotImplementedError('use: get_awq()')
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
     
     pretrain_kwargs = dict(
         quantization_config=quant_config,
@@ -137,13 +133,22 @@ def get_model(model_id,
     if quant_config is None:
         pretrain_kwargs.pop('quantization_config') # passing as None will error as of transformers 4.39.2 (during .to_dict() call)
     
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    
+    if Path(model_id).exists():
+        # TODO: determine if vRAM spike is because of eval step
+        print('Resuming ... Skipping tokenizer configuration, loading via AutoPeftModelForCausalLM')
+        model : PeftModel = AutoPeftModelForCausalLM.from_pretrained(model_id, is_trainable=True, config=peft_config, **pretrain_kwargs,)
+        model.enable_input_require_grads() # required or will say does not require grad
+        model.print_trainable_parameters()
+        return model, tokenizer
+
+
     model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs)
 
     model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
     tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
-    
-    model.config.pretraining_tp = 1
-    #model.gradient_checkpointing_enable()
+
 
     if custom_tokens_map is not None:
         tokenization.smart_tokenizer_and_embedding_resize(custom_tokens_map, tokenizer, model)
@@ -164,10 +169,12 @@ def get_model(model_id,
 
 
 def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
-    #if (name_or_path := cfg.resume_from_checkpoint) is None:
     name_or_path = cfg.model_id
-    #print('Getting model from:', name_or_path)
-    
+    if cfg.resume_from_checkpoint is not None:
+        name_or_path = cfg.resume_from_checkpoint
+        print('Getting model from:', name_or_path)
+        
+        
     # TODO: Resuming from a path should work. But it will break if tokens have been added.
     # AutoPeftModelForCausalLM resizes embedding automatically, but it's unclear how to make this work with unsloth
     # Resuming using model id does work.

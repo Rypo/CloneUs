@@ -126,7 +126,7 @@ def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
         tokenizer.pad_token=tokenizer.eos_token
     
     if tokenizer.pad_token_id == tokenizer.eos_token_id:
-        msg = f'Warning: PAD = EOS: {tokenizer.eos_token}({tokenizer.eos_token_id}'
+        msg = f'Warning: PAD = EOS: {tokenizer.eos_token}({tokenizer.eos_token_id})'
         if tokenizer.unk_token:
             tokenizer.pad_token_id = tokenizer.unk_token_id
             msg += ' Overriding with UNK token.'
@@ -142,7 +142,8 @@ def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
     if custom_chat_template:
         print('Using custom chat template')
         tokenizer.chat_template = custom_chat_template
-
+    
+    print(f'Tokenizer using PAD = {tokenizer.pad_token}({tokenizer.pad_token_id})')
     return tokenizer
 
 @contextmanager
