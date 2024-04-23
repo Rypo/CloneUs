@@ -249,6 +249,9 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
                    denoise_blend: float|None = None, 
                    fast:bool=False):
         
+        if len(prompt) > 1000:
+            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
+
         has_view = ctx.interaction.response.is_done()
         if not has_view:
             await ctx.defer()
@@ -315,6 +318,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         # this may be passed a url string in drawUI config
         image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgfile)
         image = load_image(image_url).convert('RGB')
+        if len(prompt) > 1000:
+            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
         needs_view = False
         if not ctx.interaction.response.is_done():
