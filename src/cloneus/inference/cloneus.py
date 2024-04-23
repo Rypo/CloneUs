@@ -108,13 +108,13 @@ class GenConfigUtilities:
         tokenizer = load.auto_inference_tokenizer(path_data.checkpoint_path)
         
         gen_config.pad_token_id = tokenizer.pad_token_id
+        gen_config.eos_token_id = tokenizer.eos_token_id
         
-        # Llama3 workaround
-        base_gen_config  = GenerationConfig.from_pretrained(OmegaConf.load(path_data.config_path).model_id)
-        if base_gen_config.eos_token_id != gen_config.eos_token_id:
-            print(f'Overriding gen_config eos_token ({gen_config.eos_token_id}) with base gen_config eos_token ({base_gen_config.eos_token_id}) ')
-            gen_config.eos_token_id = base_gen_config.eos_token_id
-        
+        # Llama3 workaround, can't rely on base model generation config in case using the non-instruct version.
+        # Check chat_template instead of tokens list in case using custom template override.
+        if '<|eot_id|>' in tokenizer.chat_template:
+            gen_config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids('<|eot_id|>')]
+            print(f'Using Llama3 format - <|eot_id|> added. eos_token_id: ({gen_config.eos_token_id})')        
         
         return gen_config
             
@@ -276,9 +276,9 @@ class Cloneus(GenConfigUtilities):
         # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
         self.base_has_system = self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template)) 
         
-        print('T:(pad: {}, eos: {}) [G:(pad: {}, eos: {})] base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
-            self.tokenizer.pad_token_id, self.tokenizer.eos_token_id, 
-            self.gen_config.pad_token_id, self.gen_config.eos_token_id,
+        print('Tkzr|Gcfg: (pad: {}|{}, eos: {}|{}) base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
+            self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
+            self.tokenizer.eos_token_id, self.gen_config.eos_token_id,
             self.cfg.base_tune_type, self.base_has_system,
             (self.cfg.fprompt and not self.cfg.prompt.append_msg), (self.cfg.custom_chat_template is not None)
         ))
@@ -460,7 +460,7 @@ class Cloneus(GenConfigUtilities):
             inputs = self.tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True)
             
             input_len = inputs.pop('length')[0].item()
-            outputs = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach()
+            outputs = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach_()
             
             output_texts = self.tokenizer.batch_decode(outputs[:,input_len:], skip_special_tokens=True)
         else:
