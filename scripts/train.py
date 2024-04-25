@@ -188,9 +188,9 @@ def main(args):
         dset = dataset.dataset_all_chunks(data_file_path, tokenizer, cfg)
     
     elif cfg.tag_placement == 'replace_role':
-        dset = dataset.author_role_dataset(data_file_path, tokenizer, cfg)
+        dset = dataset.author_roletags_dataset(data_file_path, tokenizer, cfg)
     elif cfg.tag_placement == 'content_prefix':
-        dset = dataset.instruct_dataset_timechunks(data_file_path, tokenizer, cfg, has_system=None)    
+        dset = dataset.ua_tags_dataset(data_file_path, tokenizer, cfg)    
     else:
         dset = dataset.dataset_timechunk(data_file_path, tokenizer, cfg, text_only=False)
     
