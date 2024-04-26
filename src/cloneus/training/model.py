@@ -45,10 +45,12 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         device_map = "sequential",
         use_gradient_checkpointing = True, #"unsloth",
     )
-    
+    if Path(model_id).exists():
+        return model,tokenizer
+    # https://old.reddit.com/r/LocalLLaMA/comments/1cc7gtr/llama3_8b_finetuning_2x_faster_fixed_endless/
     model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
     tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
-    
+
     # Do model patching and add fast LoRA weights
     model = FastLanguageModel.get_peft_model(
         model,
@@ -57,7 +59,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         lora_alpha = peft_config.lora_alpha,
         lora_dropout = 0, # Currently only supports dropout = 0
         bias = "none",    # Currently only supports bias = "none"
-        use_gradient_checkpointing = True, #"unsloth",
+        use_gradient_checkpointing = True,#"unsloth",, 
         random_state = 3407,
         max_seq_length = max_seq_length,
         use_rslora=peft_config.use_rslora,
