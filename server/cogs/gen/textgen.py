@@ -195,6 +195,16 @@ class TextGen(commands.Cog, SetConfig):
         Args:
             name_filter: filters down to models that match this name
         '''
+        if name_filter and all([c == '.' for c in name_filter]):
+            cur_model_path = self.clomgr.clo.path_data.checkpoint_path.parent
+            if name_filter == '.': # current run dir - checkpoint level
+                cur_model_path = cur_model_path
+            elif name_filter == '..': # current data-run dirs - runs level
+                cur_model_path = cur_model_path.parent
+            elif name_filter == '...': # current model-data-run dirs - data level
+                cur_model_path = cur_model_path.parent.parent
+            name_filter = cur_model_path.relative_to(settings.RUNS_DIR).as_posix()
+
         ckpt_list = self.clomgr.modelview_data(name_filter, remove_empty=True)
         ppview = cview.PrePagedView(ckpt_list, timeout=180)
 
@@ -232,10 +242,12 @@ class TextGen(commands.Cog, SetConfig):
                 return await ctx.send(content='Done.', delete_after=3)
             
             return await self.show_models(ctx)
+        elif all([c == '.' for c in modelpath_filter]):
+            return await self.show_models(ctx, modelpath_filter)
             
         matches = sorted([p for p in settings.RUNS_DIR.rglob('*checkpoint*') if (p.parent/'config.yaml').exists() and modelpath_filter in str(p)])
         if len(matches) != 1:
-            print(matches)
+            #print(matches)
             return await self.show_models(ctx, name_filter=modelpath_filter)
 
         full_model_path = matches[0]
