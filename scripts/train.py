@@ -24,11 +24,11 @@ def safe_train(trainer:mtrain.Trainer, checkpoint_path=None):
         if trainer.state.global_step:
             mtrain.create_resumable_save(trainer)
 
-def write_first_batches(trainer, batchsample_dir='_tmp'):
-    (cpaths.ROOT_DIR/batchsample_dir).mkdir(exist_ok=True)
-    with open(cpaths.ROOT_DIR/batchsample_dir/'sample_evalbatch.txt', 'w') as f:
+def write_first_batches(trainer, batchsample_dir='_tmp/sample_batches'):
+    (cpaths.ROOT_DIR/batchsample_dir).mkdir(parents=True, exist_ok=True)
+    with open(cpaths.ROOT_DIR/batchsample_dir/'eval.txt', 'w') as f:
         f.writelines(mtrain.get_batch(trainer, train=False))
-    with open(cpaths.ROOT_DIR/batchsample_dir/'sample_trainbatch.txt', 'w') as f:
+    with open(cpaths.ROOT_DIR/batchsample_dir/'train.txt', 'w') as f:
         f.writelines(mtrain.get_batch(trainer, train=True))
 
 def verify_config(cfg):
@@ -38,13 +38,17 @@ def verify_config(cfg):
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
     
+    if cfg.chat_template_format == 'chatml' and cfg.tag_sep != '\n':
+        print('NOTE: for chat_template_format=chatml, tag_sep must = \\n. Setting tag_sep=\\n')
+        cfg.tag_sep = '\n'
+    
     if cfg.flashattn_lib == 'unsloth': 
         if cfg.quant_method != 'bnb4':
             raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
         if cfg.lora_use_dora:
             raise ValueError('Unsloth does not support DoRA training. Set lora_use_dora: false to use unsloth')
         if cfg.lora_target_modules == 'all-linear':
-            print('Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
+            print('NOTE: Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
             cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
 
@@ -88,7 +92,12 @@ def main(args):
         #'solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ':'mistral-7b-hermes2-dpo-awq'
         'alpindale/Mistral-7B-v0.2-hf': 'mistral-7b-v2', # foundation
         'unsloth/Hermes-2-Pro-Mistral-7B-bnb-4bit': 'mistral-7b-hermes2-pro-4bit', # chatml (with tools)
-        'rhysjones/phi-2-orange-v2':'phi2-orange-v2' # chatml
+        'rhysjones/phi-2-orange-v2':'phi2-orange-v2', # chatml
+        'unsloth/llama-3-8b-bnb-4bit': 'llama3-8b-4bit',
+        'unsloth/llama-3-8b-Instruct-bnb-4bit': 'llama3-8b-instruct-4bit',
+        'meta-llama/Meta-Llama-3-8B': 'llama3-8b',
+        'meta-llama/Meta-Llama-3-8B-Instruct': 'llama3-8b-instruct'
+        
         
         # Add aliases for new models here
     }
@@ -139,7 +148,7 @@ def main(args):
         warmup_ratio=cfg.warmup_ratio,
         warmup_steps=cfg.warmup_steps,
         learning_rate=cfg.learning_rate,
-        save_strategy=('epoch' if isinstance(cfg.dataset.hours_between_sessions, int) else 'steps'), #-- TODO Think about better solution
+        save_strategy=('epoch' if isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer else 'steps'), #-- TODO Think about better solution
         save_steps=cfg.save_steps,
         #eval_steps=cfg.eval_steps,
         logging_steps=cfg.logging_steps, # appears that trl fixed the iteration number issue (5 if cfg.use_sft_trainer else cfg.logging_steps), 
@@ -166,25 +175,28 @@ def main(args):
     cfg.fprompt = None
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    if cfg.instruct_model:
+    if cfg.prompt.template:
         name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
         cfg.prompt.name_mapping = name_mapping
         cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
 
     data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
+    
+    text_only_dataset = cfg.use_sft_trainer
 
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:
-        dset = dataset.dataset_tc_files(tokenizer, maxlen=4096, train_jsonl=cfg.train_jsonl, eval_jsonl=cfg.eval_jsonl) 
-    elif cfg.dataset.name == 'ungrouped_eos':
-        dset = dataset.dataset_ungrouped(data_file_path, tokenizer, cfg, text_only=False)
+        dset = dataset.jsonl_dataset(cfg.train_jsonl, cfg.eval_jsonl, tokenizer, cfg, text_only=text_only_dataset) 
+    elif cfg.dataset.name == 'ungrouped':
+        dset = dataset.ungrouped_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
     elif cfg.dataset.name == 'chunk_maxlen':
-        dset = dataset.dataset_all_chunks(data_file_path, tokenizer, cfg)
-    elif cfg.tune_type in ['chatml', 'chat']:
-        dset = dataset.author_role_dataset(data_file_path, tokenizer, cfg)
-    elif cfg.tune_type == 'instruct':
-        dset = dataset.instruct_dataset_timechunks(data_file_path, tokenizer, cfg, has_system=None)    
-    else:
-        dset = dataset.dataset_timechunk(data_file_path, tokenizer, cfg, text_only=False)
+        dset = dataset.max_tokens_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+    
+    elif cfg.tag_placement == 'replace_role':
+        dset = dataset.author_roletags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+    elif cfg.tag_placement == 'content_prefix':
+        dset = dataset.ua_tags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)    
+    elif cfg.tag_placement == 'tag_only':
+        dset = dataset.tag_only_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
     
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]
@@ -193,8 +205,7 @@ def main(args):
     else:
         trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, callbacks=callbacks)
 
-
-    write_first_batches(trainer, batchsample_dir='_tmp')
+    write_first_batches(trainer, batchsample_dir='_tmp/sample_batches')
 
     if num_custom_tokens:
         tokenization.save_embeddings(model, train_args.output_dir)

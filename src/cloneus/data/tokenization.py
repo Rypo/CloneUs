@@ -1,5 +1,6 @@
 import os
 import typing
+from contextlib import contextmanager
 import torch
 import transformers
 
@@ -100,17 +101,6 @@ def apply_special_tokens(tokenizer=None, custom_tokens=None, pad_vocab_to=None) 
         custom_token_map = author_special_tokens(custom_tokens, pad_vocab_to=pad_vocab_to) if custom_tokens else None
         num_custom_tokens = tokenizer.add_special_tokens(custom_token_map)
     
-    # if custom_token_map: 
-    #     # this should now be handled automatically as of peft 0.8.0
-    #     # https://github.com/huggingface/peft/releases/tag/v0.8.0
-    #     for modu in ["embed_tokens", "lm_head"]:
-    #         if modu not in peft_config.target_modules:
-    #             peft_config.target_modules.add(modu)
-    #         #if modu not in peft_config.modules_to_save: peft_config.modules_to_save.append(modu)
-    #     #peft_config.modules_to_save = ["embed_tokens", "lm_head"]
-    
-    #tokenizer = tokenization.get_tokenizer(cfg.model_id, padding_side=cfg.padding_side)
-    #num_custom_tokens = None # DISABLE. this feature for now. #
 
     return num_custom_tokens
 
@@ -130,19 +120,52 @@ def get_tokenizer(model_id, padding_side=None):
 
 
 def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
+    if tokenizer.pad_token is None:
+        # Llama 3 has no pad/unk, but has effectively has 2 eos. <|eot_id|> and <|end_of_text|>
+        # The later is not used in the chat template
+        tokenizer.pad_token=tokenizer.eos_token
+    
     if tokenizer.pad_token_id == tokenizer.eos_token_id:
-        print('Warning: PAD = EOS. Overriding with UNK token.')
-        tokenizer.pad_token_id = tokenizer.unk_token_id
+        msg = f'Warning: PAD = EOS: {tokenizer.eos_token}({tokenizer.eos_token_id})'
+        if tokenizer.unk_token:
+            tokenizer.pad_token_id = tokenizer.unk_token_id
+            msg += ' Overriding with UNK token.'
+        print(msg)
 
     if padding_side and padding_side != tokenizer.padding_side:
-            print(f'tokenizer.padding_side ({tokenizer.padding_side}) != config padding_side ({padding_side}). Setting padding_side={padding_side}.')
-            tokenizer.padding_side = padding_side
+        print(f'NOTE: tokenizer.padding_side ({tokenizer.padding_side}) != config padding_side ({padding_side}). Setting padding_side={padding_side}.')
+        tokenizer.padding_side = padding_side
 
-    if tokenizer.padding_side != 'left':
-        print(f'Warning: padding_side({tokenizer.padding_side}) != left. This has inference implications. Proceed with caution:\nsee: https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side')
+    #if tokenizer.padding_side != 'left':
+    #    print(f'Warning: padding_side({tokenizer.padding_side}) != left. This has inference implications. Proceed with caution:\nsee: https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side')
 
     if custom_chat_template:
         print('Using custom chat template')
         tokenizer.chat_template = custom_chat_template
+    
+    print(f'Tokenizer using PAD = {tokenizer.pad_token}({tokenizer.pad_token_id})')
+    return tokenizer
 
+@contextmanager
+def batchsafe_tokenizer(tokenizer):
+    # TODO: In retrospect, this is not necessary. Could just set this on init. 
+    # Any batch will *always* use this,
+    # Any Non-batched won't use padding at all, so side/token is irrelevant anyway.
+    # That said, still need to test this assertion before removing
+    pad_side = tokenizer.padding_side
+    pad_tokenid = tokenizer.pad_token_id
+    
+    tokenizer.padding_side  = 'left'
+    # for non-chat_ml models, we set pad=unk, but batch needs pad=eos to work properly
+    if tokenizer.pad_token_id == tokenizer.unk_token_id:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    try:
+        yield tokenizer
+    finally:
+        tokenizer.padding_side = pad_side
+        tokenizer.pad_token_id = pad_tokenid
+
+def set_tokenizer_inference(tokenizer):
+    tokenizer.padding_side = 'left'
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     return tokenizer

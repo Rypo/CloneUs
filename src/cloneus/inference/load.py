@@ -23,6 +23,13 @@ from awq import AutoAWQForCausalLM
 from unsloth import FastLanguageModel
 
 
+def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, *inputs, **kwargs):
+    '''AutoTokenizer.from_pretrained but force padding_side=left, pad_tok=eos_tok'''
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+    tokenizer.padding_side = 'left'
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
+
 def warn_tokenizer(tokenizer, flash_attn):
     print(f'{tokenizer.pad_token=}, {tokenizer.unk_token=}, {tokenizer.eos_token=}')
     if flash_attn:
@@ -58,7 +65,7 @@ def load_awq(awq_dirpath, dtype=torch.float16, attn_implementation:typing.Litera
         device_map="auto",
     )
     print(model.dtype, model.training)
-    tokenizer = AutoTokenizer.from_pretrained(awq_dirpath, trust_remote_code=True)
+    tokenizer = auto_inference_tokenizer(awq_dirpath, trust_remote_code=True)
 
     # model = model.eval()
     # for p in model.parameters():
@@ -85,7 +92,7 @@ def load_awq_exl2(awq_dirpath, max_seq_len=8192, batch_size=1, fuse_layers=False
         device_map="auto",
         attn_implementation=attn_implementation, 
     )
-    tokenizer = AutoTokenizer.from_pretrained(awq_dirpath, trust_remote_code=True)
+    tokenizer = auto_inference_tokenizer(awq_dirpath, trust_remote_code=True)
 
     model = model.eval()
     for p in model.parameters():
@@ -121,8 +128,8 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implem
         attn_implementation=attn_implementation,
         #use_flash_attention_2=use_flash,
     )
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_dirpath)
-    warn_tokenizer(tokenizer, attn_implementation)
+    tokenizer = auto_inference_tokenizer(ckpt_dirpath)
+    #warn_tokenizer(tokenizer, attn_implementation)
 
     return model, tokenizer
 
@@ -135,7 +142,7 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
 
 
 def load_unsloth(checkpoint_dirpath):
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
     warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
     # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -248,7 +255,7 @@ def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, att
     
     model = AutoPeftModelForCausalLM.from_pretrained(checkpoint_dirpath, **pt_kwargs,)
     
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)#AutoTokenizer.from_pretrained(checkpoint_dirpath)
     print(f'load_peft: {time.perf_counter()-t0:0.2f}s')
     return model, tokenizer
 
@@ -265,7 +272,7 @@ def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16,
         quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
         
     
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
 
     pt_kwargs = dict(
         low_cpu_mem_usage=True,
@@ -313,7 +320,7 @@ def load_unmerged_lowrsc(checkpoint_dirpath, quant_config=None, dtype=None, attn
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16
     )
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
 
     #if len(tokenizer) > 32000:
     #    return load_unmerged_customtoks(tokenizer, checkpoint_dirpath, quant_config, dtype=dtype, attn_implementation=attn_implementation)
@@ -334,7 +341,7 @@ def load_unmerged_lowrsc(checkpoint_dirpath, quant_config=None, dtype=None, attn
         lora_config = PeftConfig.from_pretrained(checkpoint_dirpath)
         model.add_adapter(lora_config)
 
-    warn_tokenizer(tokenizer, attn_implementation)
+    #warn_tokenizer(tokenizer, attn_implementation)
     
     return model, tokenizer
 

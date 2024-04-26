@@ -117,18 +117,14 @@ def process_seedtext(seed_text):
     return '' if seed_text is None else re.sub(f' *{bs2} *','\n', seed_text)
 
 
-def splitout_tag(model_output, RE_ANY_USERTAG):
-    # if '[USER:' in model_output:
-    #     print(model_output)
-    #     model_output =  model_output.split('[USER:')[0]
+def splitout_tag(model_output, RE_ANY_USERTAG:re.Pattern):
     if '[/INST]' in model_output:
         print('WARNING: "[/INST]" found in model_output, returning first split')
         print(f'Raw Model output:\n {model_output!r}')
         escinst = re.escape('[/INST]')
         model_output = re.split(f' *{escinst}',model_output)[0]
-        #model_output =  usplits[0]
 
-    if len(usplits := RE_ANY_USERTAG.split(model_output,1)) > 1:
+    if len(usplits := RE_ANY_USERTAG.split(model_output)) > 1:
         print('WARNING: Multiple tags found in model_output, returning first split')
         print(f'Raw Model output:\n {model_output!r}')
         model_output =  usplits[0]

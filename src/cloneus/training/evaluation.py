@@ -113,15 +113,20 @@ def write_samples(gen_samples:dict[str, dict[str, list[str]]], out_filepath:str|
                 f.write(inp)
                 f.writelines(outs)
 
-def eval_ckpt(clo:Cloneus, checkpoint_path:Path,  genconfig_modes:list[str], prompts:list[str], question_author:str, author_list:list[str]):
+def eval_ckpt(clo:Cloneus, checkpoint_path:Path, genconfig_modes:list[str], prompts:list[str], question_author:str, author_list:list[str]):
     '''Evaluate a single checkpoint in run'''
-    #clo.switch_model(clo.mdir_comps.basedir_path, ckpt_subdir=checkpoint_name)
+    
     clo.swap_model(checkpoint_path)
     checkpoint_name = checkpoint_path.name
     gc_inps_outs = {} # {gmode1 : {input_text: [out1, out2, ... ]}}
+    
+    # use defaults from old genconfig.get_config func for consistency (note the temp=1 instead of 0.8)
+    compat_kw = {'ms':dict(do_sample=True, top_p=1, temperature=1, top_k=50),
+                 'cs':dict(penalty_alpha=0.6, top_k=4, low_memory=False,)}
+    
     for gmode in genconfig_modes:
-        clo.gen_config = genconfig.get_config(clo.tokenizer, gmode)
-        gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconf(True)), '-', 176, 0)
+        _delta= clo.set_genconfig(False, alias=gmode, **compat_kw.get(gmode, {})) #= genconfig.get_config(clo.tokenizer, gmode)
+        gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconfig(True)), '-', 176, 0)
         inps_outs = gc_inps_outs.setdefault(gconf_line, {})
         
         for prompt in tqdm(prompts, leave=False):
@@ -139,7 +144,7 @@ def eval_ckpt(clo:Cloneus, checkpoint_path:Path,  genconfig_modes:list[str], pro
 def eval_run(checkpoint_paths:list[Path], prompts: list[str], genconfig_modes:list[str], question_author:str, author_list:list[str]):
     '''Evaluate a single run consisting of multiple checkpoints'''
     
-    clo = Cloneus(checkpoint_paths[0]).load_model()
+    clo = Cloneus.from_pretrained(checkpoint_paths[0]).load_model()
     
     gc_inps_outs = {}
     for ckpth in tqdm(checkpoint_paths): 
@@ -184,7 +189,7 @@ def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', ge
         run_path = runs_path
         print('running 1 checkpoint:',run_path)
         # sample eval from 1 checkpoint. Write to log file inside of the checkpoint dir
-        clo = Cloneus(run_path)#.load_model() # load taken care of in eval_ckpt
+        clo = Cloneus.from_pretrained(run_path)#.load_model() # load taken care of in eval_ckpt
         gc_inps_outs = eval_ckpt(clo, checkpoint_path=run_path, genconfig_modes=genconfig_modes, prompts=prompts, question_author=question_author, author_list=author_list)
         write_samples(gc_inps_outs, run_path/outfile)
     else:
@@ -219,7 +224,7 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
             f.write(textborder('INPUT: '+ repr(input_text), '=', 88, 0))
             for pset in param_sets:
                 f.write('\n'+ json.dumps(pset))
-                delt=clo.set_genconf(**pset)
+                delt=clo.set_genconfig(save_on_change=False, **pset)
                 seed_everything(42)
             
                 input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')

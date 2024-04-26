@@ -73,7 +73,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             await ctx.send(f"{ctx.subcommand_passed} does not belong to genmode")
     
     @setarg.command(name='streaming')
-    async def streaming(self, ctx: commands.Context, enabled:bool = True):
+    async def set_streaming(self, ctx: commands.Context, enabled:bool = True):
         '''Turn streaming text output on/off.
 
         If enabled, bot will update messages in place via edits
@@ -93,7 +93,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         await ctx.send('\n'.join(msgs))
     
     @setarg.command(name='speaking')
-    async def speaking(self, ctx: commands.Context, enabled:bool = True):
+    async def set_speaking(self, ctx: commands.Context, enabled:bool = True):
         '''Turn text-to-speech on/off.
 
         If enabled, bot will speak messages. 
@@ -107,7 +107,18 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         '''
         self.tts_mode = enabled
         await ctx.send(f'TTS mode: {"en" if self.tts_mode else "dis"}abled.')
-    
+
+    @setarg.command(name='youtube')
+    async def set_youtube(self, ctx: commands.Context, enabled:bool = None):
+        '''Turn youtube link parsing on/off.
+
+        Args:
+            enabled: Toggle enable/disable youtube link parsing
+        '''
+        if enabled is None:
+            enabled = not self.clomgr.ytm.enabled
+        self.clomgr.ytm.enabled = enabled
+        await ctx.send(f'YouTube link parsing: {"en" if enabled else "dis"}abled.')
 
     @setarg.command(name='ctxlimit')
     async def ctxlimit(self, ctx: commands.Context, limit: int):
@@ -187,7 +198,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
 
         genmap = {m['name']: settings.RUNS_DIR/m['ckpt'].split('runs/full/')[-1] for m in settings.BEST_MODELS} 
         await ctx.defer()
-        await self.clomgr.load(genmap[version.value], gconfig_fname='best_generation_config.json')
+        await self.clomgr.load(genmap[version.value], gen_config='best_generation_config.json')
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')
     
     @setarg.command(name='randomode')
@@ -224,9 +235,11 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             model_path = yearmap[period.value] #settings.RUNS_DIR/period.value['ckpt'].split('runs/full/')[-1]
             period_msg = period.name
         await ctx.defer()
-        await self.clomgr.load(model_path, gconfig_fname=None)
+        await self.clomgr.load(model_path, gen_config=None)
         _ = self.clomgr.update_genconfig({"top_k": 80, "top_p": 0.9, "repetition_penalty": 1.1, "temperature": 1.2})
         await ctx.send(f"Traveled back to {period_msg}. _Paradoxes will void warranty_")
+
+
 
     @commands.hybrid_command(name='gc')
     async def genconfig(self, ctx: commands.Context, *, flags: cmd_flags.GenerationFlags):
@@ -237,7 +250,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             msgs.append('Streaming incompatible with num_beams>1. Streaming disabled.')
 
         flag_config = dict(flags)#{name: fval for name, fval in flags}
-         # filter out Nones since define special behavor in rai.set_genconf for Nones
+         # filter out Nones since define special behavor in clo.set_genconf for Nones
         config_updates = {name: val for name, val in flag_config.items() if val is not None}
         update_message = self.clomgr.update_genconfig(config_updates)
         msgs.append(update_message)
