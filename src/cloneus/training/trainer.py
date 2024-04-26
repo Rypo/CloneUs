@@ -90,7 +90,7 @@ class CTrainer(Trainer):
 
     
 def formatfunc(sample):
-    return sample['train']['text']
+    return sample['text']
 
 def get_trainer(model, data, tokenizer, args, callbacks=None, collator_pad_multiple=None):
     trainer = CTrainer(
@@ -112,16 +112,16 @@ def get_sft_trainer(model, data, tokenizer, args, peft_config, callbacks=None, m
         args.group_by_length = False
     trainer = SFTTrainer(
         model=model,
+        args=args,
+        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
         train_dataset=data['train'],
         eval_dataset=data['validation'],
-        peft_config=peft_config,
-        max_seq_length=max_packed_seqlength,#128,
         tokenizer=tokenizer,
-        packing=True,
+        peft_config=peft_config,
         dataset_text_field="text",
+        packing=True,
         #formatting_func=formatfunc,
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
-        args=args,
+        max_seq_length=max_packed_seqlength,
         callbacks=callbacks,
         neftune_noise_alpha=neftune_noise_alpha
     )
