@@ -117,15 +117,13 @@ def expand_sessions(chat_session: pd.Series, min_session_length:int=1):
         # sess-= 1 if didn't reduce the number of small sessions, 
         # +=1 is default case since it aligns better with the assumption we take that 4hr break = new topic session
         # but if we have __4hr_break__ [TEXT] __4hr_break__ then seems more likely that text should be mapped forward instead of backward
-        if prev_n_smsess == n_small_session:
-            chat_session = chat_session.where(~chat_session.isin(small_sessions), other = (chat_session-1).clip(sess_min, sess_max))
-        else:
-            chat_session = chat_session.where(~chat_session.isin(small_sessions), other = (chat_session+1).clip(sess_min, sess_max))
+        shift = -1 if prev_n_smsess == n_small_session else 1        
+        chat_session = chat_session.where(~chat_session.isin(small_sessions), other = (chat_session + shift).clip(sess_min, sess_max))
         
         prev_n_smsess = n_small_session
         sess_sizes.append(n_small_session)
         
-    if sess_sizes:    
+    if sess_sizes and sess_sizes[0]>0:    
         print('sessions < min_session_length:',' -> '.join(map(str,sess_sizes)))
     return chat_session
 
@@ -158,7 +156,7 @@ def assign_split(df_chat:pd.DataFrame, eval_frac: (float|typing.Literal['after_b
     
     return df_chat
 
-def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_tag:str, hours_between_sessions:(int|list[int]) = 4, min_session_length:int=1, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
+def format_chat_groups(df_proc: pd.DataFrame, author_tag:str, tag_sep:str=None, postfix:str=None, hours_between_sessions:(int|list[int]|None) = 4, min_session_length:int=1, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
     """Prepares data for use in hf dataset. Creates a formatted text col, merges user messages, and assigns train, eval split.
 
     Groups chat data by user_sequence and join by a new line. Creates formatted_text column where each takes the form: 
@@ -187,14 +185,17 @@ def format_chat_groups(df_proc: pd.DataFrame, tag_sep:str, postfix:str, author_t
     # Join consecutive author messages with new line
     df_chats['text'] = df_chats['text'].str.join('\n')
 
-    df_chats['tag_prefix'] = df_chats['user'].apply(roles.format_author_tag, author_tag=author_tag) + tag_sep
+    df_chats['formatted_author_tag'] = df_chats['user'].apply(roles.format_author_tag, author_tag=author_tag) + ('' if tag_sep is None else tag_sep)
 
     # BUG until 2023-11-29 was df_proc.text instead of df_all
-    df_chats['formatted_text'] = df_chats['tag_prefix'] + df_chats['text'] + postfix 
+    df_chats['formatted_text'] = df_chats['formatted_author_tag'] + df_chats['text'] + ('' if postfix is None else postfix)  
     
     df_chats = assign_split(df_chats, eval_frac)
+    if hours_between_sessions is None:
+        return df_chats
+    
     if isinstance(hours_between_sessions, (int,float)):
-        df_chats['chat_session'] = delineate_sessions(df_chats, hours_between_sessions, min_session_length)
+        df_chats['chat_session'] = delineate_sessions(df_chats, hours_between_sessions, min_session_length) + int(hours_between_sessions*1e9)
         return df_chats
     
     chatgrps = {h: delineate_sessions(df_chats, h, min_session_length) for h in hours_between_sessions}
