@@ -1,6 +1,6 @@
 from dotenv import load_dotenv as _load_dotenv
 
-from .inference.cloneus import Cloneus
+from .cloneus import Cloneus
 
 from cloneus.core import paths as cpaths
 
