@@ -112,7 +112,7 @@ class GenConfigUtilities:
         
         # Llama3 workaround, can't rely on base model generation config in case using the non-instruct version.
         # Check chat_template instead of tokens list in case using custom template override.
-        if '<|eot_id|>' in tokenizer.chat_template:
+        if tokenizer.chat_template and '<|eot_id|>' in tokenizer.chat_template:
             gen_config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids('<|eot_id|>')]
             print(f'Using Llama3 format - <|eot_id|> added. eos_token_id: ({gen_config.eos_token_id})')        
         
@@ -242,6 +242,8 @@ class Cloneus(GenConfigUtilities):
 
     @staticmethod
     def from_pretrained(checkpoint_path:str|Path, gen_config=None, ytm:youtube.YouTubeManager = None, **kwargs):
+        # TODO: allow model_id for limited init with base_generate functionality
+        # Maybe allow attempt to use without training, but need a LOT of assumptions to work without a cfg
         path_data = ModelPathComponents.from_checkpoint(Path(checkpoint_path))
         
         config = OmegaConf.load(path_data.config_path)
@@ -276,7 +278,7 @@ class Cloneus(GenConfigUtilities):
         # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
         self.base_has_system = self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template)) 
         
-        print('Tkzr|Gcfg: (pad: {}|{}, eos: {}|{}) base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
+        print('Tk|Gc: (pad: {}|{}, eos: {}|{}) base_tune_type: {}, base_has_system: {} (use: {}), custom_roles: {}'.format(
             self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
             self.tokenizer.eos_token_id, self.gen_config.eos_token_id,
             self.cfg.base_tune_type, self.base_has_system,
