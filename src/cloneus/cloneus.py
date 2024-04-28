@@ -419,7 +419,7 @@ class Cloneus(GenConfigUtilities):
         #trunc_input_text = self.discrete_front_truncate(input_text, self.gen_config.max_new_tokens) 
         # fill tag to split on a known fixed value. Allows author_tag to change without breaking.
         input_text += self.cfg.author_tag.format(author='#DUMMY', lauthor='#DUMMY', fname='#NAME').split('#DUMMY',1)[0]
-        inputs = self.tokenizer(input_text, return_tensors="pt")
+        inputs = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)
 
         author_gen_config = GenerationConfig(
             #force_words_ids=[],#[[wtok[:3]] for wtok in self.encode_wordslist(userutils.author_display_names)], 
@@ -464,7 +464,7 @@ class Cloneus(GenConfigUtilities):
             # BUG IMPORTANT: There is an issue with padding token. Whenever it is inserted, it makes those responses bad
             # I verified that ONLY when pad token is used, then it goes wrong.
             #with batchsafe_tokenizer(self.tokenizer) as tokenizer:
-            inputs = self.tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True)
+            inputs = self.tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True, add_special_tokens=False)
             
             input_len = inputs.pop('length')[0].item()
             outputs = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach_()
@@ -476,7 +476,7 @@ class Cloneus(GenConfigUtilities):
             output_texts  = []
 
             for inptext in msg_batch:
-                inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True)
+                inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True, add_special_tokens=False)
                 input_len = inputs.pop('length')[0].item()
                 output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
                 output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
@@ -500,7 +500,7 @@ class Cloneus(GenConfigUtilities):
         
         # remove any trailing postfix
         out_texts = [ot.split(self.cfg.postfix)[0] for ot in output_texts]
-        output_lens = self.tokenizer(out_texts, add_special_tokens=False, return_length=True)['length']
+        output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
 
         return trunc_context, author_prompts, out_texts, input_len, output_lens
    
@@ -508,7 +508,7 @@ class Cloneus(GenConfigUtilities):
     def generate(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]) -> tuple[str, str, int, int]:
         input_text = self.to_text_input(author_messages, prompt_author_seedtext)
         
-        inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True)
+        inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False,)
         input_len = inputs.pop('length')[0].item()
 
         input_text = self.tokenizer.batch_decode(inputs.input_ids)[0]
@@ -542,7 +542,7 @@ class Cloneus(GenConfigUtilities):
             generated_text += new_text
             yield new_text
         
-        output_len =  self.tokenizer(generated_text, return_length=True).length
+        output_len =  self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
 
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
 
@@ -566,7 +566,7 @@ class Cloneus(GenConfigUtilities):
         #inps=inputs.to(0)
 
         for i, inptext in enumerate(msg_batch):
-            inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True)
+            inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True, add_special_tokens=False)
             input_len = inputs.pop('length')[0].item()
             #genkwargs = dict(input_ids=inps.input_ids[[i]], attention_mask=inps.attention_mask[[i]], 
             genkwargs = dict(**inputs.to(0),
@@ -578,7 +578,7 @@ class Cloneus(GenConfigUtilities):
                 generated_text += new_text
                 yield i,new_text
             
-            output_len = self.tokenizer(generated_text, return_length=True).length
+            output_len = self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
             
             self._last_streamed_batch_values['output_texts'].append(generated_text)
             self._last_streamed_batch_values['output_lens'] += output_len
@@ -624,7 +624,7 @@ class Cloneus(GenConfigUtilities):
         chat_history = [input_text] if isinstance(input_text, str) else input_text
         trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
         
-        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True)
+        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True, add_special_tokens=False)
         input_len = inputs.pop('length')[0].item()
         #self.model.to(dtype = self.base_dtype)
         with self.model.disable_adapter(), torch.cuda.amp.autocast(dtype=self.base_dtype):
@@ -650,7 +650,7 @@ class Cloneus(GenConfigUtilities):
 
         chat_history = [input_text] if isinstance(input_text, str) else input_text
         trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
-        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
+        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
 
         input_len = inputs.pop('length')[0].item()
 
@@ -697,7 +697,7 @@ class CloneusTag(Cloneus):
         '''Truncate full samples split on postfix from left side of text to max_len'''
         # split keep ends so they are included in token lengths. NOTE: without the "if t", will have a double postfix. No clue how that bug slipped by.
         split_text = [t+self.cfg.postfix for t in input_text.split(self.cfg.postfix) if t] # input_text.split(self.cfg.postfix)
-        lengths = self.tokenizer(split_text, return_length=True).length
+        lengths = self.tokenizer(split_text, return_length=True, add_special_tokens=False).length
         # argmax returns first index of True, so we need to reverse the cumsum and then reverse the argmax
         first_idx = (np.cumsum(lengths[::-1]) <= self.cfg.ctx_len-new_tokbuf)[::-1].argmax()
         

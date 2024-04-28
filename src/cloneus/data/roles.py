@@ -56,6 +56,7 @@ def to_jinja_template(tag_sep:str, postfix:str):
     # role will be the pre-formated author tag
     template=(
         "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}"
+        "{{ bos_token }}"
         "{% for message in messages %}"
         "{{ message['role'] + '__TAG_SEP__' + message['content'] + '__POSTFIX__' }}"
         "{% endfor %}"

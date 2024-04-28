@@ -32,9 +32,9 @@ def convo_token_count(convo:list[dict], tokenizer):
     if isinstance(convo, dict):
         convo = [convo]
     # This method adds BOS (e.g '<s>' (1)) to beginning
-    n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), return_length=True)['length'][0]
+    # n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), return_length=True)['length'][0]
     # This method does not
-    # n_tokens = tokenizer.apply_chat_template(convo.iloc[0], tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length'][0]
+    n_tokens = tokenizer.apply_chat_template(convo, tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length'][0]
     return n_tokens
 
 
@@ -78,6 +78,14 @@ def add_sys_msg(chat_convo:list[dict], system_msg:str|dict[str,str], has_system:
 
     return chat_convo
 
+def map_to_inputs(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerFast, max_length:int, truncation:bool, text_field='text'):
+    '''Maps Dataset text field to those for model input (input_ids, special_tokens_mask, length)
+    
+    Importantly, it does NOT add special tokens. This is primarily a concern after calling apply_chat_template(tokenize=False) which,
+    depending on the template, may or may not insert a bos_token. This will cause double bos_token on all entries. 
+    '''
+    dset = dset.map(lambda s: tokenizer(s[text_field], add_special_tokens=False, return_special_tokens_mask=True, max_length=max_length, return_length=True, truncation=truncation), batched=True)
+    return dset
 
 @dataclass
 class TimeGapPartitioner:
@@ -187,8 +195,7 @@ def ua_tags_dataset(chat_csv, tokenizer, cfg, text_only=False):
     
 
     convo = format_ua_tgap(df_all, cfg, has_system=has_system)
-    convo['n_tokens'] = tokenizer(tokenizer.apply_chat_template(convo['content'].to_list(), tokenize=False), return_length=True)['length']
-    
+    convo['n_tokens'] = tokenizer(tokenizer.apply_chat_template(convo['content'].to_list(), tokenize=False), return_length=True, add_special_tokens=False)['length']
     print(f'Splitting over length samples. n = {(convo.n_tokens > cfg.chunk_size).sum()}')
     
     conversations = convo.apply(lambda r: [r.content] if r.n_tokens < cfg.chunk_size else 
@@ -205,7 +212,7 @@ def ua_tags_dataset(chat_csv, tokenizer, cfg, text_only=False):
     dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)}, batched=True)
     
     if not text_only:
-        dset = dset.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, max_length=cfg.chunk_size, return_length=True, truncation=cfg.dataset.allow_truncation), batched=True)
+        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
     
     return dset
 
@@ -217,7 +224,7 @@ def author_roletags_dataset(chat_csv, tokenizer, cfg, text_only=False):
                                     hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=cfg.dataset.get('eval_frac',0.01))
 
     convo = format_role_tgap(df_all, cfg, has_system=has_system)
-    convo['n_tokens'] = tokenizer(tokenizer.apply_chat_template(convo['content'].to_list(), tokenize=False), return_length=True)['length']
+    convo['n_tokens'] = tokenizer(tokenizer.apply_chat_template(convo['content'].to_list(), tokenize=False), return_length=True, add_special_tokens=False)['length']
     
     print(f'Splitting over length samples. n = {(convo.n_tokens > cfg.chunk_size).sum()}')
     
@@ -233,7 +240,7 @@ def author_roletags_dataset(chat_csv, tokenizer, cfg, text_only=False):
     dset = dset.map(lambda x: {'text':tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)}, batched=True)
     
     if not text_only:
-        dset = dset.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, max_length=cfg.chunk_size, return_length=True, truncation=cfg.dataset.allow_truncation), batched=True)
+        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
     
     return dset
 
@@ -249,7 +256,7 @@ def tag_only_dataset(chat_csv, tokenizer, cfg, text_only=False):
 def jsonl_dataset(train_jsonl, eval_jsonl, tokenizer, cfg, text_only=False):
     dset = datasets.load_dataset("json", data_files={"train": train_jsonl, "validation": eval_jsonl})
     if not text_only:
-        dset = dset.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, max_length=cfg.chunk_size, return_length=True, truncation=cfg.dataset.allow_truncation), batched=True)
+        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
     
     return dset
 
@@ -266,12 +273,14 @@ def ungrouped_dataset(chat_csv, tokenizer, cfg, text_only=False):
     df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix, 
                                     hours_between_sessions=None, min_session_length=cfg.dataset.min_session_length, eval_frac=cfg.dataset.eval_frac)
     
+    df_all = df_all[['split','formatted_text']].rename(columns={'formatted_text':'text'})
+    
     ds_ungrouped = datasets.DatasetDict({
         'train': datasets.Dataset.from_pandas(df_all[df_all.split=='train'], split='train', preserve_index=False),
         'validation': datasets.Dataset.from_pandas(df_all[df_all.split=='eval'], split='validation', preserve_index=False)
     })
     if not text_only:
-        ds_ungrouped = ds_ungrouped.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, max_length=cfg.chunk_size, return_length=True, truncation=cfg.dataset.allow_truncation), batched=True)
+        ds_ungrouped = map_to_inputs(ds_ungrouped, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, text_field='text')
     
     return ds_ungrouped
 
@@ -287,7 +296,7 @@ def chunk_max_length(formatted_texts:list[str], tokenizer, max_length:int):
             acc.append(t)
         return acc
     
-    token_counts = tokenizer(formatted_texts, return_length=True)['length']
+    token_counts = tokenizer(formatted_texts, return_length=True, add_special_tokens=False)['length']
     texts_toks = functools.reduce(lambda acc,txt_tok: _accum(acc, txt_tok), zip(formatted_texts,token_counts), [('',0)])
     
     return [text for text,_ in texts_toks]
@@ -310,6 +319,6 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
     })
     # https://huggingface.co/learn/nlp-course/chapter5/3
     if not text_only:
-        dset = dset.map(lambda s: tokenizer(s['text'], return_special_tokens_mask=True, max_length=cfg.chunk_size, return_length=True, truncation=cfg.dataset.allow_truncation), batched=True)
+        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
 
     return dset
