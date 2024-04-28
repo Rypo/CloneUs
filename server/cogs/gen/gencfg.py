@@ -41,11 +41,12 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
     auto_reply_mode: str = ''
     auto_reply_candidates: list = None
     auto_reply_enabled_users: set[discord.User] = set()
+    user_aliases: dict = {} # pseudonyms
     _display_initials: str = ','.join(roles.initial_to_author.keys())
     # discord.utils.MISSING 
     #self.cfgmgr = ConfigManager(STATE_CONFIG)
     default_system_msg: str = None
-    model_randomize_proba: float = None
+    model_randomization: dict = {}
 
     def check_state(self):
         # TODO: check streaming mode/num beams
@@ -136,7 +137,26 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.msgmgr.message_cache_limit = limit
         await ctx.send(f"Updated limit: ({prv_limit} -> {self.msgmgr.message_cache_limit})")
 
+    @setarg.command(name='alias')
+    @app_commands.choices(author=cmd_choices.AUTHOR_DISPLAY_NAMES)
+    async def set_alias(self, ctx: commands.Context, author:str=None):
+        '''Change who the bot sees you as in the context.
 
+        Args:
+            author: Who you gonna be. If None, just be yo self.
+        '''
+        if author is None or ctx.author.display_name == author:
+            self.user_aliases[ctx.author.display_name] = ctx.author.display_name
+            if all([k==v for k,v in self.user_aliases.items()]):
+                self.user_aliases = {}
+               
+            msg = 'I see you for who you really are now.'
+        else:
+            self.user_aliases[ctx.author.display_name] = author
+            msg = f'For all past, present, and future _{ctx.author.display_name}_ shall be known as **{author}**'
+            
+        self.clomgr.user_aliases = self.user_aliases
+        return await ctx.send(msg)
     
     @setarg.command(name='autoreply')
     @app_commands.choices(auto_mode=cmd_choices.AUTO_MODES)
@@ -202,20 +222,26 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')
     
     @setarg.command(name='randomode')
-    async def set_randomode(self, ctx: commands.Context, change_rate: int = 5):
+    async def set_randomode(self, ctx: commands.Context, change_rate: int = 5, fast_proba: float = 0.5, announce:bool=True):
         """Enabled random swapping between trained models mid conversation.
         
         Args:
             change_rate: Average number of messages between model swaps. Set=0 to disable.
         """
-        if change_rate == 0:
-            self.model_randomize_proba = None
-            self.clomgr.model_randomize_proba = self.model_randomize_proba
-            return await ctx.send('Took meds. Sticking to 1 personality.')
-        self.model_randomize_proba = 1/change_rate
-        self.clomgr.model_randomize_proba = self.model_randomize_proba
-
-        return await ctx.send(f'Brain swap on average every {change_rate} messages.')
+        if change_rate < 1:
+            self.model_randomization = {}
+            msg = 'Sticking to 1 personality for now.'
+        else:
+            self.model_randomization = {
+                'probability': 1/change_rate,
+                'fast_proba': fast_proba,
+                'announce': announce
+            }
+            
+            msg = f'Brain swap on average every {change_rate} messages.'
+        
+        self.clomgr.model_randomization = self.model_randomization
+        return await ctx.send(msg)
 
     @setarg.command(name='era')
     @app_commands.choices(period=cmd_choices.MODEL_YEARS)

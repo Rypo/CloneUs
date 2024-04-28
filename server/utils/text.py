@@ -71,10 +71,10 @@ class Msg:
     created_at: datetime.datetime
 
     @property
-    def user_msg(self) -> tuple:
+    def user_msg(self) -> tuple[str,str]:
         return (self.user, self.message)
 
-def _parse_message(msg: discord.Message) -> Msg:
+def _parse_message(msg: discord.Message, user_aliases:dict[str,str]=None) -> Msg:
     """Get author display_name and message content """
     #return discord.utils.get(settings.GUILDS_ID.members, id=id)
     content = msg.clean_content
@@ -93,11 +93,13 @@ def _parse_message(msg: discord.Message) -> Msg:
         content = content.replace(author_tag, '').strip()
     else:
         author = msg.author.display_name
+        if user_aliases:
+            author = user_aliases.get(author,author)
     
     return Msg(author, content, msg.created_at)
 
 
-def merge_messages(user_content_times:list[Msg], merge_minutes=7):
+def merge_messages(user_content_times:list[Msg], merge_minutes=7) -> list[tuple[str,str]]:
     merged_msgs = []
     for m in user_content_times:
         if not merged_msgs:
@@ -131,35 +133,23 @@ def splitout_tag(model_output, RE_ANY_USERTAG:re.Pattern):
 
     return model_output
 
-def llm_input_transform(messages: list[discord.Message], do_filter=False) -> list[tuple[str,str]]:
+def llm_input_transform(messages: list[discord.Message], do_filter=False, user_aliases:dict[str,str]=None) -> list[tuple[str,str]]:
     """filter, if needed, sorts by created_at, merges consecutive author messages returns [(author, message), ...]"""
     if do_filter:
         messages = filter_messages(messages)
     
-    #smessages = sorted(set(messages), key=lambda m: m.created_at)
-    #print('MESSAGES ALREADY ORDERED+UNIQUE:', smessages == messages)
-
-    user_content_times = list(map(_parse_message, messages))
-    messages = merge_messages(user_content_times)
-
-    return messages
+    user_content_times = [_parse_message(m, user_aliases) for m in messages]
+    author_messages = merge_messages(user_content_times)
+    
+    return author_messages
 
 
 def llm_output_transform(output: str, emojis) -> str:
     """Replace :emoji: string with discord Emoji objects
 
     Transform LLM output to Discord output."""
-    # replace emoji <:name:id> with :name:
-    # output =  re.sub(r'<(:\w+:)\d+>', r'\1', output)
-
-    # # replace [USER:name] with :name:
-    # output = re.sub(r'\[USER:(\w+)\]', r':\1:', output)
-
     # replace emoji :name: with <:name: emoji>
     output = re.sub(r':(\w+):',  lambda m: f'{find_emoji(m.group(1), emojis)}', output)
-    #output = re.sub(r'@(everyone|here)', r'@\u200b\1', output)
-    #output = re.sub(r'@(\w+)', lambda m: f'@{m.group(1).capitalize()}', output)
-    #output = output.replace('@everyone', '@\u200beveryone').replace('@here', '@\u200bhere') # \u200b is zero width space
 
     return output
 

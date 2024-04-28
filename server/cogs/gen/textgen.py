@@ -346,7 +346,7 @@ class TextGen(commands.Cog, SetConfig):
             role_cycle = itertools.cycle(['user','assistant'])
             llm_input_messages = [(next(role_cycle), msg) for msg in self.msgmgr.base_message_cache]
         else:
-            llm_input_messages = text_utils.llm_input_transform(self.msgmgr.get_mcache(ctx))
+            llm_input_messages = text_utils.llm_input_transform(self.msgmgr.get_mcache(ctx), user_aliases=self.user_aliases)
             if raw:
                 llm_text = self.clomgr.clo.to_text_input(llm_input_messages)
                 split_on = self.clomgr.clo.tokenizer.eos_token if self.clomgr.clo.stop_criteria is None else self.clomgr.clo.cfg.postfix

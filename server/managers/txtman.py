@@ -51,10 +51,11 @@ class CloneusManager():
         #self.status = 'down'
         self.last_run = None
         self.run_count = 0
-        self.model_randomize_proba = None
+        self.model_randomization:dict = {}
 
         self.banned_words: list[str] = []
         self.weighted_words: list[tuple[str,float]] = []
+        self.user_aliases: dict[str,str] = None
 
     @property
     def yt_session_quota(self):
@@ -240,7 +241,7 @@ class CloneusManager():
 
     @async_wrap_thread
     def predict_author(self, message_cache:list[discord.Message],  autoreply_mode: str, author_candidates: list[str]=None) -> str:
-        llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False)
+        llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
         author_probas = self.clo.next_author_probs(llm_input_messages, top_k_next_tokens=len(roles.author_display_names), author_list=roles.author_display_names)
         
         model_logger.info(f'Autobot Probablities: {author_probas}')
@@ -410,7 +411,7 @@ class CloneusManager():
 
 
     def prepare_llm_inputs(self, message_cache:list[discord.Message], seed_text:str|None):
-        llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False)
+        llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
         seed_text = text_utils.process_seedtext(seed_text)
         
         return llm_input_messages, seed_text
@@ -557,8 +558,10 @@ class CloneusManager():
                 #await self.send_collect(ctx, discord_outs, char_limit=2000)
                 messages = await self.send_collect(ctx, discord_outs, char_limit=2000)
         
-        if self.model_randomize_proba and random.random() < self.model_randomize_proba: 
-            await self.load_random_model(fast_proba=0.5)
+        if self.model_randomization and random.random() < self.model_randomization['probability']:
+            if self.model_randomization['announce']:
+                await ctx.send('🧠🔀', delete_after=2, silent=True)
+            await self.load_random_model(fast_proba=self.model_randomization['fast_proba'])
 
         return messages
 
