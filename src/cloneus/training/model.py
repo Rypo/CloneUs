@@ -135,7 +135,7 @@ def get_model(model_id,
     if quant_config is None:
         pretrain_kwargs.pop('quantization_config') # passing as None will error as of transformers 4.39.2 (during .to_dict() call)
     
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     
     if Path(model_id).exists():
         # TODO: determine if vRAM spike is because of eval step
@@ -146,7 +146,7 @@ def get_model(model_id,
         return model, tokenizer
 
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs, trust_remote_code=True)
 
     model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
     tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)

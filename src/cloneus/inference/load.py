@@ -25,7 +25,7 @@ from unsloth import FastLanguageModel
 
 def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, *inputs, **kwargs):
     '''AutoTokenizer.from_pretrained but force padding_side=left, pad_tok=eos_tok'''
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
     tokenizer.padding_side = 'left'
     tokenizer.pad_token_id = tokenizer.eos_token_id
     return tokenizer
@@ -248,7 +248,8 @@ def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, att
         device_map="auto",
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
-        use_cache=True
+        use_cache=True,
+        trust_remote_code=True
     )
     if pt_kwargs['quantization_config'] is None:
         pt_kwargs.pop('quantization_config')

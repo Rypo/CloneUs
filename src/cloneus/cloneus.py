@@ -110,12 +110,17 @@ class GenConfigUtilities:
         gen_config.pad_token_id = tokenizer.pad_token_id
         gen_config.eos_token_id = tokenizer.eos_token_id
         
+        # TODO: This is going to become a mess if this trend continues. Need a automated way to do this.
         # Llama3 workaround, can't rely on base model generation config in case using the non-instruct version.
         # Check chat_template instead of tokens list in case using custom template override.
         if tokenizer.chat_template and '<|eot_id|>' in tokenizer.chat_template:
             gen_config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids('<|eot_id|>')]
             print(f'Using Llama3 format - <|eot_id|> added. eos_token_id: ({gen_config.eos_token_id})')        
-        
+        # Phi-3 workaround
+        if tokenizer.chat_template and '<|end|>' in tokenizer.chat_template:
+            gen_config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids('<|end|>')]
+            print(f'Using Phi-3 format - <|end|> added. eos_token_id: ({gen_config.eos_token_id})')
+
         return gen_config
             
     def encode_wordslist(self, wordslist:list[str]|list[tuple[str,float]]) -> (list[list[int]] | dict[tuple, float]):
@@ -270,8 +275,8 @@ class Cloneus(GenConfigUtilities):
         self.model, self.tokenizer = load.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         self.tokenizer = self.setup_tokenizer(self.tokenizer)
         
-        self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path)
-        self.base_dtype = AutoConfig.from_pretrained(self.model.config._name_or_path).torch_dtype
+        self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path, trust_remote_code=True)
+        self.base_dtype = AutoConfig.from_pretrained(self.model.config._name_or_path, trust_remote_code=True).torch_dtype
         if self.base_dtype not in [torch.float16, torch.bfloat16]: 
             self.base_dtype = torch.bfloat16 # Avoid ever running as float32
                 

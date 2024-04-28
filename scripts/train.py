@@ -96,7 +96,8 @@ def main(args):
         'unsloth/llama-3-8b-bnb-4bit': 'llama3-8b-4bit',
         'unsloth/llama-3-8b-Instruct-bnb-4bit': 'llama3-8b-instruct-4bit',
         'meta-llama/Meta-Llama-3-8B': 'llama3-8b',
-        'meta-llama/Meta-Llama-3-8B-Instruct': 'llama3-8b-instruct'
+        'meta-llama/Meta-Llama-3-8B-Instruct': 'llama3-8b-instruct',
+        'microsoft/Phi-3-mini-4k-instruct':'Phi-3-mini-4k-instruct'
         
         
         # Add aliases for new models here
