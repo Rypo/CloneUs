@@ -7,8 +7,8 @@ from dataclasses import dataclass
 import discord
 
 import config.settings as settings
-
-RE_USER_TAG = re.compile(r'^\[\w+\]') # Line starts with [authorDisplayName] will NOT match a space
+# https://support.discord.com/hc/en-us/articles/12620128861463-New-Usernames-Display-Names#h_01GXPQABMYGEHGPRJJXJMPHF5C
+RE_USER_TAG = re.compile(r'^\[[\w ]{1,32}\]') # Line starts with [authorDisplayName] will match a space
 RE_EMOJI_RAW = re.compile(r'<a?(:\w+:)\d+>')
 
 def extract_author(msg_content: str):
@@ -120,11 +120,11 @@ def process_seedtext(seed_text):
 
 
 def splitout_tag(model_output, RE_ANY_USERTAG:re.Pattern):
-    if '[/INST]' in model_output:
-        print('WARNING: "[/INST]" found in model_output, returning first split')
-        print(f'Raw Model output:\n {model_output!r}')
-        escinst = re.escape('[/INST]')
-        model_output = re.split(f' *{escinst}',model_output)[0]
+    # if '[/INST]' in model_output:
+    #     print('WARNING: "[/INST]" found in model_output, returning first split')
+    #     print(f'Raw Model output:\n {model_output!r}')
+    #     escinst = re.escape('[/INST]')
+    #     model_output = re.split(f' *{escinst}',model_output)[0]
 
     if len(usplits := RE_ANY_USERTAG.split(model_output)) > 1:
         print('WARNING: Multiple tags found in model_output, returning first split')

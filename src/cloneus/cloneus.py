@@ -1,3 +1,4 @@
+import gc
 import time
 import typing
 import random
@@ -297,7 +298,8 @@ class Cloneus(GenConfigUtilities):
             # use formatted author tags for early stop to prevent unterminated outputs 
             auth_tags = [roles.format_author_tag(u, self.cfg.author_tag) for u in roles.author_display_names]
             self.stop_criteria = [genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0)]
-        
+        if self.tokenizer.chat_template and '[/INST]' in self.tokenizer.chat_template:
+            self.stop_criteria = [genconfig.WordListCriteria.from_words(['[/INST]'], self.tokenizer)]
         
         self.model.eval()
 
@@ -375,8 +377,8 @@ class Cloneus(GenConfigUtilities):
         if self.can_hotswap(cfg, path_data):
             return self._swap_adapter(cfg, path_data, gen_config=gen_config, dtype=dtype)
         
-        if self.cfg.quant_method != cfg.quant_method:
-            self.unload_model()
+        #if self.cfg.quant_method != cfg.quant_method:
+        self.unload_model()
         
         return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm).load_model()
             
@@ -402,7 +404,16 @@ class Cloneus(GenConfigUtilities):
 
         return text
 
-
+    def cleanup_out_texts(self, out_texts: str|list[str]):
+        '''Trim off added stop_criteria words, if any, from model output'''
+        #out_texts = [ot.split(self.cfg.postfix)[0] for ot in output_texts] # old method
+        if self.stop_criteria:
+            for crit in filter(lambda c: isinstance(c, genconfig.WordListCriteria), self.stop_criteria):
+                if isinstance(out_texts, str):
+                    out_texts = crit.trim_stopwords(out_texts)
+                else:
+                    out_texts = [crit.trim_stopwords(text) for text in out_texts]
+        return out_texts
     
     @torch.inference_mode()
     def next_author_probs(self, author_messages: list[tuple[str,str]], top_k_next_tokens: int, author_list: list[str]=None):
@@ -478,7 +489,7 @@ class Cloneus(GenConfigUtilities):
             for inptext in msg_batch:
                 inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True, add_special_tokens=False)
                 input_len = inputs.pop('length')[0].item()
-                output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
+                output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_()
                 output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
             
         print(f'TOTAL BATCHED RUN TIME: {time.perf_counter()-t0:0.2f}s')
@@ -496,10 +507,10 @@ class Cloneus(GenConfigUtilities):
         author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep, postfix='').strip(' ') for author in prompt_authors]
 
         true_batched = (self.gen_alias == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
-        output_texts,input_len = self._batched_helper([trunc_context+ap for ap in author_prompts], true_batch_generate=true_batched)
+        out_texts,input_len = self._batched_helper([trunc_context+ap for ap in author_prompts], true_batch_generate=true_batched)
         
-        # remove any trailing postfix
-        out_texts = [ot.split(self.cfg.postfix)[0] for ot in output_texts]
+        out_texts = self.cleanup_out_texts(out_texts)                
+        
         output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
 
         return trunc_context, author_prompts, out_texts, input_len, output_lens
@@ -513,12 +524,12 @@ class Cloneus(GenConfigUtilities):
 
         input_text = self.tokenizer.batch_decode(inputs.input_ids)[0]
         
-        output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach()
+        output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_()
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
         # weird NOTE: if custom special tokens, decode skip_special_tokens **must**=FALSE. But encode add_special_tokens = (True | False), doesn't mater will be added regardless
         out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.cfg.has_custom_tokens))
-        out_text = out_text.split(self.cfg.postfix)[0] # fixes trailing postfix
+        out_text = self.cleanup_out_texts(out_text)
 
         return input_text, out_text, input_len, output_len
     
@@ -542,13 +553,14 @@ class Cloneus(GenConfigUtilities):
             generated_text += new_text
             yield new_text
         
+        generated_text = self.cleanup_out_texts(generated_text)
         output_len =  self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
 
         self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
 
     
     @torch.inference_mode()
-    def stream_batch_generate(self, author_messages, prompt_authors, prompt_seedtext):
+    def stream_batch_generate(self, author_messages: list[tuple[str,str]], prompt_authors: list[str], prompt_seedtext: str):
         # https://huggingface.co/docs/transformers/internal/generation_utils#transformers.TextStreamer
         self._last_streamed_batch_values = {'input_text':'','author_prompts':[], 'output_texts':[], 'input_len': -1, 'output_lens': []}
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
@@ -578,6 +590,7 @@ class Cloneus(GenConfigUtilities):
                 generated_text += new_text
                 yield i,new_text
             
+            generated_text = self.cleanup_out_texts(generated_text)
             output_len = self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
             
             self._last_streamed_batch_values['output_texts'].append(generated_text)
@@ -811,8 +824,8 @@ class CloneusUA(Cloneus):
         if not author_messages:
             author_messages = [self.filler_message]
         
-        elif len(author_messages) % 2 == 0:
-            author_messages=[self.filler_message,*author_messages]
+        # elif len(author_messages) % 2 == 0:
+        #     author_messages=[self.filler_message,*author_messages]
             #author_messages = author_messages[1:]
         
         rolecycle = itertools.cycle(['user','assistant'])
@@ -822,8 +835,9 @@ class CloneusUA(Cloneus):
         else:
             pcontent = self.cfg.fprompt
             if self.cfg.prompt.append_msg:
-                # TODO: Assess if it's okay to pop(0) even though it will always be the filler message if even
-                pcontent += self.apply_template(*author_messages.pop(0), tag_sep=self.cfg.tag_sep, postfix='')
+                auth, msg = author_messages[0]
+                pcontent += self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep, postfix='')
+                author_messages = author_messages[1:]
             
             chat_content = [{"role": next(rolecycle), "content": pcontent}]
         
