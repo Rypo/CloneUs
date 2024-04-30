@@ -59,7 +59,7 @@ class CloneusManager():
 
     @property
     def yt_session_quota(self):
-        return self.clo.ytm.quota_usage if self.clo else 0
+        return self.ytm.quota_usage if self.clo else 0
     
     @property
     def gen_config(self):
@@ -70,7 +70,7 @@ class CloneusManager():
         return self.clo is not None and self.clo.model is not None
         #return self.status == 'up'
     
-    @cached_property
+    @property
     def hot_swappable_checkpoints(self) -> list[Path] | list:
         if self.is_ready:
             return [c for c in self.all_checkpoints if self.clo.path_data.base_model_alias in str(c)]
@@ -106,6 +106,7 @@ class CloneusManager():
 
         return statuses
     
+    @async_wrap_thread
     def unload(self):
         prekwargs = {'checkpoint_path':self.clo.path_data.checkpoint_path, 'gen_config':self.clo.gen_config, 
                      'dtype':self.clo.cfg.dtype, 'attn_implementation':self.clo.cfg.attn_implementation}
@@ -423,11 +424,11 @@ class CloneusManager():
             model_output = model_output.replace(self.clo.cfg.postfix, '')
         # space at the end of a sentence encodes a special token (28705). Shouldn't pass space in seed text or results are sub optimal  
         text_out = (seed_text + ' ' + model_output) if seed_text else model_output
-        text_out = self.clo.ytm.decode(text_out)
+        text_out = self.ytm.decode(text_out)
         
         llm_output = text_utils.llm_output_transform(text_out, self.emojis)
         
-        llm_output=llm_output.strip()
+        llm_output=llm_output.strip() # strip for models that use \n\n in chat template (llama3)
         
         discord_out = f'[{author}] {llm_output}'
 
