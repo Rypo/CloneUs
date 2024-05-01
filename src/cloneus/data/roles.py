@@ -69,7 +69,7 @@ def to_jinja_template(tag_sep:str, postfix:str):
 
 def check_author_initials():
     if initial_to_author:
-        assert len(set([i.lower() for i in initial_to_author])-set(['i','m','p','x'])) == len(author_display_names), 'Each user must be assigned a unique, case-insensitive initial ∉ {"i","m","p","x"} or char+num(s).'
+        assert len(set([i.lower() for i in initial_to_author])) == len(author_display_names), 'Each user must be assigned a unique, case-insensitive initial or char+num(s).'
 
 def parse_initials(initials_seq:str, return_dispname=False):
     '''aBC|A,b,c|a B c -> [a,b,c]. a2b1c1d11 -> [a2,b1,c1,d11]'''

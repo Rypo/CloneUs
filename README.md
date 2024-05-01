@@ -49,7 +49,7 @@ pip install -e ".[discord]" # For no server, `pip install -e .`. For quant metho
 
 ### Running the Discord Bot
 - Update the `.env` with your `BOT_TOKEN`, `GUILDS_ID`, and `CHANNEL_ID` (and/or the `DEV_*` equivalents for a testing server) if you haven't already.
-- Several commands depend on `authorInitial` being populated in `config/users.json`. Add an uncased unique character or char+digit(s) for each user. Avoid reserved chars {i,m,p,x} unless including a digit.
+- Several commands depend on `authorInitial` being populated in `config/users.json`. Add an uncased unique character or char+digit(s) for each user.
   - If you do not set these, they will assigned for you using first names if set, otherwise display names.
 
 1. Add your trained model to `server/config/models.json`. Use the relative path to your trained checkpoint (e.g. `mistral.../chunk.../cnk8192-.../checkpoint-500`)
