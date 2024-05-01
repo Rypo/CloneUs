@@ -14,12 +14,12 @@ class GenerationFlags(commands.FlagConverter):
     
     max_new_tokens: int       = commands.flag(default=None, aliases=['maxlen'], description='Maximum allowed number of tokens to generate.')
     min_new_tokens: int       = commands.flag(default=None, aliases=['minlen'], description='Minimum allowed number of tokens to generate.')
-    temperature: float        = commands.flag(default=None,  description='Modulation value for next token probabilities.')
+    temperature: float        = commands.flag(default=None, description='Modulation value for next token probabilities.')
     top_k: int                = commands.flag(default=None, description='Number of highest probability vocabulary tokens to keep for top-k-filtering.')
     top_p: float              = commands.flag(default=None, description='Probability threshold for top-p-filtering.')
     
-    penalty_alpha: float      = commands.flag(default=None,description='Balance between model confidence and degeneration penalty.')
-    low_memory: bool          = commands.flag(default=None,description='Switch to sequential topk for contrastive search to reduce peak memory.')
+    penalty_alpha: float      = commands.flag(default=None, description='Balance between model confidence and degeneration penalty.')
+    low_memory: bool          = commands.flag(default=None, description='Switch to sequential topk for contrastive search to reduce peak memory.')
 
     do_sample: bool           = commands.flag(default=None, description='Whether to use sampling or decoding.')
     repetition_penalty: float = commands.flag(default=None, description='Values > 1.0 penalize word repetition.')
@@ -65,11 +65,9 @@ class ModeFlags(commands.FlagConverter):
 
 
 class WordRuleFlags(commands.FlagConverter):
-    banned_words: app_commands.Transform[str, cmd_tfms.WordListTransformer] = commands.flag(name='banned_words', default=None, 
-                                                                                            description='Forbidden words. Comma seperated, CASE & " spa cing" sensitive')
-    #force_words: str = commands.flag(name='force_words', default=None, description='(non-functional) A comma seperated list of forced words')
-    weighted_words: app_commands.Transform[str, cmd_tfms.WordListTransformer]  = commands.flag(name='weighted_words', default=None, 
-                                                                                               description='"words:weight" pairs. Comma seperated, CASE & " spa cing" sensitive')
+    banned_words: app_commands.Transform[str, cmd_tfms.WordListTransformer] = commands.flag(name='banned_words', default=None,) 
+    #force_words: str = commands.flag(name='force_words', default=None, description='(non-functional) A comma separated list of forced words')
+    weighted_words: app_commands.Transform[str, cmd_tfms.WordListTransformer]  = commands.flag(name='weighted_words', default=None,) 
 
 class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     #prompt: str

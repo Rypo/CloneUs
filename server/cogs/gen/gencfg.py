@@ -64,7 +64,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
     @commands.is_owner()
     async def fullauto(self, ctx: commands.Context, autonomous: bool = None):
         self.msgmgr.autonomous = autonomous if autonomous is not None else (not self.msgmgr.autonomous)
-        await self.autoreply(ctx, auto_mode = 'rbest')
+        await self.set_autoreply(ctx, auto_mode = 'rbest')
         await ctx.send(f'full auto: {self.msgmgr.autonomous}', ephemeral=True)
 
     @commands.hybrid_group(name='set')#, fallback='arg')#, description='Quick set a value', aliases=[])
@@ -122,7 +122,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         await ctx.send(f'YouTube link parsing: {"en" if enabled else "dis"}abled.')
 
     @setarg.command(name='ctxlimit')
-    async def ctxlimit(self, ctx: commands.Context, limit: int):
+    async def set_ctxlimit(self, ctx: commands.Context, limit: int):
         """Set the maximum number of messages the bot can store in context. (Default: 31)
         
         Setting limit > Default will increase the *capacity* but will NOT add
@@ -160,7 +160,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
     
     @setarg.command(name='autoreply')
     @app_commands.choices(auto_mode=cmd_choices.AUTO_MODES)
-    async def autoreply(self, ctx: commands.Context, auto_mode: str = 'rbest', 
+    async def set_autoreply(self, ctx: commands.Context, auto_mode: str = 'rbest', 
                         author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer] = None,):
         """When set, bot will automatically respond after *every* (non-command) user message.
         
@@ -168,7 +168,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             auto_mode: Method for automatically choosing the author (default: rbest)
                 rbest  = Random weighted selection (p)
                 irbest = Random inverse weighted selection (1-p)
-                urand  = Uniform random selection (p= 1/5)
+                urand  = Uniform random selection (p= 1/n)
                 top    = Most probable pick (p=1)
 
             author_initials: Unordered sequence of author initials (no spaces). Restricts selection to those authors.
@@ -226,7 +226,9 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         """Enabled random swapping between trained models mid conversation.
         
         Args:
-            change_rate: Average number of messages between model swaps. Set=0 to disable.
+            change_rate: Average number of messages between model swaps. 0 = disable (default: 5)
+            fast_proba: Probability of picking from the pool of hot-swappable models (default: 0.5)
+            announce: If true, send a short, temporary message to indicate a swap is happening (default: True)
         """
         if change_rate < 1:
             self.model_randomization = {}
@@ -265,31 +267,17 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         _ = self.clomgr.update_genconfig({"top_k": 80, "top_p": 0.9, "repetition_penalty": 1.1, "temperature": 1.2})
         await ctx.send(f"Traveled back to {period_msg}. _Paradoxes will void warranty_")
 
-
-
-    @commands.hybrid_command(name='gc')
-    async def genconfig(self, ctx: commands.Context, *, flags: cmd_flags.GenerationFlags):
-        """Set Generation Configuration values."""
-        msgs = []
-        if flags.num_beams is not None and flags.num_beams>1 and self.streaming_mode:
-            self.streaming_mode = False
-            msgs.append('Streaming incompatible with num_beams>1. Streaming disabled.')
-
-        flag_config = dict(flags)#{name: fval for name, fval in flags}
-         # filter out Nones since define special behavor in clo.set_genconf for Nones
-        config_updates = {name: val for name, val in flag_config.items() if val is not None}
-        update_message = self.clomgr.update_genconfig(config_updates)
-        msgs.append(update_message)
-
-        await ctx.send('\n'.join(msgs))
     
     @setarg.command(name='wordrules')
-    async def wordrules(self, ctx: commands.Context, *, flags: cmd_flags.WordRuleFlags):
-        """Set word rules.
+    async def set_wordrules(self, ctx: commands.Context, *, flags: cmd_flags.WordRuleFlags):
+        """Set word rules. To clear, pass '' (empty string).
         
         Note: incompatible with streaming mode.
         Note: works better with `num_beams` > 1
-
+        
+        Args:
+            banned_words: Forbidden words. Comma separated, CASE & " spa cing" sensitive.
+            weighted_words: "words:weight" pairs. Comma separated, CASE & " spa cing" sensitive.
         """
         banwords = flags.banned_words
         weightwords = flags.weighted_words
@@ -311,17 +299,11 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
             
         update_msg = self.clomgr.update_wordlists(banwords, weightwords)
         print(update_msg)
-        #msgs.append(update_msg)
         
-        await ctx.send('\n'.join(msgs))
-
-        
-        #await ctx.send(f'Banned words: `{flags.banned_words}`')
-        #await ctx.send(f"Weighted words: `{flags.weighted_words}`")
-        #await ctx.send(outstr)
+        return await ctx.send('\n'.join(msgs))
 
     @setarg.command(name='sysmsg')
-    async def sysmsg(self, ctx: commands.Context, system_msg: str=None):
+    async def set_sysmsg(self, ctx: commands.Context, system_msg: str=None):
         """Set the default system message for calls to /ask and /chat.
         
         Args:
@@ -330,3 +312,20 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
 
         await ctx.send(f"Default System Message: ({self.default_system_msg} ⇒ {system_msg!r})")
         self.default_system_msg = system_msg
+
+
+    @commands.hybrid_command(name='gc')
+    async def genconfig(self, ctx: commands.Context, *, flags: cmd_flags.GenerationFlags):
+        """Set Generation Configuration values."""
+        msgs = []
+        if flags.num_beams is not None and flags.num_beams>1 and self.streaming_mode:
+            self.streaming_mode = False
+            msgs.append('Streaming incompatible with num_beams>1. Streaming disabled.')
+
+        flag_config = dict(flags)#{name: fval for name, fval in flags}
+         # filter out Nones since define special behavor in clo.set_genconf for Nones
+        config_updates = {name: val for name, val in flag_config.items() if val is not None}
+        update_message = self.clomgr.update_genconfig(config_updates)
+        msgs.append(update_message)
+
+        await ctx.send('\n'.join(msgs))
