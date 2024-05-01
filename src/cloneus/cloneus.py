@@ -89,7 +89,7 @@ class GenConfigUtilities:
     gen_config: GenerationConfig
     tokenizer: transformers.PreTrainedTokenizer
     @property
-    def gen_alias(self):
+    def gen_mode(self):
         """Returns the generation mode triggered by a [`GenerationConfig`] instance."""
         return  self.gen_config.get_generation_mode()
         
@@ -145,27 +145,29 @@ class GenConfigUtilities:
         
         return gconf_settings
 
-    def set_genconfig(self, save_on_change=True, **kwargs) -> dict[str,dict]:
-        '''Set generation config arguments. Special arg "alias" to use presets.
+    def set_genconfig(self, save_on_change=True, preset:str=None, **kwargs) -> dict[str,dict]:
+        '''Set generation config arguments. 
+        
         Args:
-            alias: str
-            'cs' (contrastive search) - penalty_alpha>0 and top_k>1
-            'ms' (multinomial sampling) - num_beams=1 and do_sample=True
-            'gd' (greedy decoding) - num_beams=1 and do_sample=False
-            'bsd' (beam search decoding) - do_sample=False and num_beams>1
-            'bsms' (beam search multinomial sampling) - num_beams>1 and do_sample=True
-            'dbsd' (diverse beam search decoding) - num_beams>1 and num_beam_groups>1
+            save_on_change: If True, save any changes to checkpoint's generation_config.json file.
+            preset: str
+                'cs' (contrastive search) - penalty_alpha>0 and top_k>1
+                'ms' (multinomial sampling) - num_beams=1 and do_sample=True
+                'gd' (greedy decoding) - num_beams=1 and do_sample=False
+                'bsd' (beam search decoding) - do_sample=False and num_beams>1
+                'bsms' (beam search multinomial sampling) - num_beams>1 and do_sample=True
+                'dbsd' (diverse beam search decoding) - num_beams>1 and num_beam_groups>1
             
         https://huggingface.co/docs/transformers/main_classes/text_generation#transformers.GenerationConfig'''
         
-        alias = kwargs.pop('alias',None)
+        
         prev_conf = self.gen_config.to_dict()
         #prev_vals = {k:curconf.get(k) for k in kwargs}
         # NOTE: this prevents a value from being set to the default value, which isn't great, but can't think of a work around.
         
         default_gc = genconfig.GenOpts()
-        if alias is not None:
-            self.gen_config = genconfig.create_genconf(alias, pad_token_id=self.gen_config.pad_token_id, eos_token_id=self.gen_config.eos_token_id, **kwargs) 
+        if preset is not None:
+            self.gen_config = genconfig.preset_gen_config(preset, pad_token_id=self.gen_config.pad_token_id, eos_token_id=self.gen_config.eos_token_id, **kwargs) 
         else:
             # if penalty_alpha is passed, make sure top_k isn't too high
             if kwargs.get('penalty_alpha') and kwargs.get('top_k', self.gen_config.top_k) > 9:
@@ -506,7 +508,7 @@ class Cloneus(GenConfigUtilities):
         # IFF using ' ' as tag_sep, should NOT trail with it
         author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep, postfix='').strip(' ') for author in prompt_authors]
 
-        true_batched = (self.gen_alias == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
+        true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
         out_texts,input_len = self._batched_helper([trunc_context+ap for ap in author_prompts], true_batch_generate=true_batched)
         
         out_texts = self.cleanup_out_texts(out_texts)                

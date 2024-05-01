@@ -95,7 +95,7 @@ class CloneusManager():
             ('vRAM usage', f'{vram_use:,}MiB', f' / {vram_total:,}MiB'),
             ('YouTube quota', self.yt_session_quota+stored_yt_quota,' / 10000',),
             ('Latency', f'{round(self.bot.latency * 1000)}ms',''),
-            ('Generation mode', self.clo.gen_alias,''),
+            ('Generation mode', self.clo.gen_mode,''),
             ('', '\n'.join([f'- {k}: {v}' for k,v in gconf_settings.items()]),''),
             
         ]
@@ -135,7 +135,7 @@ class CloneusManager():
         self.RE_ANY_USERTAG = re.compile(r'(^{}){}'.format('|'.join(esc_authtags), self.clo.cfg.tag_sep), re.MULTILINE) # NOTE: will NOT work if decide to use UPPER or lower case names
         
         model_logger.info(f'Using model:\n - {str(self.clo.path_data.checkpoint_path)} - ({self.clo.torch_dtype} / {self.clo.cfg.attn_implementation})')
-        model_logger.info(f'Generation mode init: "{self.clo.gen_alias}"\n - {self.clo.get_genconfig(verbose=True)}\n')
+        model_logger.info(f'Generation mode init: "{self.clo.gen_mode}"\n - {self.clo.get_genconfig(verbose=True)}\n')
         gc.collect()
     
     async def load_random_model(self, fast_proba=0.5):

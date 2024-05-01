@@ -125,7 +125,7 @@ def eval_ckpt(clo:Cloneus, checkpoint_path:Path, genconfig_modes:list[str], prom
                  'cs':dict(penalty_alpha=0.6, top_k=4, low_memory=False,)}
     
     for gmode in genconfig_modes:
-        _delta= clo.set_genconfig(False, alias=gmode, **compat_kw.get(gmode, {})) #= genconfig.get_config(clo.tokenizer, gmode)
+        _delta= clo.set_genconfig(False, preset=gmode, **compat_kw.get(gmode, {})) #= genconfig.get_config(clo.tokenizer, gmode)
         gconf_line = textborder(gmode.upper() +': '+ json.dumps(clo.get_genconfig(True)), '-', 176, 0)
         inps_outs = gc_inps_outs.setdefault(gconf_line, {})
         

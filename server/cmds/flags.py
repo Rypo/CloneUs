@@ -10,7 +10,7 @@ from . import transformers as cmd_tfms
 
 class GenerationFlags(commands.FlagConverter):
     # alias: typing.Literal['contrastive_search','multinomial_sampling', 'greedy_decoding', 'beam_search_decoding','beam_search_multinomial_sampling', 'diverse_beam_search_decoding']
-    alias: typing.Literal['ms','cs','gd','bsd','bsms','dbsd'] = commands.flag(default=None, name='alias', description='Reset values to default preset state. ("ms" and "cs" are best)')
+    preset: typing.Literal['ms','cs','gd','bsd','bsms','dbsd'] = commands.flag(default=None, name='preset', description='Reset values to default preset state. ("ms" and "cs" are best)')
     
     max_new_tokens: int       = commands.flag(default=None, aliases=['maxlen'], description='Maximum allowed number of tokens to generate.')
     min_new_tokens: int       = commands.flag(default=None, aliases=['minlen'], description='Minimum allowed number of tokens to generate.')
