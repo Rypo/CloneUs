@@ -49,8 +49,12 @@ USER_DATA, author_display_names, author_to_fname, author_to_id, initial_to_autho
 BOT_NAME = USER_DATA['BOT']['displayName']
 
 
-def format_author_tag(user_display_name:str, author_tag:str):
+def format_author_tag(user_display_name:str, author_tag:str, *, insert_raw:bool=False):
+    if insert_raw:
+        return author_tag.format(author=user_display_name, lauthor=user_display_name, fname=author_to_fname)
+    
     return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=author_to_fname.get(user_display_name,user_display_name))
+
 
 def to_jinja_template(tag_sep:str, postfix:str):
     # role will be the pre-formated author tag
