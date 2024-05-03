@@ -20,21 +20,8 @@ from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
 from awq import AutoAWQForCausalLM
-from unsloth import FastLanguageModel
+from unsloth import FastLanguageModel, load_correct_tokenizer
 
-
-def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, *inputs, **kwargs):
-    '''AutoTokenizer.from_pretrained but force padding_side=left, pad_tok=eos_tok'''
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
-    tokenizer.padding_side = 'left'
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    return tokenizer
-
-def warn_tokenizer(tokenizer, flash_attn):
-    print(f'{tokenizer.pad_token=}, {tokenizer.unk_token=}, {tokenizer.eos_token=}')
-    if flash_attn:
-        if tokenizer.padding_side != 'left':
-            warnings.warn('CAUTION: detected padding_side!=left. It may break flash attention. MONITOR')
 
 def cleanup(func):
     @functools.wraps(func)
@@ -44,7 +31,21 @@ def cleanup(func):
         finally:
             torch.cuda.empty_cache()
             gc.collect()
-    return wrapper    
+    return wrapper  
+
+
+def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer=False, *inputs, **kwargs):
+    '''AutoTokenizer.from_pretrained but force padding_side=left, pad_tok=eos_tok'''
+    # Fixes issues with some tokenizers special token spacing. If trained with unsloth, should have fixed+saved already. 
+    # Confirmed necessary for: llama-2, 
+    if refix_tokenizer:
+        tokenizer = load_correct_tokenizer(pretrained_model_name_or_path, trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
+
+    tokenizer.padding_side = 'left'
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
 
         
 @cleanup
@@ -107,16 +108,7 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implem
         quant_config = GPTQConfig(bits=4, use_exllama=True, exllama_config={'version':2})#use_cuda_fp16=True)
         #quant_config = GPTQConfig(bits=4, disable_exllama=True)
     
-    # model = AutoPeftModelForCausalLM.from_pretrained(
-    #     ckpt_dirpath, 
-    #     is_trainable=False,
-    #     quantization_config=quant_config, 
-    #     # use_cache=False, 
-    #     device_map="auto",
-    #     #torch_dtype=dtype, # bf16 appears to not work
-    #     low_cpu_mem_usage=True,
-    #     attn_implementation=attn_implementation,
-    # )
+
     model: transformers.PreTrainedModel = AutoModelForCausalLM.from_pretrained(
         ckpt_dirpath,
         low_cpu_mem_usage=True,
@@ -141,15 +133,19 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
     return llm
 
 
-def load_unsloth(checkpoint_dirpath):
+def load_unsloth(checkpoint_dirpath, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
     warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
     # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name = checkpoint_dirpath,
         max_seq_length = tokenizer.model_max_length,
-        dtype = None,
+        dtype = dtype,
         load_in_4bit = True,
+        trust_remote_code = True,
+        low_cpu_mem_usage=True,
+        attn_implementation=attn_implementation,
+
     )
     
     FastLanguageModel.for_inference(model)
@@ -158,7 +154,7 @@ def load_unsloth(checkpoint_dirpath):
 
 
 @cleanup
-def load_any_inference(model_savedir, **kwargs):
+def load_any_inference(model_savedir, quant_method=None, **kwargs):
     '''Attempt to load any type of model based on model dir structure
     
     if "awq" in model_savedir -> awq
@@ -167,70 +163,49 @@ def load_any_inference(model_savedir, **kwargs):
     (eventually)
     if "gguf" -> llama_cpp
     '''
-    dirstr = str(model_savedir)
-
-    if 'awq' in dirstr:
-        defaults = dict(max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation="flash_attention_2")
-        #defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2", freeze_eval=False)
-        kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-        return load_awq_exl2(model_savedir, **kargs)
-    elif 'merged' in dirstr:
-        defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-        kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-        return load_merged(model_savedir, **kargs)
-    elif 'gptq' in dirstr:
-        defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-        kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-        return load_gptq(model_savedir, **kargs)
-    #else:
-    #    return load_unsloth(model_savedir)
-    else:
-        quant_method = 'aqlm' if 'aqlm' in dirstr else 'bnb4'
-        #defaults = dict(quant_method=quant_method, dtype='auto', attn_implementation="flash_attention_2")
-        defaults = dict(quant_method=quant_method, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-        kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-        return load_peft(model_savedir, **kargs)
-    # else:
-    #     defaults = dict(quant_method='bnb4', dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-    #     kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-    #     return load_unmerged(model_savedir, **kargs)
-        #raise ValueError('Unable to determine model type from model_savedir path')
-
-def _overide_embeddings(model, checkpoint_dirpath):
-    emb_path = Path(checkpoint_dirpath).joinpath('../embeddings/')
-
-    in_emb = model.get_input_embeddings()
-    in_emb.weight.data = torch.load(emb_path/'input_embed_weights.bin')
-
-    out_emb = model.get_output_embeddings()
-    out_emb.weight.data = torch.load(emb_path/'output_embed_weights.bin')
     
-    return model
+    quant_load_methods = ['awq','merged','gptq','gguf','unsloth','aqlm','bnb4', ]
+    dirstr = str(model_savedir)
+    
+    if quant_method is None:        
+        quant_method = next(filter(lambda q: q in dirstr, quant_load_methods), 'bnb4')
 
+    match quant_method:
+        case 'awq':
+            defaults = dict(max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation="flash_attention_2")
+            #defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2", freeze_eval=False)
+            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+            return load_awq_exl2(model_savedir, **kargs)
+        case 'merged':
+            defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+            return load_merged(model_savedir, **kargs)
+        case 'gptq':
+            defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+            return load_gptq(model_savedir, **kargs)
+        case 'gguf':
+            defaults = dict(n_gpu_layers=-1, n_ctx=8192)
+            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+            raise NotImplementedError('GGUF is not (yet) supported')
+            #return load_gguf(model_savedir, **kargs)
+        case 'unsloth':
+            defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+            return load_unsloth(model_savedir, **kargs)
+        
+        case _: # 'aqlm' , 'bnb4'
+            defaults = dict(quant_method=quant_method, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+            return load_peft(model_savedir, **kargs)
+        
+        # else:
+        #     defaults = dict(quant_method='bnb4', dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+        #     kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
+        #     return load_unmerged(model_savedir, **kargs)
 
-def load_unmerged_customtoks(tokenizer, checkpoint_dirpath,  quant_config, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
-    lora_config = PeftConfig.from_pretrained(checkpoint_dirpath)
-    model_id = lora_config.base_model_name_or_path
+            #raise ValueError('Unable to determine model type from model_savedir path')
 
-    model: transformers.PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        low_cpu_mem_usage=True,
-        quantization_config=quant_config,
-        device_map="auto",
-        # CANNOT USE: use_safetensors=True, since I stopped saving the full model
-        torch_dtype=dtype,
-        attn_implementation=attn_implementation, 
-    )
-
-    model.resize_token_embeddings(len(tokenizer))
-    model = _overide_embeddings(model, checkpoint_dirpath)
-
-    lora_config = PeftConfig.from_pretrained(checkpoint_dirpath)
-    model.add_adapter(lora_config)
-
-    warn_tokenizer(tokenizer, attn_implementation)
-
-    return model, tokenizer
 
 def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PeftModelForCausalLM, transformers.PreTrainedTokenizerFast]:
     t0=time.perf_counter()
@@ -256,7 +231,7 @@ def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, att
     
     model = AutoPeftModelForCausalLM.from_pretrained(checkpoint_dirpath, **pt_kwargs,)
     
-    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)#AutoTokenizer.from_pretrained(checkpoint_dirpath)
+    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
     print(f'load_peft: {time.perf_counter()-t0:0.2f}s')
     return model, tokenizer
 
@@ -298,7 +273,7 @@ def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16,
         model.add_adapter(lora_config)
         #model = PeftModel.from_pretrained(model, checkpoint_dirpath)
     
-    warn_tokenizer(tokenizer, attn_implementation)
+    
     print(f'load_unmerged: {time.perf_counter()-t0:0.2f}s')
     return model, tokenizer
 
@@ -321,10 +296,9 @@ def load_unmerged_lowrsc(checkpoint_dirpath, quant_config=None, dtype=None, attn
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16
     )
+    
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
 
-    #if len(tokenizer) > 32000:
-    #    return load_unmerged_customtoks(tokenizer, checkpoint_dirpath, quant_config, dtype=dtype, attn_implementation=attn_implementation)
         
     model: transformers.PreTrainedModel = AutoModelForCausalLM.from_pretrained(
         checkpoint_dirpath,
@@ -342,7 +316,6 @@ def load_unmerged_lowrsc(checkpoint_dirpath, quant_config=None, dtype=None, attn
         lora_config = PeftConfig.from_pretrained(checkpoint_dirpath)
         model.add_adapter(lora_config)
 
-    #warn_tokenizer(tokenizer, attn_implementation)
     
     return model, tokenizer
 
@@ -363,16 +336,14 @@ def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_im
         use_safetensors=True,
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
-        #use_flash_attention_2=use_flash,
     )
     #.to_bettertransformer()
     
-    # NOTE: Unless use dutil.get_tokenizer with **NOT** set the pad id, or set padside=right
-    #tokenizer = dutil.get_tokenizer(model.config._name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(merged_savedir)
-    warn_tokenizer(tokenizer, attn_implementation)
+    tokenizer = auto_inference_tokenizer(merged_savedir)
+    
     
     return model, tokenizer
+
 
 def _model_to_merged(ckpt_dir_path, low_mem=True):
     config = PeftConfig.from_pretrained(ckpt_dir_path)
