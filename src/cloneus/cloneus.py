@@ -87,7 +87,7 @@ def dtype_to(dtype, to:typing.Literal['str','torch'], default=None):
 class GenConfigUtilities:
     path_data: ModelPathComponents
     gen_config: GenerationConfig
-    tokenizer: transformers.PreTrainedTokenizer
+
     @property
     def gen_mode(self):
         """Returns the generation mode triggered by a [`GenerationConfig`] instance."""
@@ -106,38 +106,9 @@ class GenConfigUtilities:
         else:
             raise RuntimeError(f'Unable to process gen_config of type {type(gen_config)!r}')
 
-        tokenizer = load.auto_inference_tokenizer(path_data.checkpoint_path)
-        
-        gen_config.pad_token_id = tokenizer.pad_token_id
-        gen_config.eos_token_id = tokenizer.eos_token_id
-        
-        # TODO: This is going to become a mess if this trend continues. Need a automated way to do this.
-        # Llama3 workaround, can't rely on base model generation config in case using the non-instruct version.
-        # Check chat_template instead of tokens list in case using custom template override.
-        if tokenizer.chat_template and '<|eot_id|>' in tokenizer.chat_template:
-            gen_config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids('<|eot_id|>')]
-            print(f'Using Llama3 format - <|eot_id|> added. eos_token_id: ({gen_config.eos_token_id})')        
-        # Phi-3 workaround
-        if tokenizer.chat_template and '<|end|>' in tokenizer.chat_template:
-            gen_config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids('<|end|>')]
-            print(f'Using Phi-3 format - <|end|> added. eos_token_id: ({gen_config.eos_token_id})')
-
         return gen_config
             
-    def encode_wordslist(self, wordslist:list[str]|list[tuple[str,float]]) -> (list[list[int]] | dict[tuple, float]):
-        '''Use for GenerationConfig `bad_words_ids`, `force_words_ids`, or (if weights passed) with `sequence_bias`'''
-        weights=None
-        
-        if isinstance(wordslist[0],tuple):
-            wordslist,weights = list(zip(*wordslist))
-        
-        tokens = self.tokenizer(wordslist, add_special_tokens=False).input_ids
-        if weights is not None:
-            assert len(wordslist) == len(weights), 'all words need a weight'
-            return {tuple(t):w for t,w in zip(tokens,weights)}
-        
-        return tokens
-    
+
     def get_genconfig(self, verbose=False) -> dict:
         gconf_settings = self.gen_config.to_diff_dict().copy()
         if not verbose:
@@ -165,9 +136,13 @@ class GenConfigUtilities:
         #prev_vals = {k:curconf.get(k) for k in kwargs}
         # NOTE: this prevents a value from being set to the default value, which isn't great, but can't think of a work around.
         
-        default_gc = genconfig.GenOpts()
+        
+        default_gc = genconfig.GenOptsExtended()
         if preset is not None:
-            self.gen_config = genconfig.preset_gen_config(preset, pad_token_id=self.gen_config.pad_token_id, eos_token_id=self.gen_config.eos_token_id, **kwargs) 
+            if preset == 'random':
+                self.gen_config = genconfig.randomize_preset(self.gen_config)
+            else:
+                self.gen_config = genconfig.preset_gen_config(preset, pad_token_id=self.gen_config.pad_token_id, eos_token_id=self.gen_config.eos_token_id, **kwargs) 
         else:
             # if penalty_alpha is passed, make sure top_k isn't too high
             if kwargs.get('penalty_alpha') and kwargs.get('top_k', self.gen_config.top_k) > 9:
@@ -178,22 +153,41 @@ class GenConfigUtilities:
                 kwargs.setdefault('do_sample', True) # if it is explicitly set, let it ride. Important if need to do beam decoding for some reason
                 if kwargs.get('top_k') is None and self.gen_config.top_k <= 9: # if it is explicitly passed a low top_k, let it be
                     kwargs['top_k'] = default_gc.top_k
+
+            if kwargs.get('dynamic_temperature'):
+                dynatemp_low = kwargs.setdefault('dynatemp_low', self.gen_config.dynatemp_low)
+                dynatemp_high = kwargs.setdefault('dynatemp_high', self.gen_config.dynatemp_high)
+                if dynatemp_low == dynatemp_high:
+                    kwargs['dynatemp_low'] = 0.5
+                    kwargs['dynatemp_high'] = 1.5
             
+
             self.gen_config.update(**kwargs)
         
         new_conf = self.gen_config.to_dict()
-
-        #new_vals = {k:newconf.get(k) for k in kwargs}
         
         changes = {}
-        if save_on_change and prev_conf != new_conf:
+        if prev_conf != new_conf:
             changes = {k: {'prev':prev_conf[k], 'new':new_conf[k]} for k in new_conf if prev_conf[k]!=new_conf[k]}
-            sequence_bias = self.gen_config.sequence_bias # cannot serialize tuples
-            self.gen_config.sequence_bias=None
-            self.gen_config.save_pretrained(self.path_data.checkpoint_path, 'generation_config.json')
-            self.gen_config.sequence_bias=sequence_bias
+            if save_on_change:
+                self.save_genconfig()
         
         return changes
+    
+    def save_genconfig(self, filepath:str|Path=None):
+        sequence_bias = self.gen_config.sequence_bias # cannot serialize tuples
+        self.gen_config.sequence_bias=None
+        
+        if filepath is None:
+            save_directory = self.path_data.checkpoint_path
+            self.gen_config.save_pretrained(save_directory, 'generation_config.json')
+        else:
+            filepath = Path(filepath)
+            self.gen_config.save_pretrained(filepath.parent, filepath.with_suffix('.json').name)
+        
+        
+        self.gen_config.sequence_bias=sequence_bias
+        
 
 class Cloneus(GenConfigUtilities):
     # def __init__(self, *args, **kwargs):
@@ -219,6 +213,8 @@ class Cloneus(GenConfigUtilities):
 
     @property
     def torch_dtype(self):
+        if self.model:
+            return self.model.dtype
         return dtype_to(self.cfg.dtype, 'torch', default=None)  
     
     def config_path_data(self, checkpoint_path:str|Path, **kwargs):
@@ -228,24 +224,49 @@ class Cloneus(GenConfigUtilities):
         config = OmegaConf.load(path_data.config_path)
         config.update(**{k:v for k,v in kwargs.items() if v is not None}) # filter to avoid overwriting with None
                    
-
         print(self.torch_dtype, config.attn_implementation) # Don't stop printing until fixed double call issue
         
+        # Try to overide even if model wasen't trained with flash attn
+        if config.attn_implementation is None:
+            config.attn_implementation = 'flash_attention_2'
+        
+        if not config.postfix:
+            config.postfix = ''
 
         return config,path_data
     
-    def setup_tokenizer(self, tokenizer_or_path:transformers.PreTrainedTokenizer|Path):
-        '''Be careful, if you pass a tokenizer with already overwriten chat_template it will not refresh it'''
-        if isinstance(tokenizer_or_path, (str, Path)):
-            tokenizer = load.auto_inference_tokenizer(tokenizer_or_path)
-        else:
-            tokenizer = tokenization.set_tokenizer_inference(tokenizer_or_path)
+    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: list[transformers.StoppingCriteria]|None = None):
+        '''Sets special cases for eos_tokens and stopping criteria'''
+        tokenizer = tokenization.set_tokenizer_inference(tokenizer)
 
-        # For foundation models, add a chat template derived from tag markup
-        if tokenizer.chat_template is None:
-            tokenizer.chat_template = roles.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
+        #if gen_config.pad_token_id is None or gen_config.eos_token_id is None:
+        gen_config.pad_token_id = tokenizer.pad_token_id
+        gen_config.eos_token_id = tokenizer.eos_token_id
         
-        return tokenizer
+        if tokenizer.chat_template: 
+            # TODO: This is going to become a mess if this trend continues. Need a automated way to do this.
+            #  can't rely on base model generation config in case using the non-instruct version.
+            
+            extra_eos = {
+                'Llama-3':'<|eot_id|>', 
+                'Phi-3':'<|end|>',
+            }
+            for model_type, x_eos in extra_eos.items():
+                # Check chat_template instead of tokens list in case using custom template override.
+                if x_eos in tokenizer.chat_template:
+                    new_eos = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids(x_eos)]
+                    if gen_config.eos_token_id != new_eos:
+                        print(f'Using {model_type} format - {x_eos} added. eos_token_id: ({gen_config.eos_token_id})')     
+                        gen_config.eos_token_id = new_eos
+
+            # mistral models use [/INST] but it's NOT a single token, so can't be used in gc.eos_token_id.
+            # In order to have model generate on both assistant AND user, need to stop on it.
+            if '[/INST]' in tokenizer.chat_template:
+                if stop_criteria is None:
+                    stop_criteria = []
+                stop_criteria += [genconfig.WordListCriteria.from_words(['[/INST]'], tokenizer)]
+
+        return tokenizer, gen_config, stop_criteria
 
 
     @staticmethod
@@ -274,9 +295,8 @@ class Cloneus(GenConfigUtilities):
         
     @load.cleanup
     def load_model(self):
-        
         self.model, self.tokenizer = load.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
-        self.tokenizer = self.setup_tokenizer(self.tokenizer)
+        self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=None)
         
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path, trust_remote_code=True)
         self.base_dtype = AutoConfig.from_pretrained(self.model.config._name_or_path, trust_remote_code=True).torch_dtype
@@ -292,16 +312,6 @@ class Cloneus(GenConfigUtilities):
             self.cfg.base_tune_type, self.base_has_system,
             (self.cfg.fprompt and not self.cfg.prompt.append_msg), (self.cfg.custom_chat_template is not None)
         ))
-
-        self.stop_criteria = None
-        if self.cfg.postfix == '\n\n':
-            self.stop_criteria = [genconfig.WordListCriteria.from_words(['\n\n'], self.tokenizer, device=0)]
-        elif self.cfg.postfix == '\n':
-            # use formatted author tags for early stop to prevent unterminated outputs 
-            auth_tags = [roles.format_author_tag(u, self.cfg.author_tag) for u in roles.author_display_names]
-            self.stop_criteria = [genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0)]
-        if self.tokenizer.chat_template and '[/INST]' in self.tokenizer.chat_template:
-            self.stop_criteria = [genconfig.WordListCriteria.from_words(['[/INST]'], self.tokenizer)]
         
         self.model.eval()
 
@@ -319,7 +329,7 @@ class Cloneus(GenConfigUtilities):
         torch_dtype = dtype_to(dtype, to='torch')
         if self.model.dtype != torch_dtype:
             try:
-                self.model.to(dtype=dtype)
+                self.model.to(dtype=torch_dtype)
             except Exception as e:
                 # AWQ will throw error if attempt to pass dtype in .to()
                 print(e)
@@ -350,7 +360,7 @@ class Cloneus(GenConfigUtilities):
                 param.requires_grad_(False)
         
         if gen_config is not None:
-            self.load_genconfig(gen_config, new_path_data)
+            self.gen_config = self.load_genconfig(gen_config, new_path_data)
 
         if dtype is not None:
             self.cast_dtype(dtype=dtype)
@@ -358,7 +368,8 @@ class Cloneus(GenConfigUtilities):
         # For foundation models, changing the config changes how the tokenizer should behave.
         # So, to be safe just reload the tokenizer if config changes
         if self.path_data.config_path != new_path_data.config_path:
-            self.tokenizer = self.setup_tokenizer(new_path_data.checkpoint_path)
+            self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=self.stop_criteria)
+            #self.tokenizer = self.setup_tokenizer(new_path_data.checkpoint_path)
 
         self.cfg, self.path_data = new_cfg, new_path_data
         
@@ -386,23 +397,28 @@ class Cloneus(GenConfigUtilities):
             
         
 
-    def apply_template(self, author:str, text_content:str, tag_sep:str, postfix:str):
+    def apply_template(self, author:str, text_content:str, tag_sep:str):
         atag=roles.format_author_tag(author, self.cfg.author_tag)
-        return f'{atag}{tag_sep}{text_content}{postfix}'
+        return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
+
+    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
+        raise NotImplementedError('Cloneus is designed to be instantiated via Cloneus.from_pretrained')
 
     def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        raise NotImplementedError('Cloneus class not called directly')
-
-
+        text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+        text = self.ytm.encode(text)
+        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep)
+    
+        return text
+    
     def append_author_seedtext(self, text: str, prompt_author_seedtext: tuple[str,str], tag_sep:str=None):
-        if tag_sep is None:
-            tag_sep = self.cfg.tag_sep
-
         if prompt_author_seedtext is not None:
+            if tag_sep is None:
+                tag_sep = self.cfg.tag_sep
             author, seedtext = prompt_author_seedtext
             if seedtext is None:
                 seedtext = ''
-            text += self.apply_template(author, seedtext, tag_sep, postfix='').strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
+            text += self.apply_template(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
 
         return text
 
@@ -417,6 +433,21 @@ class Cloneus(GenConfigUtilities):
                     out_texts = [crit.trim_stopwords(text) for text in out_texts]
         return out_texts
     
+    def encode_wordslist(self, wordslist:list[str]|list[tuple[str,float]]) -> (list[list[int]] | dict[tuple, float]):
+        '''Use for GenerationConfig `bad_words_ids`, `force_words_ids`, or (if weights passed) with `sequence_bias`'''
+        weights=None
+        
+        if isinstance(wordslist[0],tuple):
+            wordslist,weights = list(zip(*wordslist))
+        
+        tokens = self.tokenizer(wordslist, add_special_tokens=False).input_ids
+        if weights is not None:
+            assert len(wordslist) == len(weights), 'all words need a weight'
+            return {tuple(t):w for t,w in zip(tokens,weights)}
+        
+        return tokens
+
+
     @torch.inference_mode()
     def next_author_probs(self, author_messages: list[tuple[str,str]], top_k_next_tokens: int, author_list: list[str]=None):
         '''Returns a list of (authtok, proba) pairs. Note this is only the FIRST part of an author name unless author_list is provided.
@@ -426,12 +457,14 @@ class Cloneus(GenConfigUtilities):
         # - https://huggingface.co/docs/transformers/main_classes/text_generation#transformers.GenerationMixin.compute_transition_scores
         # In theory, could allow seed text by comparing prob of each author saying seed_text given context. But that's a lot more work. 
         # Might be an easier way with BeamScorer
-        input_text = self.to_text_input(author_messages, prompt_author_seedtext=None)
-
-        # leave this as max_new_tokens because assume setting to 1 could include context that changes the author
-        #trunc_input_text = self.discrete_front_truncate(input_text, self.gen_config.max_new_tokens) 
         # fill tag to split on a known fixed value. Allows author_tag to change without breaking.
-        input_text += self.cfg.author_tag.format(author='#DUMMY', lauthor='#DUMMY', fname='#NAME').split('#DUMMY',1)[0]
+        # needs to be lower case for compat with lauthor. TODO: fix
+        FAKE_AUTH_MSG = ('###dummy_author_name', '###dummy_message_content')
+        input_text = self.to_text_input(author_messages+[FAKE_AUTH_MSG], prompt_author_seedtext=None)
+        
+        # By splitting on dummy author, all prior formatting will be applied exactly, take this and discard the rest
+        input_text = input_text.split(FAKE_AUTH_MSG[0], maxsplit=1)[0]
+        #print(input_text)
         inputs = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)
 
         author_gen_config = GenerationConfig(
@@ -461,7 +494,7 @@ class Cloneus(GenConfigUtilities):
                 author_list = [a.lower() for a in author_list] # make sure are lower cased if using lauthor
             for i, (aseg, prob) in enumerate(authtok_prob_pairs):
                 try:
-                    authtok_prob_pairs[i] = (next(filter(lambda a: a.startswith(aseg),author_list)), prob)
+                    authtok_prob_pairs[i] = (next(filter(lambda a: a.startswith(aseg.strip()),author_list)), prob)
                 except StopIteration:
                     print(f'WARNING: could not match "{aseg}" author in `author_list`, using ("{aseg}", {prob}) in return')
                     #authtok_prob_pairs.append((aseg, prob))
@@ -493,8 +526,8 @@ class Cloneus(GenConfigUtilities):
                 input_len = inputs.pop('length')[0].item()
                 output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_()
                 output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
-            
-        print(f'TOTAL BATCHED RUN TIME: {time.perf_counter()-t0:0.2f}s')
+
+        print(('TRUE' if true_batch_generate else 'MOCK' ) + f' BATCH RUN TIME: {time.perf_counter()-t0:0.2f}s')
         #print('Raw Batch Outputs:\n', self.tokenizer.batch_decode(outputs, skip_special_tokens=False))
         
         # use last input_len for all. Shouldn't differ by more than a few tokens as long as author_tags are reasonable
@@ -503,19 +536,19 @@ class Cloneus(GenConfigUtilities):
 
     @torch.inference_mode()
     def batch_generate(self, author_messages: list[tuple[str,str]], prompt_authors: list[str], prompt_seedtext: str) -> tuple[str, list[str], list[str], int, list[int]]:
-        trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
+        input_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
         if prompt_seedtext is None: prompt_seedtext = ''
         # IFF using ' ' as tag_sep, should NOT trail with it
-        author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep, postfix='').strip(' ') for author in prompt_authors]
+        author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep).strip(' ') for author in prompt_authors]
 
         true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
-        out_texts,input_len = self._batched_helper([trunc_context+ap for ap in author_prompts], true_batch_generate=true_batched)
+        out_texts,input_len = self._batched_helper([input_context+ap for ap in author_prompts], true_batch_generate=true_batched)
         
-        out_texts = self.cleanup_out_texts(out_texts)                
+        out_texts = self.cleanup_out_texts(out_texts)
         
         output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
 
-        return trunc_context, author_prompts, out_texts, input_len, output_lens
+        return input_context, author_prompts, out_texts, input_len, output_lens
    
     @torch.inference_mode()
     def generate(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]) -> tuple[str, str, int, int]:
@@ -542,12 +575,11 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=(not self.cfg.has_custom_tokens))
 
-        trunc_input_text = self.to_text_input(author_messages, prompt_author_seedtext)
-        inputs = self.tokenizer(trunc_input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
+        input_text = self.to_text_input(author_messages, prompt_author_seedtext)
+        inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
         input_len = inputs.pop('length')[0].item()
 
-        neg_inp=None#self.neg_inpids(prompt_author_seedtext[0])
-        genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=neg_inp)
+        genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
         thread = Thread(target=self.model.generate, kwargs=genkwargs)
         thread.start()
         generated_text = ""
@@ -558,7 +590,7 @@ class Cloneus(GenConfigUtilities):
         generated_text = self.cleanup_out_texts(generated_text)
         output_len =  self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
 
-        self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
+        self._last_streamed_values.update({'input_text':input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
 
     
     @torch.inference_mode()
@@ -568,16 +600,11 @@ class Cloneus(GenConfigUtilities):
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
        
-        trunc_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
+        input_context = self.to_text_input(author_messages, prompt_author_seedtext=None)
         if prompt_seedtext is None: prompt_seedtext = ''
         # IFF using ' ' as tag_sep, should NOT trail with it
-        author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep, postfix='').strip(' ') for author in prompt_authors]
-        #inputs, author_prompts = self._batch_process(trunc_context, prompt_authors, prompt_seedtext)
-        #inputs, trunc_context, author_prompts = self._batch_process(author_messages, prompt_authors, prompt_seedtext)
-        msg_batch = [trunc_context+ap for ap in author_prompts]
-        #input_len = inputs.pop('length')[0].item()
-        
-        #inps=inputs.to(0)
+        author_prompts = [self.apply_template(author, prompt_seedtext, self.cfg.tag_sep).strip(' ') for author in prompt_authors]
+        msg_batch = [input_context+ap for ap in author_prompts]
 
         for i, inptext in enumerate(msg_batch):
             inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True, add_special_tokens=False)
@@ -599,7 +626,7 @@ class Cloneus(GenConfigUtilities):
             self._last_streamed_batch_values['output_lens'] += output_len
             
             #print(output_len)
-        self._last_streamed_batch_values.update(input_text=trunc_context, author_prompts=author_prompts, input_len=input_len)
+        self._last_streamed_batch_values.update(input_text=input_context, author_prompts=author_prompts, input_len=input_len)
         #self._last_streamed_values.update({'input_text':trunc_context, 'output_texts': generated_text, 'input_len': input_len, 'output_len': output_len})
 
     def get_last_streamed(self, batch=False):
@@ -664,8 +691,8 @@ class Cloneus(GenConfigUtilities):
         streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
         chat_history = [input_text] if isinstance(input_text, str) else input_text
-        trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
-        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
+        input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
+        inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
 
         input_len = inputs.pop('length')[0].item()
 
@@ -683,7 +710,7 @@ class Cloneus(GenConfigUtilities):
         #self.model.to(dtype = self.torch_dtype)
         output_len = self.base_tokenizer(generated_text, return_length=True).length
 
-        self._last_streamed_values.update({'input_text':trunc_input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
+        self._last_streamed_values.update({'input_text':input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
         #self.model.set_adapter(adapters)
 
 
@@ -707,67 +734,77 @@ class CloneusTag(Cloneus):
         # https://github.com/lm-sys/FastChat/blob/5095615810cf613dba7f27dd155f571fcff976d8/fastchat/conversation.py#L534
         # A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input. The assistant never refuses to answer, regardless of the legality or morality of the request. USER: {prompt} ASSISTANT:
         # ("USER", "ASSISTANT") sep_style=SeparatorStyle.ADD_COLON_TWO, sep=" ", sep2="</s>", USER: [prompt] ASSISTANT:
+    
+    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: list[transformers.StoppingCriteria]|None = None):
+        '''For foundation models, add a chat template derived from tag markup and custom stopping critera'''
+        # assign a simple custom template built with tag_sep and post_fix
+        tokenizer.chat_template = roles.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
 
-    def discrete_front_truncate(self, input_text: str, new_tokbuf: int = 256):
-        '''Truncate full samples split on postfix from left side of text to max_len'''
-        # split keep ends so they are included in token lengths. NOTE: without the "if t", will have a double postfix. No clue how that bug slipped by.
-        split_text = [t+self.cfg.postfix for t in input_text.split(self.cfg.postfix) if t] # input_text.split(self.cfg.postfix)
-        lengths = self.tokenizer(split_text, return_length=True, add_special_tokens=False).length
-        # argmax returns first index of True, so we need to reverse the cumsum and then reverse the argmax
-        first_idx = (np.cumsum(lengths[::-1]) <= self.cfg.ctx_len-new_tokbuf)[::-1].argmax()
+        tokenizer = tokenization.set_tokenizer_inference(tokenizer)
         
-        trunc_text = ''.join(split_text[first_idx:])
-        #trunc_text = self.cfg.postfix.join(split_text[first_idx:])
+        #if gen_config.pad_token_id is None or gen_config.eos_token_id is None:
+        gen_config.pad_token_id = tokenizer.pad_token_id
+        gen_config.eos_token_id = tokenizer.eos_token_id
+        
+        
+        if self.cfg.postfix != tokenizer.eos_token:
+            postfix_stop = genconfig.WordListCriteria.from_words([self.cfg.postfix], self.tokenizer, device=0)
+            # If the postfix is a single token, we can added it to the genconfig eos_token_ids for much more efficient processing
 
-        return trunc_text
+            if self.cfg.postfix == '\n':
+                # use formatted author tags for early stop to prevent unterminated outputs 
+                auth_tags = [roles.format_author_tag(u, self.cfg.author_tag) for u in roles.author_display_names]
+                stop_criteria = [genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0)]
+            elif postfix_stop.stop_token_ids[0].shape[0] == 1:
+                stop_criteria = None
+                self.gen_config.eos_token_id = [tokenizer.eos_token_id, postfix_stop.stop_token_ids[0].item()]
+                print(f'Using custom postfix eos_token {self.cfg.postfix!r} EOS: {self.gen_config.eos_token_id}')
+            else:
+                stop_criteria = [postfix_stop]
+        
+        # If model was trained with broken eos (i.e. no space between) it will fail to stop on eos
+        # e.g. llama-2: "a </s>" -> input_ids=[263, 2]. But "a</s>" -> input_ids=[263, 829, 29879, 29958] (['</', 's', '>'])
+        if tokenizer.eos_token in self.cfg.postfix:
+            eos_tok_id = tokenizer(f'{tokenizer.eos_token}', add_special_tokens=False)['input_ids']
+            ns_eos_tok_id = tokenizer(f'A{tokenizer.eos_token}', add_special_tokens=False)['input_ids'][1:]
+            if eos_tok_id != ns_eos_tok_id:
+                pre_tag = roles.format_author_tag(user_display_name='###DUMMY', author_tag=self.cfg.author_tag, insert_raw=True).split('###DUMMY')[0]
+                
+                eos_pre_tag = f'{tokenizer.eos_token}{pre_tag}'
+                ns_eos_pre_tag_id = tokenizer(f'A{eos_pre_tag}', add_special_tokens=False)['input_ids'][1:]
+                
+                broken_eos_stop = genconfig.WordListCriteria(
+                    [torch.tensor(ns_eos_tok_id).to(0), torch.tensor(ns_eos_pre_tag_id).to(0)], 
+                    [tokenizer.eos_token, eos_pre_tag]
+                )
+                
+                print(f'Broken eos detected. Adding stop crit for segmented eos {tokenizer.batch_decode(ns_eos_tok_id)!r} + eos_pre_tag {tokenizer.batch_decode(ns_eos_pre_tag_id)!r}')
 
-    # def to_foundation_format(self, author_messages: list[tuple[str,str]]):        
-    #     input_text = ''.join([self.apply_template(a,t, self.cfg.tag_sep, postfix=self.cfg.postfix) for a,t in author_messages])
-    #     return input_text
+                if stop_criteria is None:
+                    stop_criteria = []
+                stop_criteria += [broken_eos_stop]
 
-    def to_foundation_format(self, author_messages: list[tuple[str,str]]):
+        # print('GC EOS, TK EOS, POSTFIX:', gen_config.eos_token_id, tokenizer.eos_token, self.cfg.postfix)
+        # print(['Words: {}, ids: {}'.format(s.words, s.stop_token_ids) for s in (stop_criteria if stop_criteria is not None else [])])
+        if stop_criteria == []:
+            stop_criteria = None
+            
+        return tokenizer, gen_config, stop_criteria
+    
+
+    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
         '''For tag only, markup free, format'''
-        # why Foundation? : https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation
-        # if not author_messages:
-        #     author_messages = [self.filler_message]
-        
+        # why Foundation? : https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation        
+        # input_text = ''.join([self.apply_template(a,t, self.cfg.tag_sep, postfix=self.cfg.postfix) for a,t in author_messages])
         chat_content = []
-
-        #if self.use_sysprompt:
-        # chat_content.append({"role": "system", "content": self.cfg.fprompt})
         
         for author,message in author_messages:
-            role_tag = roles.format_author_tag(author, self.cfg.author_tag)
+            role_tag = roles.format_author_tag(author, self.cfg.author_tag) # for TagFormat, tag_sep is baked in to chat_template via to_jinja_template
             chat_content.append({"role": role_tag, "content": message})
         
         return chat_content
-
-    # def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-    #     text = self.to_foundation_format(author_messages)
-    #     text = self.ytm.encode(text)
-
-    #     if (text_len:=self.tokenizer(text, return_length=True).length[0]) >= self.cfg.ctx_len:
-    #         # technically this can still go over the limit undetected after adding author tag/ seed text, but going to let it slide for now unless it becomes an issue.
-    #         print(f'MAX CONTENT LENGTH EXCEEDED. Front Truncating. {text_len} ≥ {self.cfg.ctx_len}')
-    #         text = self.discrete_front_truncate(text, self.gen_config.max_new_tokens)
-        
-    #     text = self.append_author_seedtext(text, prompt_author_seedtext)
-        
-    #     if f'{self.cfg.postfix}{self.cfg.postfix}' in text:
-    #         print('ERROR: Double postfix found in input text')
-    #         print(repr(text))
-
-    #     return text
     
 
-    
-    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
-        text = self.tokenizer.apply_chat_template(self.to_foundation_format(author_messages), tokenize=False, add_generation_prompt=True)
-        text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep)
-    
-        return text
 
     
 class CloneusRole(Cloneus):
@@ -775,16 +812,15 @@ class CloneusRole(Cloneus):
     user/assistant, instead uses users,names in place of user/assistant. Requires a system message.
     
     e.g.
+        <|im_start|>system
+        A conversation between Bob and a well meaning tree<|im_end|>
         <|im_start|>Beta (Bob)
         How's everyone<|im_end|>
         <|im_start|>Groot (Groot)
         I am Groot<|im_end|>
     '''
-    def to_chat_format(self, author_messages: list[tuple[str,str]]):
+    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
         '''For chatml with custom roles as usernames'''
-        # if not author_messages:
-        #     author_messages = [self.filler_message]
-        
         chat_content = []
 
         #if self.use_sysprompt:
@@ -796,14 +832,6 @@ class CloneusRole(Cloneus):
         
         return chat_content
     
-    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
-        text = self.tokenizer.apply_chat_template(self.to_chat_format(author_messages), tokenize=False, add_generation_prompt=True)
-        text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep) # ChatML always has \n after role
-    
-        return text
-
 
 class CloneusUA(Cloneus):
     r'''For QA/Chat models trained without a custom chat template, i.e. template must alternate
@@ -820,40 +848,66 @@ class CloneusUA(Cloneus):
         <|im_start|>assistant
         [USER:Gamma, NAME:Greg] I am Greg, thanks<|im_end|>
     '''
-    filler_message: tuple[str,str] = (random.choice(roles.author_display_names), 'ye')
     
-    def to_instruct_format(self, author_messages: list[tuple[str,str]]):
-        if not author_messages:
-            author_messages = [self.filler_message]
-        
-        # elif len(author_messages) % 2 == 0:
-        #     author_messages=[self.filler_message,*author_messages]
-            #author_messages = author_messages[1:]
-        
+    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
         rolecycle = itertools.cycle(['user','assistant'])
 
+        chat_content = []
+
         if self.base_has_system:
-            chat_content = [{"role": "system", "content": self.cfg.fprompt}]
+            chat_content.append({"role": "system", "content": self.cfg.fprompt})
         else:
             pcontent = self.cfg.fprompt
             if self.cfg.prompt.append_msg:
                 auth, msg = author_messages[0]
-                pcontent += self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep, postfix='')
+                pcontent += self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep)
                 author_messages = author_messages[1:]
             
-            chat_content = [{"role": next(rolecycle), "content": pcontent}]
+            chat_content.append({"role": next(rolecycle), "content": pcontent})
         
         for auth,msg in author_messages:
-            message = self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep, postfix='')
+            message = self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep)
             chat_content.append({"role": next(rolecycle), "content": message})
         
         return chat_content
+    
+# TODO: 
+# fix configs
+
+# base_generation config
+
+# cloneus from_base_model
+# cloneus from_checkpoint
+# from_pretrained = from_checkpoint | from_base_model
+
+class CloneusBasePrediction(Cloneus):
+    r'''For base model prediction. 
+    
+    Attempt use a untuned, base model for user chat emulation. 
+
+    Note: To have any success with this approach, a very detailed system prompt is required. 
+    Regardless of prompt used, the quality cannot match that of a finetuned model.
+    This is therefore not recommended for standalone use in most instances.
+    '''
+    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
+        '''For base model prediction'''
+        rolecycle = itertools.cycle(['user','assistant'])
+        chat_content = []
+
+        #if self.use_sysprompt:
+        chat_content.append({"role": "system", "content": self.cfg.fprompt})
+        
+        for auth,msg in author_messages:
+            message = self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep)
+            chat_content.append({"role": next(rolecycle), "content": message})
+        
+        return chat_content
+    
 
     def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        # TODO: THIS DOES NOT TRIM IF CONTEXT GROWS TOO LARGE. WATCH OUT
-        # add_generation_prompt will = '' if doesnt have, like mistral. So, always okay to add?
-        text = self.tokenizer.apply_chat_template(self.to_instruct_format(author_messages), tokenize=False, add_generation_prompt=True)
-        text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext)
+        text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+        # Untuned models will not understand the encoding, so leave youtube as links
+        #text = self.ytm.encode(text)
+        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep)
     
         return text
