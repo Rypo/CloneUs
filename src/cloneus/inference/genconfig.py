@@ -1,6 +1,8 @@
 import typing
+import random
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
+import numpy as np
 import torch
 import transformers
 from transformers import GenerationConfig, StoppingCriteria
@@ -69,6 +71,8 @@ class GenOptsExtended(GenOpts):
     mirostat_tau: float = 5
     mirostat_eta: float = 0.1
     
+    def to_dict(self):
+        return asdict(self)
     #seed: int = -1
     #encoder_repetition_penalty: float = 1
     #truncation_length: int = 0
@@ -85,10 +89,77 @@ class GenOptsExtended(GenOpts):
 
 # TODO: Randomizer - https://github.com/oobabooga/text-generation-webui/blob/81f603d09fab9afad9fa54f123c57c187bc115df/modules/presets.py#L82
 
+
+def randomize_preset(gen_config:GenerationConfig):
+    params_and_values = {
+        'remove_tail_tokens': {
+            'top_p': [0.5, 0.8, 0.9, 0.95, 0.99],
+            'min_p': [0.5, 0.2, 0.1, 0.05, 0.01],
+            'top_k': [3, 5, 10, 20, 30, 40],
+            'typical_p': [0.2, 0.575, 0.95],
+            'tfs': [0.5, 0.8, 0.9, 0.95, 0.99],
+            'top_a': [0.5, 0.2, 0.1, 0.05, 0.01],
+            'epsilon_cutoff': 1e-4*np.array([1, 3, 5, 7, 9]).round(6),
+            'eta_cutoff': 1e-4*np.array([3, 6, 9, 12, 15, 18]).round(6),
+        },
+        'flatten_distribution': {
+            'temperature': [0.1, 0.5, 0.7, 0.8, 1, 1.2, 1.5, ],#2.0, 5.0],
+            'dynamic_temperature': [
+                [0.1, 1],
+                [0.1, 1.5],
+                [0.1, 2],
+                [0.1, 5],
+                [0.5, 1],
+                [0.5, 1.5],
+                [0.5, 2],
+                [0.5, 5],
+                [0.8, 1],
+                [0.8, 1.5],
+                [0.8, 2],
+                [0.8, 5],
+                [1, 1.5],
+                [1, 2],
+                [1, 5]
+            ],
+            'smoothing_factor': [0.2, 0.3, 0.6, 1.2],
+        },
+        'repetition': {
+            'repetition_penalty': [1, 1.05, 1.1, 1.15, 1.20, 1.25],
+            'presence_penalty': [0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2.0],
+            'frequency_penalty': [0, 0.1, 0.2, 0.4, 0.6, 0.8, ],#1.0, 2.0],
+        },
+        'other': {
+            'temperature_last': [True, False],
+        }
+    }
+
+    generate_params = GenOptsExtended(temperature=1, repetition_penalty_range=1024, repetition_penalty=1,).to_dict()
+    for cat in params_and_values:
+        choices = list(params_and_values[cat].keys())
+        #if shared.args.loader is not None:
+        #    choices = [x for x in choices if loader_contains(x)]
+
+        if len(choices) > 0:
+            choice = random.choice(choices)
+            value = random.choice(params_and_values[cat][choice])
+            if choice == 'dynamic_temperature':
+                generate_params['dynamic_temperature'] = True
+                generate_params['dynatemp_low'] = value[0]
+                generate_params['dynatemp_high'] = value[1]
+            else:
+                generate_params[choice] = value
+
+    gen_config.update(**generate_params)
+    #logger.info("GENERATED_PRESET=")
+    #pprint.PrettyPrinter(indent=4, width=1, sort_dicts=False).pprint(remove_defaults(state))
+    return gen_config# #*[generate_params[k] for k in presets_params()]
+
 GENMODE_PRESETS = {
     'ms': 'multinomial_sampling',
     'cs': 'contrastive_search',
     'gd': 'greedy_decoding',
+    'dyna': 'dynamic_temperature',
+    'miro': 'mirostat',
     'bsd': 'beam_search_decoding',
     'bsms': 'beam_search_multinomial_sampling',
     'dbsd': 'diverse_beam_search_decoding'
@@ -114,7 +185,11 @@ def load_gen_config(gen_config_path:str|Path, gen_config_name:str="generation_co
     return gen_config
 
 
-def preset_gen_config(preset:typing.Literal['ms','cs','gd','bsd','bsms','dbsd'], pad_token_id:int, eos_token_id:int|list[int], **kwargs):
+def preset_gen_config(preset:typing.Literal['ms','cs','gd','miro','dyna', 'bsd','bsms','dbsd'], pad_token_id:int, eos_token_id:int|list[int], **kwargs):
+    '''Returns a GenerationConfig with the minimum relevant argments for the preset.
+    
+    Any kwargs that are not used for the preset are ignored.
+    '''
     # https://huggingface.co/docs/transformers/main_classes/text_generation
     # https://github.com/oobabooga/text-generation-webui/blob/main/presets/Contrastive%20Search.yaml
      #contrastive -- Low memory cuts memory usage in ~half, makes shorter outputs with similar content, but slow
@@ -134,9 +209,15 @@ def preset_gen_config(preset:typing.Literal['ms','cs','gd','bsd','bsms','dbsd'],
     top_p = kwargs.get('top_p', default_gc.top_p)
     temperature = kwargs.get('temperature', default_gc.temperature)
     
-    num_beams=kwargs.get('num_beams', 5)
+    num_beams = kwargs.get('num_beams', 5)
     early_stopping = kwargs.get('early_stopping', False)
 
+    mirostat_tau = kwargs.get('mirostat_tau', default_gc.mirostat_tau)
+    mirostat_eta = kwargs.get('mirostat_eta', default_gc.mirostat_eta)
+    
+    dynatemp_low = kwargs.get('dynatemp_low', 0.6)
+    dynatemp_high = kwargs.get('dynatemp_high', 1.2)
+    dynatemp_exponent = kwargs.get('dynatemp_exponent', default_gc.dynatemp_exponent)
 
     preset_name = preset.lower()
     if preset_name in ['cs','contrastive_search']:
@@ -152,6 +233,17 @@ def preset_gen_config(preset:typing.Literal['ms','cs','gd','bsd','bsms','dbsd'],
     elif preset_name in ['gd','greedy_decoding']:
         genconfig = GenerationConfig(do_sample=False, **shared_args)
     
+    elif preset_name in ['miro', 'mirostat']:
+        mirostat_mode = 2 # 0 or 2
+
+        genconfig = GenerationConfig(do_sample=True, mirostat_mode=mirostat_mode, mirostat_tau=mirostat_tau, mirostat_eta=mirostat_eta, **shared_args)
+
+    elif preset_name in ['dyna', 'dynamic_temperature']:
+        dynamic_temperature = True # 0 or 2
+
+
+        genconfig = GenerationConfig(do_sample=True, dynamic_temperature=dynamic_temperature, dynatemp_low=dynatemp_low, dynatemp_high=dynatemp_high, dynatemp_exponent=dynatemp_exponent, **shared_args)
+
     elif preset_name in ['bsd', 'beam_search_decoding']:
         genconfig = GenerationConfig(do_sample=False, num_beams=num_beams, early_stopping=early_stopping, **shared_args)
     

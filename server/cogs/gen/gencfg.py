@@ -329,3 +329,18 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         msgs.append(update_message)
 
         await ctx.send('\n'.join(msgs))
+
+
+    @commands.hybrid_command(name='gce')
+    async def genconfig_extended(self, ctx: commands.Context, *, flags: cmd_flags.GenerationExtendedFlags):
+        """Set Generation Configuration Extended values."""
+        #import json
+        msgs = []
+        kwargs = {name: val for name, val in dict(flags).items() if val is not None}
+        # declared as a bool, but should be an int
+        if kwargs.get('mirostat_mode'):
+            kwargs['mirostat_mode'] = 2
+        update_message = self.clomgr.update_genconfig(kwargs)
+        msgs.append(update_message)
+        
+        return await ctx.send('\n'.join(msgs))

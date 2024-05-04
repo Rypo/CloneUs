@@ -2,42 +2,43 @@ import typing
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.ext.commands import Range
 
 from discord.utils import MISSING 
 
 from . import transformers as cmd_tfms
 
-
+# Just use "words" in place of "tokens". It's a convenient lie.
 class GenerationFlags(commands.FlagConverter):
     # alias: typing.Literal['contrastive_search','multinomial_sampling', 'greedy_decoding', 'beam_search_decoding','beam_search_multinomial_sampling', 'diverse_beam_search_decoding']
     preset: typing.Literal['ms','cs','gd','bsd','bsms','dbsd'] = commands.flag(default=None, name='preset', description='Reset values to default preset state. ("ms" and "cs" are best)')
     
-    max_new_tokens: int       = commands.flag(default=None, aliases=['maxlen'], description='Maximum allowed number of tokens to generate.')
-    min_new_tokens: int       = commands.flag(default=None, aliases=['minlen'], description='Minimum allowed number of tokens to generate.')
-    temperature: float        = commands.flag(default=None, description='Modulation value for next token probabilities.')
-    top_k: int                = commands.flag(default=None, description='Number of highest probability vocabulary tokens to keep for top-k-filtering.')
-    top_p: float              = commands.flag(default=None, description='Probability threshold for top-p-filtering.')
+    max_new_tokens: Range[int, 0, ]             = commands.flag(default=None, description='Maximum allowed number of words to generate (default: 256)')
+    min_new_tokens: Range[int, 0, ]             = commands.flag(default=None, description='Minimum allowed number of words to generate (default: 0)')
+    temperature: Range[float, 0, ]              = commands.flag(default=None, description='Controls randomness. > 1 = more random. < 1 = less random (default: 1.0)') # Modulation value for next token probabilities 
+    top_k: Range[int, 0, ]                      = commands.flag(default=None, description='Fixed number of highest proba words to sample from (default: 50)')
+    top_p: Range[float, 0, 1]                   = commands.flag(default=None, description='Dynamic number of highest proba words to sample from. Take while sum probas<top_p (default: 1.0)')
     
-    penalty_alpha: float      = commands.flag(default=None, description='Balance between model confidence and degeneration penalty.')
-    low_memory: bool          = commands.flag(default=None, description='Switch to sequential topk for contrastive search to reduce peak memory.')
+    do_sample: bool                             = commands.flag(default=None, description='Whether to use sampling or decoding. CS=False, MS=True (default: True)')
+    penalty_alpha: Range[float, 0,]             = commands.flag(default=None, description='For Contrastive Search (CS). Balance model confidence and degeneration (default: 0.6)')
+    
+    repetition_penalty: Range[float, 1, 2]      = commands.flag(default=None, description='Values > 1.0 penalize word repetition (default: 1.1)')
 
-    do_sample: bool           = commands.flag(default=None, description='Whether to use sampling or decoding.')
-    repetition_penalty: float = commands.flag(default=None, description='Values > 1.0 penalize word repetition.')
+    typical_p: Range[float, 0, 1]               = commands.flag(default=None, description='Local typicality threshold for generating words (default: 1.0)')
+    epsilon_cutoff: Range[float, 0, 1]          = commands.flag(default=None, description='Probability cutoff for consideration during sampling (default: 0)')
+    eta_cutoff: Range[float, 0, 1]              = commands.flag(default=None, description='Eta sampling threshold. Hybrid of locally typical, epsilon sampling (default: 0)')
 
-    typical_p: float          = commands.flag(default=None, description='Local typicality threshold for generating tokens.')
-    epsilon_cutoff: float     = commands.flag(default=None, description='Conditional probability threshold for truncation sampling.')
-    eta_cutoff: float         = commands.flag(default=None, description='Eta sampling threshold for hybrid sampling.')
-
-    num_beams: int            = commands.flag(default=None, description='Number of beams for beam search.')
-    num_beam_groups: int      = commands.flag(default=None, description='Number of groups for beam search diversity.')
-    diversity_penalty: float  = commands.flag(default=None, description='Penalty for generating tokens same as other beam groups.')
-    length_penalty: float     = commands.flag(default=None, description='Exponential penalty to the length for beam-based generation.')
-    early_stopping: bool      = commands.flag(default=None, description='Controls stopping condition for beam-based methods.')
-
-    no_repeat_ngram_size: int = commands.flag(default=None, description='Size of ngrams that can only occur once.')
-    renormalize_logits: bool  = commands.flag(default=None, description='Whether to renormalize logits after processing.')
+    # NOTE: beam search is (almost) worthless. Need num_beams just for ban words/word weights. Otherwise blegh. 
+    num_beams: int                              = commands.flag(default=None, description='Number of beams for beam search (default: 1)')
+    # num_beam_groups: int      = commands.flag(default=None, description='Number of groups for beam search diversity.')
+    # diversity_penalty: float  = commands.flag(default=None, description='Penalty for generating tokens same as other beam groups.')
+    # length_penalty: float     = commands.flag(default=None, description='Exponential penalty to the length for beam-based generation.')
+    # early_stopping: bool      = commands.flag(default=None, description='Controls stopping condition for beam-based methods.')
+    low_memory: bool                            = commands.flag(default=None, description='For Contrastive Search (CS). Switch to sequential topk to reduce peak memory (default: False)')
+    no_repeat_ngram_size: int                   = commands.flag(default=None, description='Size of ngrams that can only occur once (default: 0)')
+    renormalize_logits: bool                    = commands.flag(default=None, description='Whether to renormalize logits after processing (default: True)')
     # NOTE: These values have special handlers
-    guidance_scale: float     = commands.flag(default=None, description='Guidance scale for classifier free guidance.')
+    guidance_scale: float                       = commands.flag(default=None, description='Guidance scale for classifier free guidance. 1=no guidance (default: 1)')
     #bad_words_ids: list[list[int]] = commands.flag(default=None,description='List of lists of token ids not allowed to be generated.')
     #force_words_ids: list[list[int]] | list[list[list[int]]] = commands.flag(default=None,description='List of token ids that must be generated.')
     #sequence_bias: dict[tuple[int], float] = commands.flag(default=None,description='Maps a sequence of tokens to selection bias term (+ inc, - dec).')
@@ -54,7 +55,35 @@ class GenerationFlags(commands.FlagConverter):
     #max_time: float = commands.flag(description='Maximum time allowed for generation in seconds.')
     #use_cache: bool = commands.flag(default=True, description='Whether to use past key/values attentions for decoding.')
     #encoder_repetition_penalty: float = commands.flag(default=1.0, description='Parameter for encoder repetition penalty.')
+# Where to find some reasonable ranges:
+# - https://github.com/oobabooga/text-generation-webui/blob/8f12fb028dff4e133460fe10ef49d3f90167b313/modules/ui_parameters.py#L77
+class GenerationExtendedFlags(commands.FlagConverter):
+    preset: typing.Literal['random','miro','dyna'] = commands.flag(default=None, description='Set values to default preset state')
+    temperature_last: bool                  = commands.flag(default=None, description='Apply temp after filtering. This + high_tep + min_p = creative but coherent (default: False)') # False
     
+    dynamic_temperature: bool               = commands.flag(default=None, description='Enable dynamic temperature - auto picks temp from [low, high] using cross-entropy (default: False)') # False
+    dynatemp_low: Range[float, 0.01, ]      = commands.flag(default=None, description='Minumum dynamic temperature value (default: 1)') # 1
+    dynatemp_high: Range[float, 0.01, ]     = commands.flag(default=None, description='Maximum dynamic temperature value (default: 1)') # 1
+    dynatemp_exponent: Range[float, 0.01,]  = commands.flag(default=None, description='Dynamic temperature scale factor. How easy to reach high end temp, (default: 1)') # 1
+
+    smoothing_factor: Range[float, 0, ]     = commands.flag(default=None, description='Enable Quadratic Sampling. 0<val<1 = even out probas. val>1 most likely more likely (default: 0)') # 0
+    smoothing_curve: Range[float, 1, ]      = commands.flag(default=None, description='Quadratic Sampling dropoff curve factor (default: 1)') # 1
+    
+    min_p: Range[float, 0, 1]               = commands.flag(default=None, description='Discard words with proba < (min_p) * max(proba words) (default: 0)') # 0
+    top_a: Range[float, 0, 1]               = commands.flag(default=None, description='Discard words with proba < (top_a) * max(proba words)^2 (default: 0)') # 0
+    tfs: Range[float, 0, 1]                 = commands.flag(default=None, description='Discard long tail proba words (lower than others). Closer to 0 = more discarded (default: 1)') # 1
+    
+    mirostat_mode: bool                     = commands.flag(default=None, description='Enable Mirostat - technique for sampling perplexity control using active learning (default: False)') # 0 or 2
+    mirostat_tau: float                     = commands.flag(default=None, description='Target cross-entropy value. Paper says best=3, empirical says best=8 (default: 5)') # 5
+    mirostat_eta: Range[float, 0, 1]        = commands.flag(default=None, description='Learning rate for updates during sampling (default: 0.1)') # 0.1    
+    
+    frequency_penalty: float | None         = commands.flag(default=None, description='Like repetition_penalty, but gets stronger each time a word is repeated (default: 0)') # 0
+    presence_penalty: float | None          = commands.flag(default=None, description='Like repetition_penalty, but penalty is added rather than multiplied by score (default: 0)') # 0
+    repetition_penalty_range: int           = commands.flag(default=None, description='Number of most recent tokens considered in repetition penalty. 0=full context window (default: 0)' ) # 0, -- 1024
+    
+    
+    
+
 
 
 class ModeFlags(commands.FlagConverter):
