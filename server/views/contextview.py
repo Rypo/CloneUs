@@ -30,9 +30,10 @@ class BaseButtonPageView(discord.ui.View):
     def create_embed(self, data):
         raise NotImplementedError
 
-
     async def update_message(self, data):
-        self.update_buttons()
+        # only enable buttons if more than one page
+        if self.num_pages > 1:
+            self.update_buttons()
         await self.message.edit(embed=self.create_embed(data), view=self)
 
     def disable_button(self, button_method):
@@ -144,10 +145,6 @@ class PagedChangelogView(BaseButtonPageView): #discord.ui.View):
 
         return embed
 
-    async def update_message(self, data):
-        self.update_buttons()
-        await self.message.edit(embed=self.create_embed(data), view=self)
-
 
 class PaginatorView(discord.ui.View):
     current_page: int = 1
@@ -171,7 +168,8 @@ class PaginatorView(discord.ui.View):
         return embed
 
     async def update_message(self, data):
-        self.update_buttons()
+        if self.total_pages > 1:
+            self.update_buttons()
         await self.message.edit(embed=self.create_embed(data), view=self)
 
     def update_buttons(self):
@@ -233,8 +231,6 @@ class PaginatorView(discord.ui.View):
         await self.update_message(self.current_page_data)
 
 class MessageContextView(BaseButtonPageView):
-    
-    
     def __init__(self, data, items_per_page=10, raw=False, *, timeout: float | None = 180):
         super().__init__(data, timeout=timeout)
         self.data = data
@@ -245,7 +241,6 @@ class MessageContextView(BaseButtonPageView):
         self.num_pages = len(self.batched_data)
         self.current_page = self.num_pages
         
-
 
     async def send(self, ctx: commands.Context):
         if self.num_pages < 2:
@@ -275,11 +270,6 @@ class MessageContextView(BaseButtonPageView):
         embed.set_footer(text='📄{:\t>32}'.format(f"({batch_start} : {batch_end} / {self.num_items})"))
         #embed.set_footer(text='📄{:>256}'.format(f"({batch_start} : {batch_end} / {self.num_items})"))
         return embed
-
-    async def update_message(self,data):
-        self.update_buttons()
-        await self.message.edit(embed=self.create_embed(data), view=self)
-
 
 
     @property
@@ -311,10 +301,6 @@ class PrePagedView(BaseButtonPageView):
     async def send(self, ctx, content=None):
         self.message = await ctx.send(content=content, view=self)
         await self.update_message(self.data[0])
-
-    async def update_message(self, data):
-        self.update_buttons()
-        await self.message.edit(embed=self.create_embed(data), view=self)
 
 
     def create_embed(self, data):
