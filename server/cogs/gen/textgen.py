@@ -179,7 +179,10 @@ class TextGen(commands.Cog, SetConfig):
         await self.bot.wait_until_ready()
         
         if unload:
-            self.clomgr.unload()
+            await self.clomgr.unload()
+            # doesn't clear unless these are here for some reason
+            torch.cuda.empty_cache()
+            gc.collect()
 
         if announce:
             await ctx.send('Ahh... sweet release ...', delete_after=5)
@@ -188,10 +191,53 @@ class TextGen(commands.Cog, SetConfig):
         await self.bot.wait_until_ready()
         #release_memory()
     
+    @commands.hybrid_command(name='gcsave')
+    async def save_gen_config(self, ctx: commands.Context, name: str = None, ):
+        '''Save the current generation config settings for later use.
+        
+        Args:
+            name: the name to save as. If None, will use current datetime. 
+        '''
+        gc_dir = (self.clomgr.clo.path_data.checkpoint_path/'gen_configs')
+        
+        if name is None:
+            tnow = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
+            name = f'{self.clomgr.clo.gen_mode}_{tnow}'
+        
+        name = re.sub('\w+','_', name[:100].removesuffix('.json'))+'.json'
+        
+        self.clomgr.clo.save_genconfig(filepath=gc_dir/name)
+        
+        return await ctx.send(f'Saved current generation config settings to {name}')
+    
+    async def savedgc_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        gc_dir = (self.clomgr.clo.path_data.checkpoint_path/'gen_configs')
+        confs = ['default'] + ([g.name for g in gc_dir.iterdir()] if gc_dir.exists() else [])
+        
+        return [app_commands.Choice(name=c, value=c) for c in confs if current.lower() in c.lower()]
+
+    @commands.hybrid_command(name='gcload')
+    @app_commands.autocomplete(name=savedgc_autocomplete)
+    async def load_saved_gen_config(self, ctx: commands.Context, name: str):
+        '''Load saved generation config settings.
+        
+        Args:
+            name: the name of config to load. 
+        '''
+        gc_dir = (self.clomgr.clo.path_data.checkpoint_path/'gen_configs')
+
+        if name == 'default':
+            self.clomgr.clo.set_genconfig(save_on_change=False, preset='ms')
+        else:
+            self.clomgr.clo.load_genconfig(gc_dir/name, self.clomgr.clo.path_data)
+        
+        await ctx.send(f'Loaded GenConfig: {name!r}')
+
     @commands.hybrid_command(name='showmodels')
     async def show_models(self, ctx: commands.Context, name_filter: str = None):
         '''Show a list of available models
         
+        You can pass `.`, `..`, or `...` to see models in the same family as the currently active model.
         Args:
             name_filter: filters down to models that match this name
         '''
@@ -220,16 +266,19 @@ class TextGen(commands.Cog, SetConfig):
         #     return await ctx.send('Active Model Checkpoints', embed=emb)
         return await ppview.send(ctx, msg)
         
-    
     @commands.hybrid_command(name='switchmodel')
     async def switch_model(self, ctx: commands.Context, 
                            modelpath_filter: str = None, 
-                           #checkpoint_name: str = None, 
                            dtype: typing.Literal['bfloat16','float16']=None, 
                            attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None):
-        '''Change the underlying model. Violently user unfriendly at the moment'''
+        '''Change the underlying text model.
         
-
+        Args:
+            modelpath_filter: the path or segment of path to the model (part after Model: --- when call !status)
+            dtype: model dtype to load/switch to
+            attn_implementation: type of attention to use/switch to
+        '''
+    
         if modelpath_filter is None:
             if dtype or attn_implementation:
                 await ctx.defer()
@@ -261,9 +310,6 @@ class TextGen(commands.Cog, SetConfig):
         #await self.status_report(ctx) # TODO: FIX
         #await self.down(ctx, False)
         #await self.up(ctx, True)
-        
-
-
 
     @commands.hybrid_command(name='sayas')
     @app_commands.choices(author=cmd_choices.AUTHOR_DISPLAY_NAMES)
@@ -303,6 +349,8 @@ class TextGen(commands.Cog, SetConfig):
             self.msgmgr.clear_mcache('default')
             msg = f'{roles.BOT_NAME} Context cleared. FEED ME.'
         
+        torch.cuda.empty_cache()
+        gc.collect()
         await ctx.send(msg)
     
     @commands.command(name='unclear')
@@ -535,7 +583,7 @@ class TextGen(commands.Cog, SetConfig):
 
 
 
-    @commands.hybrid_command(name='ask')            
+    @commands.hybrid_command(name='ask')
     @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def ask(self, ctx: commands.Context, prompt:str, *, system_msg:str=None):
         """Send a prompt to the underlying, un-fintuned base model.
@@ -599,6 +647,42 @@ class TextGen(commands.Cog, SetConfig):
         #     self.msgmgr.base_message_cache.append(msg)
     
 
+    @commands.hybrid_command(name='reword')
+    async def reword_t2i_prompt(self, ctx:commands.Context, prompt:str):
+        '''Reword a image prompt to add details for use in /draw or /redraw
+
+        Args:
+            prompt: The base simple prompt to add details to
+        '''
+        # https://github.com/TencentQQGYLab/ELLA?tab=readme-ov-file#1-caption-upscale
+        instr = ('Please generate the long prompt version of the short one according to the given examples. '
+                'Long prompt version should consist of 3 to 5 sentences. Long prompt version must specify the color, shape, texture or spatial relation of the included objects. '
+                'DO NOT generate sentences that describe any atmosphere!!!')
+        
+        samples = [
+            {'short':'A calico cat with eyes closed is perched upon a Mercedes.',
+            'long':("a multicolored cat perched atop a shiny black car. the car is parked in front of a building with wooden walls and a green fence. "
+                    "the reflection of the car and the surrounding environment can be seen on the car's glossy surface.")
+            },
+            {'short':"A boy sitting on a chair holding a video game remote.",
+            'long':("a young boy sitting on a chair, wearing a blue shirt and a baseball cap with the letter 'm'. he has a red medal around his neck and is holding a white game controller. "
+                    "behind him, there are two other individuals, one of whom is wearing a backpack. to the right of the boy, there's a blue trash bin with a sign that reads 'automatic party'.")
+            },
+            {'short':"man on a bank of the water fishing.",
+            'long':("a serene waterscape where a person, dressed in a blue jacket and a red beanie, stands in shallow waters, fishing with a long rod. "
+                    "the calm waters are dotted with several sailboats anchored at a distance, and a mountain range can be seen in the background under a cloudy sky.")
+            },
+            {'short':"A kitchen with a cluttered counter and wooden cabinets.",
+            'long':("a well-lit kitchen with wooden cabinets, a black and white checkered floor, and a refrigerator adorned with a floral decal on its side. "
+                    "the kitchen countertop holds various items, including a coffee maker, jars, and fruits.")
+            },
+            {'short': prompt, 'long':""}
+        ]
+        
+        few_shots = '\n\n'.join([f"Short: {s['short']}\nLong: {s['long']}" for s in samples])
+        formatted_prompt = f'{instr}\n\n{few_shots}'
+        return await self.ask(ctx, formatted_prompt, system_msg='')
+        #return formatted_prompt
 
 
 # async def setup(bot):
