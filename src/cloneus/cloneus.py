@@ -92,7 +92,13 @@ class GenConfigUtilities:
     def gen_mode(self):
         """Returns the generation mode triggered by a [`GenerationConfig`] instance."""
         return  self.gen_config.get_generation_mode()
-        
+
+    @property
+    def base_gen_config(self):
+        """Returns the current gen_config with at least 1024 max tokens."""
+        config = self.gen_config.to_dict()
+        config.update({'max_new_tokens': max(1024, config['max_new_tokens'])})
+        return GenerationConfig.from_dict(config)
 
     def load_genconfig(self, gen_config:str|Path|dict|GenerationConfig, path_data: ModelPathComponents):
         if isinstance(gen_config, dict):
@@ -650,27 +656,27 @@ class Cloneus(GenConfigUtilities):
         for message in chat_history:
             chat_content.append({"role": next(rolecycle), "content": message})
 
-        trunc_input_text = self.base_tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
+        input_text = self.base_tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
 
-        print('chat_content:',chat_content)
-        print(f'trunc_input_text: {trunc_input_text!r}',)
+        #print('chat_content:',chat_content)
+        print(f'input_text: {input_text!r}',)
         
-        return trunc_input_text
+        return input_text
 
     @torch.inference_mode()
-    def base_generate(self, input_text:str|list[str], sys_prompt:str=None) -> tuple[str, str, int, int]:
+    def base_generate(self, chat_text:str|list[str], sys_prompt:str=None) -> tuple[str, str, int, int]:
         # adapters = self.model.active_adapters()#()
         # self.model.disable_adapters()
         # TODO: Function for base/cloneus hybrid
         # - just user/assistant tags on a trained model. Surprisingly, sort of works to have AI style responsiveness but with custom vernacular
-        chat_history = [input_text] if isinstance(input_text, str) else input_text
-        trunc_input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
+        chat_history = [chat_text] if isinstance(chat_text, str) else chat_text
+        input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
         
-        inputs = self.base_tokenizer(trunc_input_text, return_tensors="pt", return_length=True, add_special_tokens=False)
+        inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)
         input_len = inputs.pop('length')[0].item()
         #self.model.to(dtype = self.base_dtype)
         with self.model.disable_adapter(), torch.cuda.amp.autocast(dtype=self.base_dtype):
-            output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
+            output = self.model.generate(**inputs.to(0), generation_config=self.base_gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
         #self.model.to(dtype = self.torch_dtype)
         out_tokens = output[0,input_len:]
         output_len = out_tokens.shape[0]
@@ -678,11 +684,11 @@ class Cloneus(GenConfigUtilities):
         
         #self.model.set_adapter(adapters)
         
-        return trunc_input_text, out_text, input_len, output_len
+        return input_text, out_text, input_len, output_len
     
 
     @torch.inference_mode()
-    def base_stream_generate(self, input_text:str|list[str], sys_prompt:str=None):
+    def base_stream_generate(self, chat_text:str|list[str], sys_prompt:str=None):
         #adapters = self.model.active_adapters()
         #self.model.disable_adapters()
         #base_model: PeftModel = self.model.get_base_model()
@@ -690,13 +696,13 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
-        chat_history = [input_text] if isinstance(input_text, str) else input_text
+        chat_history = [chat_text] if isinstance(chat_text, str) else chat_text
         input_text = self.base_instr_to_text(chat_history, sys_prompt=sys_prompt)
         inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
 
         input_len = inputs.pop('length')[0].item()
 
-        genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
+        genkwargs = dict(inputs.to(0), generation_config=self.base_gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
         
         #self.model.to(dtype = self.base_dtype)
         
@@ -707,6 +713,7 @@ class Cloneus(GenConfigUtilities):
             for new_text in streamer:
                 generated_text += new_text
                 yield new_text
+        
         #self.model.to(dtype = self.torch_dtype)
         output_len = self.base_tokenizer(generated_text, return_length=True).length
 
