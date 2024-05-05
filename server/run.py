@@ -174,15 +174,22 @@ def main():
             # Double sync: clears dupes, adds new, removes old. It is the way. 
             
             global_synced = await bot.tree.sync(guild=None)
+            # At this point, commands have not changed. 
             await bot.wait_until_ready()
             bot.tree.copy_global_to(guild=guild)
+            
             guild_synced = await bot.tree.sync(guild=guild)
+            # At this point, commands are synced, updated but are duplicated.
             bot.tree.clear_commands(guild=guild)
+            
             await bot.wait_until_ready()
             guild_synced += await bot.tree.sync(guild=guild)
-            synced = list(set(global_synced+guild_synced))
+            # At this point, commands are synced, updated, and de-duplicated
+
+            synced = set(global_synced+guild_synced)
         
-        synced_md = '\n- ' + '\n- '.join([s.name for s in synced]) if synced else ''
+        #synced_md = '\n- ' + '\n- '.join([s.name,s. for s in synced]) if synced else ''
+        synced_md = '\n'.join([f'- {s.name} <{"guild" if s.guild_id else "global"}>' for s in synced]) if synced else ''
         if spec is None:
             where = f' globally and to the guild ({guild.name}).'
         elif spec == '~':
@@ -191,7 +198,7 @@ def main():
             where = f' to the current guild ({guild.name}).'
         else:
             where = ''
-        return await ctx.send(f"Synced {len(synced)} commands{where}{synced_md}")
+        return await ctx.send(f"Synced {len(synced)} commands{where}\n{synced_md}")
         
 
     
