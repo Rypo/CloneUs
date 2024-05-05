@@ -33,22 +33,57 @@ class BotUs(commands.Bot):
             case_insensitive=True,
             allowed_mentions = discord.AllowedMentions(everyone=False, roles=True, users=True, replied_user=True),
             status=discord.Status.do_not_disturb,
-        )    
+        )
+        self._operational_state = {
+            'chat': False,
+            'draw': False
+        }
     
     async def on_ready(self):
         print('ready')
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         await self.toggle_extensions(extdir='cogs', state='on')
     
+    def _get_presence(self):
+        text_up = self._operational_state['chat']
+        image_up = self._operational_state['draw']
+        # 000 - busy,chat,draw
+        # https://docs.python.org/3/howto/enum.html#flag
+        if text_up and image_up:
+            presence = settings.BOT_PRESENCE['chat_draw']
+        elif text_up:
+            presence = settings.BOT_PRESENCE['chat']
+        elif image_up:
+            presence = settings.BOT_PRESENCE['draw']
+        else:
+            presence = settings.BOT_PRESENCE['down']
+        return presence
+
+    async def report_state(self, activity: typing.Literal['chat','draw'], ready:bool):
+        state_changed = self._operational_state[activity] != ready
+        self._operational_state[activity] = ready
+        if state_changed:
+            presence = self._get_presence()
+            await self.change_presence(**presence)
+        
+
     @asynccontextmanager
-    async def writing_status(self, presence_busy:str='busy', presense_done:str='ready'):        
-        await self.change_presence(**settings.BOT_PRESENCE.get(presence_busy, 
-                                                               settings.custom_presense(status_name='idle', state=presence_busy)))
+    async def busy_status(self, activity:typing.Literal['chat','draw']|str):
+        '''Async context manager. Temorarily change bot presence while working.
+        
+        Args:
+            activity (['chat', 'draw'] | str): message to show in presence. If 'chat' or 'draw' use default setting for that activity.
+        '''
+        if activity in ['chat','draw']:
+            presense = settings.BOT_PRESENCE.get('busy_'+activity)
+        else:
+            presense = settings.custom_presense(status_name='idle', state=activity)
+        
+        await self.change_presence(**presense)
         try:
             yield 
         finally:
-            await self.change_presence(**settings.BOT_PRESENCE.get(presense_done, 
-                                                                   settings.custom_presense(status_name='online', state=presense_done)))
+            await self.change_presence(**self._get_presence())
             
 
     async def toggle_extensions(self, extdir:typing.Literal['appcmds','cogs','views'], state='on'):

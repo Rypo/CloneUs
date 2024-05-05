@@ -165,7 +165,7 @@ class TextGen(commands.Cog, SetConfig):
         if load and not self.clomgr.is_ready:
             await self.clomgr.load(self.init_model, gen_config='best_generation_config.json')
             
-        await self.bot.change_presence(**settings.BOT_PRESENCE['chat'])
+        await self.bot.report_state('chat', ready=True)
             
         if announce: 
             await msg.delete()
@@ -187,7 +187,7 @@ class TextGen(commands.Cog, SetConfig):
         if announce:
             await ctx.send('Ahh... sweet release ...', delete_after=5)
         
-        await self.bot.change_presence(**settings.BOT_PRESENCE['ready'])
+        await self.bot.report_state('chat', ready=False)
         await self.bot.wait_until_ready()
         #release_memory()
     
@@ -282,34 +282,36 @@ class TextGen(commands.Cog, SetConfig):
         if modelpath_filter is None:
             if dtype or attn_implementation:
                 await ctx.defer()
-                await self.txtdown(ctx, False, False)
-                
                 await self.clomgr.load(self.clomgr.clo.path_data.checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
-                await self.txtup(ctx, False, False)
+                #await self.txtup(ctx, False, False)
                 #await self.status_report(ctx) # TODO: FIX 
-                #await self.up(ctx, True)
+                await self.bot.report_state('chat', ready=True)
                 return await ctx.send(content='Done.', delete_after=3)
             
             return await self.show_models(ctx)
         elif all([c == '.' for c in modelpath_filter]):
             return await self.show_models(ctx, modelpath_filter)
-            
-        matches = sorted([p for p in settings.RUNS_DIR.rglob('*checkpoint*') if (p.parent/'config.yaml').exists() and modelpath_filter in str(p)])
-        if len(matches) != 1:
-            #print(matches)
-            return await self.show_models(ctx, name_filter=modelpath_filter)
 
-        full_model_path = matches[0]
+        if (exact_path:=settings.RUNS_DIR/modelpath_filter).exists() and (exact_path.parent/'config.yaml').exists():
+            # in case a full path is passed, use exactly. 
+            # Prevents issues with matching substring checkpoints like checkpoint-100, checkpoints-1000, checkpoints-10000
+            full_model_path = exact_path
+        else:
+            matches = sorted([p for p in settings.RUNS_DIR.rglob('*checkpoint*') if (p.parent/'config.yaml').exists() and modelpath_filter in str(p)])
+            if len(matches) != 1:
+                return await self.show_models(ctx, name_filter=modelpath_filter)
+
+            full_model_path = matches[0]
             
         msg = await ctx.send(f'Switching to model: {full_model_path.relative_to(settings.RUNS_DIR)} ...')
         
-        await self.txtdown(ctx, False, False)
+        #await self.txtdown(ctx, False, False)
         await self.clomgr.load(full_model_path, dtype=dtype, attn_implementation=attn_implementation)
-        await self.txtup(ctx, False, False)
+        #await self.txtup(ctx, False, False)
+        await self.bot.report_state('chat', ready=True)
+        
         await msg.edit(content='Done.', delete_after=3)
         #await self.status_report(ctx) # TODO: FIX
-        #await self.down(ctx, False)
-        #await self.up(ctx, True)
 
     @commands.hybrid_command(name='sayas')
     @app_commands.choices(author=cmd_choices.AUTHOR_DISPLAY_NAMES)
@@ -415,8 +417,7 @@ class TextGen(commands.Cog, SetConfig):
         await asyncio.sleep(1)
         #try:
         await self.redo(interaction, message, author=None, seed_text=None, _needsdefer=False)
-        msg = await interaction.followup.send('Done.', silent=True, ephemeral=True, wait=True)
-        await msg.delete(delay=1)
+        await interaction.delete_original_response()
 
     @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def redo(self, ctx:commands.Context, message: discord.Message, author:str=None, seed_text:str=None, _needsdefer=True):
@@ -435,7 +436,7 @@ class TextGen(commands.Cog, SetConfig):
             await ctx.defer()
             await asyncio.sleep(1)
         
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             #message.reply()
             sent_messages = await self.clomgr.pipeline(message, mcache_slice, [author], seed_text, ('stream_one' if self.streaming_mode else 'gen_one'))
 
@@ -494,7 +495,7 @@ class TextGen(commands.Cog, SetConfig):
         #author_tag_prefix = f"[{author}] " + ((seed_text + ' ') if seed_text else '')
         #msg = await ctx.send(author_tag_prefix)
         
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), [author], seed_text, 'stream_one')
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
@@ -503,7 +504,7 @@ class TextGen(commands.Cog, SetConfig):
     async def batch_streambot(self, ctx: commands.Context, authors:list[str], seed_text:str):        
         await ctx.defer()
         await asyncio.sleep(1)
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'stream_batch')
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
@@ -520,7 +521,7 @@ class TextGen(commands.Cog, SetConfig):
             await asyncio.sleep(1)
         
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), [author], seed_text, 'gen_one')
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
@@ -549,7 +550,7 @@ class TextGen(commands.Cog, SetConfig):
         await asyncio.sleep(1)
 
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'gen_batch')
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
@@ -605,7 +606,7 @@ class TextGen(commands.Cog, SetConfig):
         await asyncio.sleep(1)
         
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             if self.streaming_mode:
                 sent_messages = await self.clomgr.base_streaming_generate(ctx, prompt, system_msg)
             else:
@@ -634,7 +635,7 @@ class TextGen(commands.Cog, SetConfig):
         await asyncio.sleep(1)
         self.msgmgr.base_message_cache.append(prompt)
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.writing_status()):
+        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             if self.streaming_mode:
                 sent_messages = await self.clomgr.base_streaming_generate(ctx, self.msgmgr.base_message_cache, system_msg)
             else:

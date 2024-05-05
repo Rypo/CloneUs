@@ -155,7 +155,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             msg = await ctx.send('Warming up drawing skills...', silent=True)
             await self.igen.load_pipeline()
         
-        await self.bot.change_presence(**settings.BOT_PRESENCE['draw'])
+        await self.bot.report_state('draw', ready=True)
 
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         complete_msg = f'{model_alias} all fired up'
@@ -168,7 +168,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     async def imgdown(self, ctx: commands.Context):
         '''Unloads the image generation model'''
         await self.igen.unload_pipeline()
-        await self.bot.change_presence(**settings.BOT_PRESENCE['ready'])
+        await self.bot.report_state('chat', ready=False)
         await ctx.send('Drawing disabled.')
             
     @commands.hybrid_command(name='artist')
@@ -203,7 +203,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
         await ctx.defer()
         await asyncio.sleep(1)
-        async with (ctx.channel.typing(), self.bot.writing_status('Compiling...')):
+        async with (ctx.channel.typing(), self.bot.busy_status('Compiling...')):
             await self.igen.compile_pipeline()
             await msg.edit(content='🏎 I am SPEED. 🏎 ')
 
@@ -257,7 +257,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             await ctx.defer()
             await asyncio.sleep(1)
         
-        async with self.bot.writing_status(presense_done='draw'):
+        async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
             image, fwkg = await self.igen.generate_image(prompt, steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect, 
                                                          refine_steps=refine_steps, refine_strength=refine_strength, denoise_blend=denoise_blend,)
@@ -327,7 +327,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             await asyncio.sleep(1)
             needs_view = True
         
-        async with self.bot.writing_status(presense_done='draw'):
+        async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
             image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, steps=steps, 
                                                            strength=strength, negative_prompt=negative_prompt, 
