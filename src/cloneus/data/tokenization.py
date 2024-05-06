@@ -7,6 +7,20 @@ import transformers
 from . import roles
 
 
+def check_if_system(tokenizer):
+    from jinja2.exceptions import TemplateError
+    
+    if not tokenizer.chat_template:
+        return False
+    
+    try:
+        _=tokenizer.apply_chat_template([{'role':'system', 'content':'abc'}])
+        has_system = True
+    except TemplateError:
+        has_system = False
+
+    return has_system
+
 def xapply_template(author, text_content, author_tag, tag_sep, postfix):
     # TEMPLATE = '[USER:{author}]{tag_sep}{text_content}{postfix}'
     atag=roles.format_author_tag(author,author_tag)

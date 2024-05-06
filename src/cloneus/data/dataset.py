@@ -15,17 +15,8 @@ from transformers import PreTrainedTokenizerFast
 from ..plugins import youtube as youtube
 #from ..core import paths as rpaths
 from . import roles, etl
+from .tokenization import check_if_system
 
-
-def check_if_system(tokenizer):
-    from jinja2.exceptions import TemplateError
-    try:
-        _=tokenizer.apply_chat_template([{'role':'system', 'content':'abc'}])
-        has_system = True
-    except TemplateError:
-        has_system = False
-
-    return has_system
 
 
 def convo_token_count(convo:list[dict], tokenizer):
