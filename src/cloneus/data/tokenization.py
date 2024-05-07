@@ -14,8 +14,10 @@ def check_if_system(tokenizer):
         return False
     
     try:
-        _=tokenizer.apply_chat_template([{'role':'system', 'content':'abc'}])
-        has_system = True
+        # Phi-3 just ignores the system without error, need to test that it is actually used.
+        output = tokenizer.apply_chat_template([{'role':'system', 'content':'sentinel'}], tokenize=False)
+        has_system = 'sentinel' in output
+        
     except TemplateError:
         has_system = False
 
