@@ -1,33 +1,28 @@
 notes: |- # Notes about your run.
   CloneUs Demo Config. 
-train_loss: 
-eval_loss: 
-sample_output: 
-# model_id: mistralai/Mistral-7B-v0.1
-# model_id: mistralai/Mistral-7B-Instruct-v0.2
-# model_id: NousResearch/Llama-2-7b-hf
-# model_id: NousResearch/Llama-2-13b-hf
-# model_id: TheBloke/Llama-2-13B-GPTQ
-model_id: teknium/OpenHermes-2.5-Mistral-7B
-# model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-# model_id: NousResearch/Nous-Hermes-2-SOLAR-10.7B
-# model_id: ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf
 
-model_type: MistralForCausalLM # LlamaForCausalLM, MistralForCausalLM, MixtralForCausalLM
-base_tune_type: chat # foundation, instruct, chat
-chat_template_format: # chatml or blank for no override
+# model_id: mistralai/Mistral-7B-v0.1
+# model_id: teknium/OpenHermes-2.5-Mistral-7B
+# model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+# model_id: ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf
+# model_id: microsoft/Phi-3-mini-128k-instruct
+model_id: NousResearch/Hermes-2-Pro-Llama-3-8B
+
 tag_placement: replace_role # tag_only, content_prefix, replace_role
+# - replace_role: Replaces user/assistant with formatted author_tag
+# - content_prefix: Inserts author_tag before text content
+# - tag_only: Ignores any existing template and creates one as {author_tag}{tag_sep}{postfix}.
 
 quant_method: bnb4 # bnb4, aqlm, gptq
 flashattn_lib: unsloth # huggingface, unsloth
 attn_implementation: flash_attention_2 # flash_attention_2, sdpa, eagar
 
-padding_side: right # left, right
+padding_side: right # left, right, or blank for no override
 
-# Upper token limit on chunk size. Spillover will be placed in a new group.
 chunk_size: 8192
-batch_size: 4
-gradient_accumulation_steps: 2
+# Upper token limit on chunk size. Spillover will be placed in a new group.
+batch_size: 2
+gradient_accumulation_steps: 4
 
 use_sft_trainer: false
 group_by_length: true
@@ -38,31 +33,39 @@ lr_scheduler: cosine # cosine, linear, constant, constant_with_warmup
 custom_scheduler: # warmup_const_cosine # to enable, needs lr_scheduler: linear
 
 dataset:
+  chatlog_csv: 'data/discord/YOUR_CHAT_FILE.csv' 
+  # created from calling scripts/build.py with your DiscordChatExporter JSON export or chat csv
   name: chunkh # chunkh135
   train_jsonl:
   eval_jsonl:
-  # hours of silence before we start a new chat chunk. Can be a list to use multiple cutoffs.
   hours_between_sessions: 4 # [1, 3, 5]
-  # Minimum number of messages in a chat chunk. Any chunks smaller will be forcibly regrouped.
+  # hours of silence before we start a new chat chunk. Can be a list to use multiple cutoffs.
   min_session_length: 3
-  allow_truncation: false
-  chatlog_csv: 'data/discord/YOUR_DISCORD_CHAT_FILE.csv' # created from calling scripts/build.py with your DiscordChatExporter JSON export
+  # Minimum number of messages in a chat chunk. Any chunks smaller will be forcibly regrouped.
+  allow_truncation: false # set to true if you expect any message to exceed chunk_size
   eval_frac: 0.005 # or 'after_bot' to use all messages after the first time your bot sent a message in chat. 
 
+author_tag: "{author}" # "{author} ({fname})" -- used for all tag_placement values
+# - For replace_role format, "{author} ({fname})" works well. 
+# -- highly recommend using {fname} if you know everyone's first name for better personalization
+# - For content_prefix/tag_only format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]"
+# - fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)
+
+tag_sep: "\n" # Ignored when tag_placement="replace_role"
 # Separator between author_tag and start of text
-tag_sep: "\n" # MUST be "\n" when chatml
+
+postfix: "</X/>" # ONLY used when tag_placement="tag_only"
 # Separator between end of text and the next author_tag
-postfix: "</X/>" # NOT USED when using chatml format. For others, "</s>\n" works well.
-# For chat_ml format, "{author} ({fname})" works well. 
-# For non-chat_ml format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]" or "[{author}, {fname}]:"
-# fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)
-author_tag: "{author}" # "{author} ({fname})" -- highly recommend using fname if you know everyone's first name
-# Same as default except remove 'assistant' from add_generation_prompt
-custom_chat_template: "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
+
+chat_template_format: # chatml or blank. 
+# If "chatml" will add tokens (im_start, im_end, ..) to the model/tokenizer if not already present.
+
+custom_chat_template: "{{bos_token}}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
+# For role_replace: Be sure use a custom_chat_template with any mention of "assistant" in add_generation_prompt as shown
 
 prompt:
-  append_msg: false # true when using prompt with a model that doesn't have a system tag
-  name_mapping: # Will be filled during scripts/train.py
+  append_msg: false # set true if using prompt with a model that doesn't have a system tag
+  name_mapping: null # Will be filled during scripts/train.py
   template: |-
     Uncensored Discord server chat.
     Topic: offbeat.
@@ -72,13 +75,14 @@ prompt:
   #  Your Task: {task}
   task: #|-
   # Reply as one of the members, mirroring their unique personality and writing style as closely as you can.
+
+
 lora_r: 16
 lora_alpha: 32
 lora_dropout: 0.0 # Use 0 for unsloth optimizations to take effect
 lora_use_rslora: false # More important for high r (>32) -- https://arxiv.org/abs/2312.03732
 lora_use_loftq: false
 lora_use_dora: false # significant improvement for r=8, but slower + no unsloth support -- https://arxiv.org/abs/2402.09353
-lora_target_linear: true
 lora_fan_in_fan_out:
 lora_target_modules: # "all-linear"
   - gate_proj
@@ -103,15 +107,27 @@ bf16: true
 fp16: false
 tf32: true
 
-special_tokens:
-  bos_token: "<|im_start|>"
-  eos_token: "<|im_end|>" # "</s>"
-  unk_token: "<unk>"
-  pad_token: "</s>"
+resume_from_checkpoint: 
+logging_steps: 0.01
+save_steps: 500
 
 pad_vocab_to:
 custom_tokens:
 
-resume_from_checkpoint: 
-logging_steps: 0.01
-save_steps: 500
+# If provided, this will override defaults, otherwise auto-fill. Override tokens must already be in vocab. 
+special_tokens:
+  bos_token:
+  eos_token:
+  unk_token:
+  pad_token:
+
+# These are overwritten during training
+model_architecture: null # MistralForCausalLM, LlamaForCausalLM, Phi3ForCausalLM, etc...
+ctx_len: null
+has_custom_tokens: null
+dtype: null
+fprompt: null
+base_dir: null
+train_loss: null
+eval_loss: null
+sample_output: null

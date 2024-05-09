@@ -97,7 +97,8 @@ def main(args):
         'unsloth/llama-3-8b-Instruct-bnb-4bit': 'llama3-8b-instruct-4bit',
         'meta-llama/Meta-Llama-3-8B': 'llama3-8b',
         'meta-llama/Meta-Llama-3-8B-Instruct': 'llama3-8b-instruct',
-        'microsoft/Phi-3-mini-4k-instruct':'Phi-3-mini-4k-instruct'
+        'microsoft/Phi-3-mini-4k-instruct':'Phi-3-mini-4k-instruct',
+        'NousResearch/Hermes-2-Pro-Llama-3-8B':'llama3-8b-hermes2-pro'
         
         
         # Add aliases for new models here
@@ -169,7 +170,13 @@ def main(args):
 
     model, tokenizer = mllm.model_tokenizer_from_config(peft_config, cfg)
     
+    if (special_token_overrides := dict(filter(lambda kv: kv[1], cfg.special_tokens.items()))):
+        num_new_vocab = tokenizer.add_special_tokens(special_token_overrides)
+        assert num_new_vocab==0, 'Using non-vocab special tokens is not currently supported.'
     
+    # Config Autofill
+    cfg.special_tokens = tokenizer.special_tokens_map
+    cfg.model_architecture = model.config.architectures[0]
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(num_custom_tokens is not None and num_custom_tokens > 0)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
