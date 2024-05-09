@@ -338,8 +338,9 @@ class YouTubeManager:
             return ''
         videos = self.get_videos(video_id, query='', allow_fetch=allow_fetch)
         if not videos:
-            print('NO RECORD FOUND FOR:',video_id)
-            self.write_invalid_ids(video_id)
+            if allow_fetch:
+                print('NO RECORD FOUND FOR:',video_id)
+                self.write_invalid_ids(video_id)
             return ''
         return videos[0].to_template()
 
@@ -378,7 +379,7 @@ class YouTubeManager:
 
 
 
-    def get_videos(self, video_ids, query, allow_fetch=None) -> list[YouTubeVideo]: # (should it return a list of YouTubeVideo or {'viDeoID': YouTubeVideo})??
+    def get_videos(self, video_ids:list[str], query:str, allow_fetch=None) -> list[YouTubeVideo]: # (should it return a list of YouTubeVideo or {'viDeoID': YouTubeVideo})??
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
         if isinstance(video_ids, str):
             video_ids = [video_ids]
