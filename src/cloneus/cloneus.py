@@ -329,8 +329,7 @@ class Cloneus(GenConfigUtilities):
         if self.base_dtype not in [torch.float16, torch.bfloat16]: 
             self.base_dtype = torch.bfloat16 # Avoid ever running as float32
                 
-        # when adding custom tokens (e.g. <|im_end|>) use_default_system_prompt will be false, so check the tune_type
-        self.base_has_system = tokenization.check_if_system(self.tokenizer) #self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template)) 
+        self.base_has_system = tokenization.check_if_system(self.tokenizer) 
         
         print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {} (use: {}), tag_placement: {}'.format(
             self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
@@ -420,29 +419,44 @@ class Cloneus(GenConfigUtilities):
         return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm).load_model()
             
         
-
-    def apply_template(self, author:str, text_content:str, tag_sep:str):
-        atag=roles.format_author_tag(author, self.cfg.author_tag)
-        return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
-
     def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
         raise NotImplementedError('Cloneus is designed to be instantiated via Cloneus.from_pretrained')
 
-    def to_text_input(self, author_messages: list[tuple[str,str]], author_seedtext: str|tuple[str,str]=None):
-        text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+    def to_text_input(self, author_messages: list[tuple[str,str]], author_seedtext: str|tuple[str,str]=None) -> str:
+        '''Convert author message tuples into a text string, adding seed author text if provided, and applying youtube encoding if enabled'''
+        author_messages = author_messages[:] # shallow copy to avoid mutation
+        if author_seedtext is not None:
+            text = self.to_seeded_text(author_messages, author_seedtext)
+        else:
+            text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+                
         text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, author_seedtext, tag_sep=self.cfg.tag_sep)
+        
     
         return text
     
-    def append_author_seedtext(self, text: str, author_seedtext: str|tuple[str,str], tag_sep:str):
-        if author_seedtext is not None:
-            if isinstance(author_seedtext, str):
-                author_seedtext = (author_seedtext, '')
-            author, seedtext = author_seedtext
-            if seedtext is None:
-                seedtext = ''
-            text += self.apply_template(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
+    def to_seeded_text(self, author_messages: list[tuple[str,str]], author_seedtext: str|tuple[str,str]):
+        '''Converts to text by applying all normal formatting to author_message + author but strips all formatting after seedtext. 
+        
+        This is done so that the model will continue generating from seedtext rather than stopping on a <|eot|> token or postfix.
+        '''
+        author_messages = author_messages[:] # shallow copy to avoid mutation
+        if isinstance(author_seedtext, str):
+            author_seedtext = (author_seedtext, '')
+        
+        author, seedtext = author_seedtext
+        if seedtext is None:
+            seedtext = ''
+        
+        author_messages += [(author, '###_dummy_seedtext_###')]
+        text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+        # split on dummy text to KEEP pre-content formatting but REMOVE post content formatting
+        # this effectively removes the tag_sep dependency
+        # which is important for models where the role has a special token before the content 
+        # e.g. Llama-3: <|start_header_id|>(AUTHOR_TAG)<|end_header_id|>\n\n(CONTENT)<|eot_id|>
+        # rather than requiring tag_sep = <|end_header_id|>, just don't use it all
+        text = text.split('###__dummy_seedtext_###')[0] + seedtext
+        #text += self.apply_content_prefix(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
 
         return text
 
@@ -482,16 +496,28 @@ class Cloneus(GenConfigUtilities):
         # In theory, could allow seed text by comparing prob of each author saying seed_text given context. But that's a lot more work. 
         # Might be an easier way with BeamScorer
         # fill tag to split on a known fixed value. Allows author_tag to change without breaking.
-        # needs to be lower case for compat with lauthor. TODO: fix
-        FAKE_AUTH_MSG = ('###dummy_author_name', '###dummy_message_content')
-        input_text = self.to_text_input(author_messages+[FAKE_AUTH_MSG], author_seedtext=None)
         
+        # because of tokenization quirks, arbitrary author_tag formatting, and arbitrary author name inputs
+        # author tags can merge with author names in unexpected ways.
+        # as such, we need the model to output and match against whole formatted author tags, but return author names
+        # this is not immediately obvious how to do consistently
+        # maybe apply tag formatting and match against tokenized
+        # but even then, if 2 users JohnnyAppleSeed and JohnnyAppleSeed12, theres no way of distigushing without whole string probabilities
+        # https://huggingface.co/docs/transformers/v4.40.2/en/main_classes/text_generation#transformers.GenerationMixin.generate.prefix_allowed_tokens_fn
+
+        # NOTE: bottom line: this is wrong (sometimes). We're forcing the model to generate a username 
+        # when it possibly has only ever generated author_tag segment + username segment ...
+        # e.g. kirby -> ["kir", "by"] vs [USER:kirb -> [..., ":k", "ir", "by"]
+        input_text = self.to_text_input(author_messages+[('###_dummy_author_###', 'ignored')], author_seedtext=None)
+    
         # By splitting on dummy author, all prior formatting will be applied exactly, take this and discard the rest
-        input_text = input_text.split(FAKE_AUTH_MSG[0], maxsplit=1)[0]
+        # so if author_tag is [USER:{author}] and llama-3 model, we'd get: ((CONTEXT))<|start_header_id|>[USER:
+        input_text = input_text.split('###_dummy_author_###')[0]
         #print(input_text)
         inputs = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)
 
         author_gen_config = GenerationConfig(
+            do_sample=False,
             #force_words_ids=[],#[[wtok[:3]] for wtok in self.encode_wordslist(userutils.author_display_names)], 
             max_new_tokens=3, #min_new_tokens=1, 
             #do_sample=True, top_k=len(roles.author_display_names),temperature=1, #remove_invalid_values=True,
@@ -504,13 +530,15 @@ class Cloneus(GenConfigUtilities):
         output = self.model.generate(**inputs.to(0), generation_config=author_gen_config, stopping_criteria=self.stop_criteria, 
                                      output_scores=True, return_dict_in_generate=True)
         
+        
         # Sorta redundant with top_k in generate, but handles sorting, masking, slicing without effort. 
         # using output.scores[0][0] avoid issues with num_beams > 1
         # when forcing words, the other beam dims are not useful anyway
-        logits,token_ids = output.scores[0][0].topk(top_k_next_tokens, dim=0)
+        topk_scores,token_ids = output.scores[0][0].topk(top_k_next_tokens, dim=0)
         authtok_prob_pairs = list(zip(
             self.tokenizer.batch_decode(token_ids),
-            logits.softmax(0).tolist()
+            topk_scores.exp().tolist() # scores = log softmax(logits), so proba exp(scores)
+            #logits.softmax(0).tolist()
         ))
         
         if author_list is not None:
@@ -557,22 +585,44 @@ class Cloneus(GenConfigUtilities):
         return output_texts,input_len
     
 
+    def _get_batched_inputs(self, author_messages: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str]]:
+        # Need to be a little bit careful about how we combine previous context + author context
+        # to_text_input(previous_context) + to_text_input((author,seed)) is not necessarily the same as to_text_input(previous_context+(author,seed))
+        # because some chat_templates use index0 or otherwise for special behavior
+        # simple but inefficent way is to_text_input(previous_context+(author,seed)) for each author. better way is split and replace
+        
+        input_context = self.to_text_input(author_messages, author_seedtext=('###_dummy_author_###','###_dummy_seedtext_###'))
+        
+        author_sentinel = roles.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
+        seedtext_sentinel = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
+
+        input_context, fmt_dummy_seedtext = input_context.split(author_sentinel)
+        authseed_template = author_sentinel+fmt_dummy_seedtext
+        
+        if seed_text is None: 
+            seed_text = ''
+        
+        author_prompts = [authseed_template
+                          .replace(author_sentinel, roles.format_author_tag(u, self.cfg.author_tag))
+                          .replace(seedtext_sentinel, seed_text) 
+                          for u in seed_authors]
+        
+        return input_context, author_prompts
+    
     @torch.inference_mode()
-    def batch_generate(self, author_messages: list[tuple[str,str]], reply_authors: list[str], reply_seedtext: str = None) -> tuple[str, list[str], list[str], int, list[int]]:
+    def batch_generate(self, author_messages: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str], list[str], int, list[int]]:
         """Generate responses for a batch of authors, each optionally starting with `reply_seedtext` given the message context history.
 
         Args:
             author_messages: A list of tuples of unformatted (author name, message) pairs
-            reply_authors: The list of authors to generate responses for.
+            seed_authors: The list of authors to generate responses for.
             reply_seedtext: The seed text to start of each author's reponse with.
 
         Returns:
             A tuple containing the input context, list of formatted author+seedtext inputs, output completion texts, input length, and output lengths.
         """
-        input_context = self.to_text_input(author_messages, author_seedtext=None)
-        if reply_seedtext is None: reply_seedtext = ''
-        # IFF using ' ' as tag_sep, should NOT trail with it
-        author_prompts = [self.apply_template(author, reply_seedtext, self.cfg.tag_sep).strip(' ') for author in reply_authors]
+        
+        input_context,author_prompts = self._get_batched_inputs(author_messages, seed_authors, seed_text=seed_text)
 
         true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
         out_texts,input_len = self._batched_helper([input_context+ap for ap in author_prompts], true_batch_generate=true_batched)
@@ -648,15 +698,15 @@ class Cloneus(GenConfigUtilities):
 
     
     @torch.inference_mode()
-    def stream_batch_generate(self, author_messages: list[tuple[str,str]], reply_authors: list[str], reply_seedtext: str = None):
+    def stream_batch_generate(self, author_messages: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None):
         """Generate streamed responses for a batch of authors, each optionally starting with `reply_seedtext` given the message context history.
 
         Sets attribute `_last_streamed_batch_values` with inputs and outputs for retrieval with `get_last_streamed(batch=True)`
         
         Args:
             author_messages: A list of tuples of unformatted (author name, message) pairs
-            reply_authors: The list of authors to generate responses for.
-            reply_seedtext: The seed text to start of each author's reponse with.
+            seed_authors: The list of authors to generate responses for.
+            seed_text: The seed text to start of each author's reponse with.
 
         Yields:
             tuple[int,str]: A tuple of the author index and the next predicted token string.
@@ -666,10 +716,8 @@ class Cloneus(GenConfigUtilities):
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
        
-        input_context = self.to_text_input(author_messages, author_seedtext=None)
-        if reply_seedtext is None: reply_seedtext = ''
-        # IFF using ' ' as tag_sep, should NOT trail with it
-        author_prompts = [self.apply_template(author, reply_seedtext, self.cfg.tag_sep).strip(' ') for author in reply_authors]
+        input_context,author_prompts = self._get_batched_inputs(author_messages, seed_authors, seed_text=seed_text)
+        
         msg_batch = [input_context+ap for ap in author_prompts]
 
         for i, inptext in enumerate(msg_batch):
@@ -938,7 +986,10 @@ class CloneusUA(Cloneus):
         <|im_start|>assistant
         [USER:Gamma, NAME:Greg] I am Greg, thanks<|im_end|>
     '''
-    
+    def apply_content_prefix(self, author:str, text_content:str, tag_sep:str):
+        atag=roles.format_author_tag(author, self.cfg.author_tag)
+        return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
+
     def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
         rolecycle = itertools.cycle(['user','assistant'])
 
@@ -950,13 +1001,13 @@ class CloneusUA(Cloneus):
             pcontent = self.cfg.fprompt
             if self.cfg.prompt.append_msg:
                 auth, msg = author_messages[0]
-                pcontent += self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep)
+                pcontent += self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
                 author_messages = author_messages[1:]
             
             chat_content.append({"role": next(rolecycle), "content": pcontent})
         
         for auth,msg in author_messages:
-            message = self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep)
+            message = self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
             chat_content.append({"role": next(rolecycle), "content": message})
         
         return chat_content
@@ -1117,16 +1168,20 @@ class CloneusUntuned(CloneusUA):
                 chat_content.append({"role": "assistant", "content": "OK"})
         
         for auth,msg in author_messages:
-            message = self.apply_template(auth, msg, tag_sep=self.cfg.tag_sep)
+            message = self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
             chat_content.append({"role": next(rolecycle), "content": message})
         
         return chat_content
     
 
-    def to_text_input(self, author_messages: list[tuple[str,str]], prompt_author_seedtext: tuple[str,str]=None):
-        text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+    def to_text_input(self, author_messages: list[tuple[str,str]], author_seedtext: tuple[str,str]=None):
+        author_messages = author_messages[:]
+        if author_seedtext is not None:
+            text = self.to_seeded_text(author_messages, author_seedtext)
+        else:
+            text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+        
         # Untuned models will not understand the encoding, so leave youtube as links
         #text = self.ytm.encode(text)
-        text = self.append_author_seedtext(text, prompt_author_seedtext, tag_sep=self.cfg.tag_sep)
     
         return text
