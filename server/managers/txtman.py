@@ -90,7 +90,7 @@ class CloneusManager():
         statuses = [
             ('Bot status', 'Up' if self.is_ready else 'Down', " ✔" if self.is_ready else " ✖"),
             ('Model', model_name, f"/{checkpoint}"),
-            ('Base tune type', self.clo.cfg.base_tune_type, f""),
+            ('Tag placement', self.clo.cfg.tag_placement, f""),
             ('Flash_dtype', f'{self.clo.cfg.attn_implementation}', f' - {self.clo.torch_dtype}'),
             ('vRAM usage', f'{vram_use:,}MiB', f' / {vram_total:,}MiB'),
             ('YouTube quota', self.yt_session_quota+stored_yt_quota,' / 10000',),
