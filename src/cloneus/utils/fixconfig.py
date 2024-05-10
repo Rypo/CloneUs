@@ -2,31 +2,15 @@ import re
 import json
 from pathlib import Path
 
-
-import matplotlib.pyplot as plt
 import torch
 import peft
 import transformers
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
-# from ..config import settings as rsettings
+
 from cloneus.core import paths as cpaths
-from cloneus.data import roles
 
 
-
-
-def print_loss(tstate):
-    end_train_loss=tstate['log_history'][-2].get('loss')
-    end_eval_loss=tstate['log_history'][-1].get('eval_loss')
-    print(f'{end_train_loss=}, {end_eval_loss=}')
-    return end_train_loss, end_eval_loss
-
-def plot_lr(tstate):
-    fig,ax=plt.subplots(figsize=(5,3))
-    ax.set(title='LR Plot',xlabel='logging step',ylabel='learning rate')
-    ax.plot(list(filter(None,[l.get('learning_rate') for l in tstate['log_history']])))
-    return print_loss(tstate)
 
 def empty_cfg(cfg):
     for k,v in cfg.items():
@@ -49,6 +33,9 @@ def get_blankcfg(full=True):
                                        **OmegaConf.masked_copy(fcfg, ['attn_implementation','tag_sep','postfix','author_tag','has_custom_tokens','dtype','prompt','notes',]), 
                                        'base_dir':None})
     return partial_config
+
+def read_training_args(model_path):
+    return torch.load(Path(model_path)/'training_args.bin')
 
 def read_trainerstate(model_path, return_full=False):
     try:
@@ -76,7 +63,6 @@ def parse_modelpath(model_path):
         if len(hours_between_sessions)==1:
             hours_between_sessions=hours_between_sessions[0]
     
-    
     composite = parts[5]
     comparts = composite.split('-')
     
@@ -91,6 +77,33 @@ def parse_modelpath(model_path):
             'custom_tokens':custom_tok,'scheduler':scheduler,'custom_scheduler':custom_scheduler,}
             #'warmup_ratio':warmup_ratio,'warmup_steps':warmup_steps}
 
+
+def dump_configs(fullcfg, cfg, base_dirpath:Path):
+    prev_cfg_dir = (base_dirpath/'prev_configs')
+    prev_cfg_dir.mkdir(exist_ok=True)
+    
+    fullcfg_path = base_dirpath/'full_config.yaml'
+    cfg_path = base_dirpath/'config.yaml'
+        
+    if fullcfg_path.exists():
+        fullcfg_path.rename(prev_cfg_dir/'orig_full_config.yaml')
+    
+    if OmegaConf.missing_keys(fullcfg):
+        fullcfg_path = fullcfg_path.with_name('MISSING_full_config.yaml')
+    
+    if cfg_path.exists():
+        cfg_path.rename(prev_cfg_dir/'orig_config.yaml')
+    
+    if OmegaConf.missing_keys(cfg):
+        cfg_path = cfg_path.with_name('MISSING_config.yaml')
+    
+
+    OmegaConf.save(fullcfg, fullcfg_path)
+    print('wrote to:', fullcfg_path)
+
+    OmegaConf.save(cfg, cfg_path)
+    print('wrote to:',cfg_path)
+
 def create_configs(model_path, manual_kwargs=None):
     assert 'checkpoint' in str(model_path),'need a checkpoint to go off of'
     
@@ -99,9 +112,10 @@ def create_configs(model_path, manual_kwargs=None):
     
     tstate = read_trainerstate(model_path, False)
     
-    train_loss, eval_loss = print_loss(tstate)
+    train_loss= tstate.log_history[-2].get('loss', tstate.get('train_loss'))
+    eval_loss = tstate.log_history[-1].get('eval_loss')
     
-    ta = torch.load(Path(model_path)/'training_args.bin')
+    ta = read_training_args(model_path)
     mp_stats = parse_modelpath(model_path)
     
     #pconf=model.peft_config['default']
@@ -202,29 +216,9 @@ def create_configs(model_path, manual_kwargs=None):
         'base_dir':base_dir,
     })
     
-    
-    if (fc_path := mbase_path/'full_config.yaml').exists():
-        fc_path.rename(mbase_path/'orig_full_config.yaml')
-    
-    if OmegaConf.missing_keys(fconfig):
-        fullconfig_path = fullconfig_path.with_name('MISSING_full_config.yaml')
-    
-
-    
-    if (c_path := mbase_path/'config.yaml').exists():
-        c_path.rename(mbase_path/'orig_config.yaml')
-    
-    if OmegaConf.missing_keys(config):
-        config_path = config_path.with_name('MISSING_config.yaml')
-    
-    OmegaConf.save(fconfig, fullconfig_path)
-    print('wrote to:',fc_path)
-
-    OmegaConf.save(config, config_path)
-    print('wrote to:',config_path)
+    dump_configs(fconfig, config, mbase_path)
         
     return fconfig, config
-
 
 def human_name(conf):
     model_hn = dict(zip(
@@ -234,3 +228,113 @@ def human_name(conf):
     rank_hn = dict(zip([4, 8, 16, 32, 64, 128, 256],['vvsmall', 'vsmall', 'small', 'med', 'large', 'vlarge', 'vvlarge']))
     targ_hn = dict(zip(['qv', 'qvok', 'qvokudg', 'qvokudgLhEt'], ['few', 'some', 'most', 'all']))
     ar_hn = dict(zip([1/8, 1/4, 1/2, 1, 2, 4, 8], ['vvlight','vlight', 'light', 'balanced', 'heavy', 'vheavy', 'vvheavy']))
+
+
+def to_dot_keys(cfg, base_name = '', dot_key_list=None):
+    if dot_key_list is None:
+        dot_key_list = set()
+    
+    for k,v in cfg.items():
+        name = base_name+'.'+k if base_name else k
+        if OmegaConf.is_dict(v):
+            dot_key_list |= to_dot_keys(cfg[k], name, dot_key_list)
+        else:
+            dot_key_list.add(name)
+
+    return dot_key_list
+
+def find_all_missing(reference_cfg, cfg_paths:list[str|Path]):
+    reference_keys = to_dot_keys(reference_cfg)
+    miss_list = []
+    for cfg_pth in cfg_paths:
+        miss_keys = reference_keys - to_dot_keys(OmegaConf.load(cfg_pth))
+        miss_list.append({'path':cfg_pth, 'missing':miss_keys})
+
+    return miss_list
+
+
+def get_toplevel_cfgpaths():
+    return [p for p in cpaths.RUNS_DIR.rglob('config.yaml') if p.parent.name != 'prev_configs' and any(p.parent.glob('*checkpoint*'))]
+
+
+
+
+def backup_and_update(keyfix_map: dict[str, callable[DictConfig]]):
+    '''Fills missing keys in config.yaml, saves and backup to prev_configs. Does not work for dot keys yet. 
+    
+    The function it maps to must take cfg as the only argument amd return the value for that key.
+
+    ex:
+        {'tag_placement': determine_tag_placement, 
+        'chat_template_format': determine_chat_template_format}
+    
+    Args:
+        keyfix_map: dict (key:func) where keys are keys you want in all configs and func takes a cfg and returns a value for that key
+    '''
+    import datetime
+    fix_keys = keyfix_map.keys() # ['tag_placement', 'chat_template_format']
+    all_top_level_configs = get_toplevel_cfgpaths()
+
+    for cfg_path in all_top_level_configs:
+        prev_cfg_dir = (cfg_path.parent/'prev_configs')
+        prev_cfg_dir.mkdir(exist_ok=True)
+        date = datetime.datetime.now().strftime('%Y%m%d')
+        cfg = OmegaConf.load(cfg_path)
+        
+        print('cfg_path:', cfg_path)
+        backup_path = prev_cfg_dir/f'config_{date}.yaml'
+        
+        was_updated = False
+        for key in fix_keys:
+            if key not in cfg:
+                cfg[key] = cfg.setdefault(key, keyfix_map[key](cfg))
+                was_updated = True
+
+        if was_updated:
+            cfg_path.rename(backup_path)
+            OmegaConf.save(cfg, cfg_path)
+            
+            print('Updated. backup_path:', backup_path)    
+        else:
+            print('ALL KEY PRESENT')
+        
+        print()
+
+
+def determine_chat_template_format(cfg):
+    current_value = OmegaConf.select(cfg, 'chat_template_format')
+    tokenizer = transformers.AutoTokenizer.from_pretrained(cfg.model_id, trust_remote_code=True)
+    base_chat_template = tokenizer.chat_template or ""
+    custom_chat_template = cfg.custom_chat_template or ""
+    
+    base_chat_ml = '<|im_start|>' in base_chat_template
+    custom_chat_ml = '<|im_start|>' in custom_chat_template
+    print(f'{current_value=}, {base_chat_ml=}, {custom_chat_ml=}')
+    
+    if current_value:
+        return current_value
+        
+    if custom_chat_ml and not base_chat_ml:
+        chat_template_format = 'chatml'
+    else:
+        chat_template_format = None
+    
+    return chat_template_format
+    
+def determine_tag_placement(cfg):
+    current_value = OmegaConf.select(cfg, 'tag_placement')
+    has_custom_chat_template = cfg.custom_chat_template is not None
+
+    if has_custom_chat_template:
+        tag_placement = 'replace_role'
+    elif cfg.base_tune_type == 'foundation':
+        tag_placement = 'tag_only'
+    elif cfg.base_tune_type in ['instruct','chat']:
+        tag_placement = 'content_prefix'
+
+    print(f'{tag_placement} \t {cfg.postfix!r} \t {cfg.tag_sep!r} \t {cfg.author_tag!r}')
+    
+    if current_value:
+        return current_value
+
+    return tag_placement
