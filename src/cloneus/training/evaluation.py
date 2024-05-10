@@ -9,12 +9,8 @@ from contextlib import contextmanager
 import numpy as np
 from tqdm.auto import tqdm
 import torch
-import transformers
-from transformers import GenerationConfig
 
-from cloneus.core import paths as cpaths
 from cloneus.data import roles
-from cloneus.inference import genconfig
 from cloneus import Cloneus
 
 
@@ -37,9 +33,6 @@ def get_test_questions(questions_filepath:str|Path, n:int|None = 1, best_only=Fa
     random.shuffle(test_qs)
     return test_qs[:n]
 
-def apply_template(author, text_content, author_tag, tag_sep, postfix):
-    atag=author_tag.format(author=author, lauthor=author.lower(), fname=roles.author_to_fname[author])
-    return f'{atag}{tag_sep}{text_content}{postfix}'
 
 def mock_msgcache(*amsgs):
     '''Format <initial>:<message>
@@ -51,49 +44,6 @@ def mock_msgcache(*amsgs):
         mcache.append((auth,msg))
     return mcache
 
-@torch.inference_mode()
-def generate(model:transformers.PreTrainedModel, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, seed_text='', stop_criteria=None):
-    model.eval()
-    input_text = seed_text
-    inputs = tokenizer(input_text, return_tensors="pt", return_length=True)
-    input_len = inputs.pop('length')[0].item()
-    output = model.generate(**inputs.to(0), generation_config=gen_config, stopping_criteria=stop_criteria).detach()
-    out_tokens = output[0,input_len:]
-    output_len = out_tokens.shape[0]
-    out_text = tokenizer.decode(out_tokens, skip_special_tokens=False)
-
-    return input_text, out_text, input_len, output_len
-
-#@torch.no_grad()
-@torch.inference_mode()
-def test_model(model, tokenizer, genconfs, seed_text='', do_print=True):
-    """While LoRA is significantly smaller and faster to train, you may encounter latency issues during inference 
-    due to separately loading the base model and the LoRA model. To eliminate latency, use the merge_and_unload() 
-    function to merge the adapter weights with the base model which allows you to effectively use the newly merged model as a standalone model."""
-    was_training = model.training
-    model.eval()
-
-    inputs = tokenizer(seed_text, return_tensors="pt", return_length=True)
-    input_len = inputs.pop('length')[0].item()
-
-    genconfs = [genconfs] if not isinstance(genconfs, list) else genconfs
-   
-    outputs = [model.generate(**inputs.to(0), generation_config=gconf, stopping_criteria=None).detach() for gconf in genconfs]
-    
-    # get input tokens again because generate() may have changed formatting
-    
-    in_text = tokenizer.decode(outputs[0][:input_len], skip_special_tokens=False)
-    out_texts = tokenizer.batch_decode([out[0, input_len:] for out in outputs], skip_special_tokens=False)
-    #in_text,out_text = text[:textlen], text[textlen:]
-    
-    if do_print:
-        sep = '\n'+'-'*64+'\n'
-        print(f"Input text:\n{in_text}\n[[[🤖]]]\n{sep.join(out_texts)}")
-    
-    #model.config.use_cache = False
-    model.train(was_training)
-    
-    return in_text,out_texts
 
 def textborder(center_text, sym='-', out_n=64, cent_n=0):
     bpad=int(out_n>0)
@@ -160,16 +110,18 @@ def eval_run(checkpoint_paths:list[Path], prompts: list[str], genconfig_modes:li
 def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', genconfig_modes:list[str]=None, question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
     if genconfig_modes is None:
         genconfig_modes = ['cs','ms']
-        
+    
+    author_display_names = roles.author_display_names
+
     if question_author is None:
-        question_author = roles.author_display_names[0]
+        question_author = author_display_names[0]
     
     if isinstance(response_authors, list):
         author_list = response_authors
     elif response_authors == 'rest':
-        author_list = [a for a in roles.author_display_names if a!=question_author]
+        author_list = [a for a in author_display_names if a!=question_author]
     elif response_authors == 'all':
-        author_list = roles.author_display_names
+        author_list = author_display_names
     
     runs_path = Path(runs_path)
 
@@ -203,13 +155,15 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
     clo = Cloneus(model_path)
     clo.load_model()
     
+    author_display_names = roles.author_display_names
+
     if question_author is None:
-        question_author = roles.author_display_names[0]
+        question_author = author_display_names[0]
     
     if response_authors == 'rest':
-        author_list = [a for a in roles.author_display_names if a!=question_author]
+        author_list = [a for a in author_display_names if a!=question_author]
     elif response_authors == 'all':
-        author_list = roles.author_display_names
+        author_list = author_display_names
     elif isinstance(response_authors, list):
         author_list = response_authors
 

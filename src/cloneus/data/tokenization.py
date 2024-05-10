@@ -4,9 +4,6 @@ from contextlib import contextmanager
 import torch
 import transformers
 
-from . import roles
-
-
 def check_if_system(tokenizer):
     from jinja2.exceptions import TemplateError
     
@@ -23,46 +20,8 @@ def check_if_system(tokenizer):
 
     return has_system
 
-def xapply_template(author, text_content, author_tag, tag_sep, postfix):
-    # TEMPLATE = '[USER:{author}]{tag_sep}{text_content}{postfix}'
-    atag=roles.format_author_tag(author,author_tag)
-    return f'{atag}{tag_sep}{text_content}{postfix}'
-
-def tokenize_messages(tokenizer, author_messages: list[tuple[str,str]], prompt_authmsg:tuple[str,str], bos_on_all=True, eos_on_all=False, tag_sep=' ', postfix='\n\n'):
-    context_messages = [xapply_template(a, t, author_tag='[USER:{author}]', tag_sep=tag_sep, postfix=postfix) for a,t in author_messages]
-    prompt = xapply_template(*prompt_authmsg, author_tag='[USER:{author}]', tag_sep=tag_sep, postfix='')
-    if eos_on_all:
-        tokenizer.add_eos_token = True
-        inputs = tokenizer(context_messages)
-        # never want eos on prompt input
-        tokenizer.add_eos_token = False
-    elif bos_on_all:
-        inputs = tokenizer(context_messages)
-    else:
-        inputs = ''.join(context_messages)+prompt
-        #inputs = inputs.strip() + ' '
-        inputs = tokenizer(inputs, return_tensors='pt')
-        return inputs
-    
-    prompt_tokens = tokenizer([prompt])
-    for k in inputs:
-        inputs[k] += prompt_tokens[k]
-
-    for k,v in inputs.items():
-        inputs[k] = torch.cat([torch.as_tensor(t) for t in v]).unsqueeze(0)
-    
-    return inputs
 
 
-def save_embeddings(model, outdir):
-    input_embeddings = model.get_input_embeddings().weight.data
-    output_embeddings = model.get_output_embeddings().weight.data
-    emb_dir = os.path.join(outdir, 'embeddings')
-    os.makedirs(emb_dir, exist_ok=True)
-    
-    torch.save(input_embeddings, os.path.join(emb_dir, 'input_embed_weights.bin'))
-    torch.save(output_embeddings, os.path.join(emb_dir, 'output_embed_weights.bin'))
-    print('saved embeddings to:', emb_dir)
 
 
 def smart_tokenizer_and_embedding_resize(
