@@ -5,11 +5,9 @@ from omegaconf import OmegaConf
 from dotenv import load_dotenv
 import torch
 from peft import LoraConfig, LoftQConfig, AutoPeftModelForCausalLM
-from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
 import cloneus.training.trainer as mtrain
 import cloneus.training.model as mllm
-import cloneus.training.evaluation as meval
 from cloneus.data import dataset, tokenization, roles
 from cloneus.core import paths as cpaths
 
@@ -34,7 +32,7 @@ def write_first_batches(trainer, batchsample_dir='_tmp/sample_batches'):
 def verify_config(cfg):
     if 'fname' in cfg.author_tag:
         # Check that all users have assigned firstName if using "fname" in tag
-        for dispname, fname in roles.author_to_fname.items():
+        for dispname, fname in roles.get_users('fname', by='dname').items():
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
     
@@ -184,7 +182,7 @@ def main(args):
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
     if cfg.prompt.template:
-        name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.author_display_names)
+        name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.get_users('dname'))
         cfg.prompt.name_mapping = name_mapping
         cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
 
@@ -215,8 +213,6 @@ def main(args):
 
     write_first_batches(trainer, batchsample_dir='_tmp/sample_batches')
 
-    if num_custom_tokens:
-        tokenization.save_embeddings(model, train_args.output_dir)
 
     safe_train(trainer, resume_ckpt)
     

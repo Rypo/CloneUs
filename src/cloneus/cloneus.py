@@ -891,7 +891,7 @@ class CloneusTag(Cloneus):
             
             if self.cfg.postfix == '\n':
                 # use formatted author tags for early stop to prevent unterminated outputs 
-                auth_tags = [roles.format_author_tag(u, self.cfg.author_tag) for u in roles.author_display_names]
+                auth_tags = [roles.format_author_tag(u, self.cfg.author_tag) for u in roles.get_users('dname')]
                 stop_criteria.append(genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0))
             elif postfix_stop.stop_token_ids[0].shape[0] == 1:
                 # If the postfix is a single token, we can added it to the genconfig eos_token_ids for much more efficient processing
@@ -1072,13 +1072,13 @@ class CloneusUntuned(CloneusUA):
     @staticmethod
     def create_default_cfg(model_id:str, system_prompt_template:str|SystemPromptTemplate = None, author_display_names:list[str]=None, author_tag:str=None, tag_sep:str=' ', attn_implementation:str='flash_attention_2', **kwargs):
         if author_display_names is None:
-            author_display_names = roles.author_display_names
+            author_display_names = roles.get_users('dname')
 
         if author_tag is not None:
             assert r'{author}' in author_tag or r'{fname}' in author_tag, 'At least one of "{author}" or "{fname}" needs to be in author_tag template!'
         else:
             # Use first names if defined
-            if all(roles.author_to_fname.get(author) for author in author_display_names):
+            if all(roles.get_users('fname', by='dname').get(author) for author in author_display_names):
                 author_tag = '[USER:{author}, NAME:{fname}]:'
             else:
                 author_tag = '[USER:{author}]:'
