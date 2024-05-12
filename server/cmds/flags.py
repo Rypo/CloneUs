@@ -124,6 +124,15 @@ class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
 
+class UpsampleFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+    # imgfile: discord.Attachment
+    # prompt: str
+    hdsteps: int = commands.flag(default=1, aliases=['refine_steps'])
+    hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength'])
+    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+
+
 # class RedrawFlags(commands.FlagConverter):
 #     # image_url: str = commands.flag(
 #     #     description="Image URL. Square = Best results. 1024x1024 = ideal (512x512 = Turbo ideal).")

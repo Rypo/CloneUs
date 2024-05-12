@@ -328,7 +328,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
             needs_view = True
         
         async with self.bot.busy_status(activity='draw'):
-            self.igen.dc_fastmode(enable=fast, img2img=False)
+            self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
             image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, steps=steps, 
                                                            strength=strength, negative_prompt=negative_prompt, 
                                                            guidance_scale=guidance_scale, aspect=aspect, refine_steps=refine_steps,
@@ -343,7 +343,40 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         #out_imgpath = save_image_prompt(image, prompt)
         return image, out_imgpath
 
+    @commands.hybrid_command(name='hd')
+    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    async def hd_upsample(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: str = None, *, flags: cmd_flags.UpsampleFlags, ):
+        """Make an image HD (big n' smooooth).
+        
+        Args:
+            imgfile: image attachment. If bigger than (1216,832)/(1024²)/(1216,832) it's shrunk down first.
+            prompt: A description of the image. Not required, but if high hdstep/hdstrength helps A LOT.
+            hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=1. Usually < 3.
+            hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Default=~30
+            no: What to exclude from image. Usually comma sep list of words. Default=None.
+            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+        """
 
+        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgfile)
+        image = load_image(image_url).convert('RGB')
+        if prompt is None:
+            prompt = ''
+        if len(prompt) > 1000:
+            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
+        
+        await ctx.defer()
+        await asyncio.sleep(1)
+
+        async with self.bot.busy_status(activity='draw'):
+            image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, 
+                                                           refine_steps=flags.hdsteps,refine_strength=flags.hdstrength,
+                                                           negative_prompt=flags.no, guidance_scale=flags.guide,
+                                                           strength=0, steps=None, )
+            
+            out_imgpath = save_image_prompt(image, prompt)
+            msg = await send_imagebytes(ctx, image, prompt)
+
+        return image, out_imgpath
         
 
 async def setup(bot: BotUs):

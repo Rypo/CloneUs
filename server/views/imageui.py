@@ -98,7 +98,7 @@ class DrawUIView(discord.ui.View):
         
     async def update_view(self, img_file: discord.File = None):
         self.update_buttons()
-        print(f'index: {self.cur_imgnum}, items: {self.n_images}')
+        #print(f'index: {self.cur_imgnum}, items: {self.n_images}')
         if img_file is None:
             self.message = await self.message.edit(view=self)
         else:
