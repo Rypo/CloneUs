@@ -40,8 +40,8 @@ class GenOpts:
     suppress_tokens: list[int] = None
     begin_suppress_tokens: list[int] = None
     guidance_scale: float = None
-
-    def as_dict(self):
+    
+    def to_dict(self):
        return asdict(self)
 
 # src: https://github.com/oobabooga/text-generation-webui/blob/81f603d09fab9afad9fa54f123c57c187bc115df/extensions/openai/typing.py#L28
@@ -172,7 +172,7 @@ def load_gen_config(gen_config_path:str|Path=None, gen_config_name:str="generati
     if gen_config_path is None:
         print('using GenOptsExtended defaults (multinomial_sampling)')
         #gce = asdict(GenOptsExtended())
-        return GenerationConfig.from_dict(GenOptsExtended().as_dict())
+        return GenerationConfig.from_dict(GenOptsExtended().to_dict())
     gen_config_path = Path(gen_config_path)
     
    # GenerationConfig.from_pretrained expects dir and a str name
@@ -187,7 +187,7 @@ def load_gen_config(gen_config_path:str|Path=None, gen_config_name:str="generati
     except OSError as e:
         print('No existing GenerationConfig found, using GenOpts defaults (multinomial_sampling)')
         #gen_config = GenerationConfig.from_dict(asdict(GenOpts())) 
-        gen_config = GenerationConfig.from_dict(GenOptsExtended().as_dict())
+        gen_config = GenerationConfig.from_dict(GenOptsExtended().to_dict())
 
     return gen_config
 
