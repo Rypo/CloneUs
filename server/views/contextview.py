@@ -134,7 +134,7 @@ class PagedChangelogView(BaseButtonPageView): #discord.ui.View):
         await self.update_message(self.data[0])
 
     def create_embed(self, data):
-        botname = roles.USER_DATA['BOT']['displayName']
+        botname = roles.get_users('dname',include_bot=True)[0]
         embed = discord.Embed(
             color=discord.Color.dark_green(),
             title=f"{botname} ({data['version']})",
