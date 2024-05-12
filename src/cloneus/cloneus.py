@@ -448,14 +448,17 @@ class Cloneus(GenConfigUtilities):
         if seedtext is None:
             seedtext = ''
         
-        author_messages += [(author, '###_dummy_seedtext_###')]
+        fake_seedtext = '###_dummy_seedtext_###'
+        author_messages += [(author, fake_seedtext)]
         text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
         # split on dummy text to KEEP pre-content formatting but REMOVE post content formatting
         # this effectively removes the tag_sep dependency
         # which is important for models where the role has a special token before the content 
         # e.g. Llama-3: <|start_header_id|>(AUTHOR_TAG)<|end_header_id|>\n\n(CONTENT)<|eot_id|>
         # rather than requiring tag_sep = <|end_header_id|>, just don't use it all
-        text = text.split('###__dummy_seedtext_###')[0] + seedtext
+        
+        text = text.split(fake_seedtext)[0] + seedtext
+        
         #text += self.apply_content_prefix(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
 
         return text
