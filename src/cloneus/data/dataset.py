@@ -29,8 +29,8 @@ def convo_token_count(convo:list[dict], tokenizer):
     return n_tokens
 
 
-def assign_roles(messages:list[str], roles:list[str]=None):
-    rolecycle = itertools.cycle(['user','assistant']) if roles is None else iter(roles)
+def assign_roles(messages:list[str], role_labels:list[str]=None):
+    rolecycle = itertools.cycle(['user','assistant']) if role_labels is None else iter(role_labels)
 
     chat_content = []
     for msg in filter(None,messages):
@@ -153,7 +153,7 @@ def format_ua_tgap(df_all:pd.DataFrame, cfg, has_system):
     
     convo = df_rolechat.groupby(['split','chat_session'])[['formatted_text','gtime_gap']].agg(list).drop_duplicates('formatted_text')
 
-    convo['content'] = convo.apply(lambda r: assign_roles(r.formatted_text, roles=None), axis=1) # convo['formatted_text'].apply(assign_roles)
+    convo['content'] = convo.apply(lambda r: assign_roles(r.formatted_text, role_labels=None), axis=1) # convo['formatted_text'].apply(assign_roles)
     convo['content'] = convo['content'].apply(add_sys_msg, system_msg = cfg.fprompt, has_system=has_system, append_first_msg = cfg.prompt.append_msg)
     
     convo = convo[['content','gtime_gap']].drop_duplicates('content')
@@ -167,7 +167,7 @@ def format_role_tgap(df_all:pd.DataFrame, cfg, has_system):
 
     convo = df_rolechat.groupby(['split','chat_session'])[['formatted_author_tag','text','gtime_gap']].agg(list).drop_duplicates('text')
 
-    convo['content'] = convo.apply(lambda r: assign_roles(r.text, roles=r.formatted_author_tag), axis=1)
+    convo['content'] = convo.apply(lambda r: assign_roles(r.text, role_labels=r.formatted_author_tag), axis=1)
     convo['content'] = convo['content'].apply(add_sys_msg, system_msg = cfg.fprompt, has_system=has_system, append_first_msg = cfg.prompt.append_msg)
     
     convo = convo[['content','gtime_gap']].drop_duplicates('content')
@@ -181,7 +181,7 @@ def ua_tags_dataset(chat_csv, tokenizer, cfg, text_only=False):
     msl = 3 if cfg.prompt.append_msg else 2
     cfg.dataset.min_session_length = msl if cfg.dataset.min_session_length is None else max(cfg.dataset.min_session_length, msl)
 
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), author_tag=cfg.author_tag, tag_sep=cfg.tag_sep, postfix=None, 
+    df_all = etl.format_chat_groups(etl.process_csv(chat_csv), author_tag=cfg.author_tag, tag_sep=cfg.tag_sep, postfix=None, 
                                     hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=cfg.dataset.get('eval_frac',0.01))
     
 
@@ -211,7 +211,7 @@ def author_roletags_dataset(chat_csv, tokenizer, cfg, text_only=False):
     topk_longest_gaps = 10
     has_system = check_if_system(tokenizer)
 
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), author_tag=cfg.author_tag, tag_sep=None, postfix=None, 
+    df_all = etl.format_chat_groups(etl.process_csv(chat_csv), author_tag=cfg.author_tag, tag_sep=None, postfix=None, 
                                     hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=cfg.dataset.get('eval_frac',0.01))
 
     convo = format_role_tgap(df_all, cfg, has_system=has_system)
@@ -261,7 +261,7 @@ def ungrouped_dataset(chat_csv, tokenizer, cfg, text_only=False):
         raise ValueError('for dataset "ungrouped_eos" SFTTrainer must be used to preserve message order')
     
 
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix, 
+    df_all = etl.format_chat_groups(etl.process_csv(chat_csv), author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix, 
                                     hours_between_sessions=None, min_session_length=cfg.dataset.min_session_length, eval_frac=cfg.dataset.eval_frac)
     
     df_all = df_all[['split','formatted_text']].rename(columns={'formatted_text':'text'})
@@ -298,7 +298,7 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
     
     Chat sessions grouping are maintained to avoid non-sequential chat concatenation.
     '''
-    df_all = etl.format_chat_groups(etl.preprocess_df(chat_csv), author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix, 
+    df_all = etl.format_chat_groups(etl.process_csv(chat_csv), author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix, 
                                     hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length, eval_frac=cfg.dataset.get('eval_frac',0.01))
     
     df_all['session_hr'] = df_all['chat_session'].astype(str).str[0]
