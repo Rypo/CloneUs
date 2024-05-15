@@ -16,27 +16,15 @@ USER_INDEX = None
 def _read_user_index():
     try:
         with open(USERS_FILEPATH,'r') as f:
-            USER_INDEX: dict = json.load(f)
+            USER_INDEX: list[dict] = json.load(f)
             return USER_INDEX
     except FileNotFoundError as e:
         raise FileNotFoundError('Missing config/users.json. You must run `scripts/build.py` or otherwise create users.json to proceed.')
 
-def write_user_index(user_index:dict, overwrite:bool=False):
-    user_initials = get_users('initial', user_index=user_index)
-    if not all(user_initials):
-        ini_to_name,namekey = create_default_initials(
-            get_users('fname', user_index=user_index), 
-            get_users('dname', user_index=user_index), 
-            get_users('uname', user_index=user_index)
-        )
+def write_user_index(user_index:dict, write_initials:bool=True, overwrite:bool=False):
+    if write_initials:
+        user_index = update_initials(user_index, priority_order=('fname', 'dname', 'uname'), overwrite_existing=True)
         
-        ud = get_users(by=namekey, user_index=user_index)
-        
-        for ini,name in ini_to_name.items():
-            # if not ud[name]['authorInitial']:
-            ud[name]['authorInitial'] = ini
-
-    
     if USERS_FILEPATH.exists() and not overwrite:
         raise FileExistsError(f'{USERS_FILEPATH} exists and overwrite=False')
     
@@ -44,29 +32,7 @@ def write_user_index(user_index:dict, overwrite:bool=False):
         json.dump(user_index, f, indent=2)
         print('Created users file at:', str(USERS_FILEPATH))
 
-def placeholder_userdata(populate=False):
-    user_index = [
-         {"id": 0, "firstName": "Cloney","authorInitial": "b0", "username": "cloneus", "displayName": "Cloneus", "isBot": True},
-    ]
-    if populate:
-        import string
-        for i in range(1,8):
-            c = string.ascii_lowercase[i-1]
-            c_up = c.upper()
 
-            placeholder_user = {
-                "id": i,
-                "firstName": f"{c_up}FirstName",
-                "authorInitial": c,
-                "username": f"placeholder_username_{i}",
-                "displayName": "PlaceHolder_displayName{i}",
-                "isBot": False
-            }
-
-            user_index.append(placeholder_user)
-    return user_index
-
-    
 
 # if k and v: return dict mapping all user's k -> v
 # if k and no v: return dict of dicts indexed by k where values are each user's whole data dict (including k)
@@ -75,7 +41,7 @@ def placeholder_userdata(populate=False):
 # @functools.cache
 def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|None = None, 
               by: typing.Literal['dname','initial','fname','uname','id']|None = None, 
-              *, include_bot:bool=False, user_index: dict = None,
+              *, include_bot:bool=False, user_index: list[dict] = None,
               ) -> dict[str,] | dict[str, dict[str,]] | list | list[dict[str,]]:
     '''Reindex and filter user data index.
 
@@ -107,7 +73,8 @@ def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|
     
     
     if not include_bot:
-        user_index = user_index[1:]
+        if user_index[0]['isBot']:
+            user_index = user_index[1:]
     else:
         assert user_index[0]['isBot'], 'Cloneus bot not in user data!'
         user_index = user_index[:] # shallow copy just for consistency with exclude
@@ -121,7 +88,7 @@ def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|
         # this could go later, but it *feels* better earlier
         _key = alias.get(by, by)
         _vals = [u[_key] for u in user_index]
-        if not all(_vals):
+        if any(v is None for v in _vals):
             raise ValueError(f'Cannot index by {by!r}. Not all users assigned a value for {by!r}.')
         if len(set(_vals)) != len(_vals):
             raise ValueError(f'Cannot index by {by!r}. Values for {by!r} are not unique across users.')
@@ -153,12 +120,7 @@ def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|
 # author_to_id: get_users('id', 'dname')
 # initial_to_author: get_users('dname', 'initial')
 # BOT_NAME: get_users('dname', include_bot = True)[0]
-# try:
-#     USER_DATA, author_display_names, author_to_fname, author_to_id, initial_to_author = _load_author_helpers()
-#     BOT_NAME = USER_DATA['BOT']['displayName']
-# except FileNotFoundError as e:
-#     warnings.warn('Missing config/users.json. Until you run scripts/build.py or otherwise create user.json, the following constants will be unavailable:'
-#                   '`USER_DATA`, `author_display_names`, `author_to_fname`, `author_to_id`, `initial_to_author`, `BOT_NAME`')
+# USER_DATA['USERS']: get_users(include_bot=False)
 
 
 
@@ -199,14 +161,24 @@ def parse_initials(initials_seq:str, return_dispname=False):
     return [i_to_dname[i] for i in initials]
     
 
-def assign_initials(names:list[str]):
+def assign_initials(names:list[str]) -> dict[str,str]:
+    '''Assign each name a unique initial based on its first alphabetical character. If a name has no alpha chars, defaults to "x". 
+    
+    If all names cannot be represented by a unique alphabetical character, all initials will be given a digit incremented by 1 to disambiguate.
+
+    Args:
+        names: List of names to assign initials to
+
+    Returns:
+        dict mapping each name to its assigned initial
+    '''
     snames = sorted(set(names), key=str.lower)
     # take the first alpha letter from the decoded name, if none, default is "x"
     initials = [next(filter(str.isalpha, unidecode(name)), 'x').lower() for name in snames]
     
     # if they are all unique, no digits required.
     if len(set(initials)) == len(snames):
-        return dict(zip(initials, snames))
+        return dict(zip(snames, initials))
     
     dd = defaultdict(lambda: 1)
     uinitials = []
@@ -215,56 +187,41 @@ def assign_initials(names:list[str]):
         uinitials.append(f'{c}{dd[c]}')
         dd[c]+=1
     
-    return dict(zip(uinitials, snames))
+    return dict(zip(snames, uinitials))
 
-# If initials are not provided, assign using first names if available
-# Otherwise, use display names for initials
-# TODO: allow partial initial assignment. 
-def create_default_initials(first_names:list[str]=None, display_names:list[str]=None, usernames:list[str] = None):
-    '''Get initials for each user based name
+
+
+def create_default_initials(user_index:list[dict], priority_order:tuple[typing.Literal['fname','dname','uname'], ...]=('fname','dname','uname')) -> tuple[dict[str, str], typing.Literal['fname','dname','uname']]:
+    '''Get initials for each user based name. 
     
-    priorty: 
-        1: unique initial first names
-        2: unique initial display names
-        3: unique initial usernames
-        4: first names
-        5: display names
-        6: usernames
+    Initial assignment priority is given by priority_order, but digitless assignments take precendence over order.
+    
+    e.g.
+        If order is fname, dname, uname and first names map to a1,g1,a2 and usernames map to k,n,c, username mapping is used.
     '''
+    # TODO: allow partial initial assignment. 
+    if isinstance(priority_order, str):
+        priority_order = (priority_order, )
     
-    if first_names is None:
-        first_names = []
-    if display_names is None:
-        display_names = []
-    if usernames is None:
-        usernames = []
+    name_ini_maps = []
+    for namekey in priority_order:
+        names = get_users(namekey, user_index=user_index, include_bot=False)
+        if all(names):
+            name_to_ini = assign_initials(names)
+            # if can be assigned char with out digits, stop early
+            if ''.join(name_to_ini.keys()).isalpha():
+                return name_to_ini,namekey
+            name_ini_maps.append((name_to_ini,namekey))
+    # raise ValueError('Need to specify at least one of `first_names`, `display_names`, or `usernames`')
+    # if none can be represented by only a char, return first tried since it was highest priorty
+    return name_ini_maps[0]
 
-    i_to_fname = {}
-    i_to_dname = {}
-    i_to_uname = {}
-
-    if any(first_names):
-        i_to_fname = assign_initials(first_names)
-        if ''.join(i_to_fname.keys()).isalpha():
-            return i_to_fname,'fname'
+def update_initials(user_index:list[dict],priority_order:tuple[typing.Literal['fname','dname','uname'], ...]=('fname','dname','uname'), overwrite_existing:bool=True) -> None:
+    '''Updates initials IN PLACE.'''
+    if overwrite_existing or not all(get_users('initial', user_index=user_index)):
+        name_to_ini,namekey = create_default_initials(user_index, priority_order = priority_order)
+        user_index_by_name = get_users(by=namekey, user_index=user_index, include_bot=False)
         
-    if any(display_names):
-        i_to_dname = assign_initials(display_names)
-        if ''.join(i_to_dname.key()).isalpha():
-            return i_to_dname,'dname'
-    
-    if any(usernames):
-        i_to_uname = assign_initials(usernames)
-        if ''.join(i_to_uname.key()).isalpha():
-            return i_to_uname,'uname'
-                
-    if i_to_fname:
-        return i_to_fname, 'fname'
-    
-    if i_to_dname:
-        return i_to_dname, 'dname'
-    
-    if i_to_uname:
-        return i_to_uname, 'uname'
-    
-    raise ValueError('Need to specify at least one of `first_names`, `display_names`, or `usernames`')
+        for name,ini in name_to_ini.items():
+            # if not ud[name]['authorInitial']:
+            user_index_by_name[name]['authorInitial'] = ini
