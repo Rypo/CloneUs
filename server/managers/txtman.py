@@ -18,7 +18,7 @@ from utils import text as text_utils, io as io_utils
 from utils.globthread import async_wrap_thread
 
 from cloneus import Cloneus
-from cloneus.data import roles
+from cloneus.data import useridx
 from cloneus.plugins import youtube
 
 def get_gpu_memory():
@@ -131,7 +131,7 @@ class CloneusManager():
         
         #self.status = 'up'
         
-        esc_authtags = [re.escape(roles.format_author_tag(u, self.clo.cfg.author_tag)) for u in roles.get_users('dname')]
+        esc_authtags = [re.escape(useridx.format_author_tag(u, self.clo.cfg.author_tag)) for u in useridx.get_users('dname')]
         self.RE_ANY_USERTAG = re.compile(r'(^{}){}'.format('|'.join(esc_authtags), self.clo.cfg.tag_sep), re.MULTILINE) # NOTE: will NOT work if decide to use UPPER or lower case names
         
         model_logger.info(f'Using model:\n - {str(self.clo.path_data.checkpoint_path)} - ({self.clo.torch_dtype} / {self.clo.cfg.attn_implementation})')
@@ -242,7 +242,7 @@ class CloneusManager():
 
     @async_wrap_thread
     def predict_author(self, message_cache:list[discord.Message],  autoreply_mode: str, author_candidates: list[str]=None) -> str:
-        dnames = roles.get_users('dname')
+        dnames = useridx.get_users('dname')
         llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
         author_probas = self.clo.next_author_probs(llm_input_messages, top_k_next_tokens=len(dnames), author_list=dnames)
         

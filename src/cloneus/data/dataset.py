@@ -14,7 +14,7 @@ from transformers import PreTrainedTokenizerFast
 
 from ..plugins import youtube as youtube
 #from ..core import paths as rpaths
-from . import roles, etl
+from . import etl, useridx
 from .tokenization import check_if_system
 
 
@@ -236,7 +236,7 @@ def author_roletags_dataset(chat_csv, tokenizer, cfg, text_only=False):
     return dset
 
 def tag_only_dataset(chat_csv, tokenizer, cfg, text_only=False):
-    tag_chat_template = roles.to_jinja_template(cfg.tag_sep, cfg.postfix)
+    tag_chat_template = useridx.to_jinja_template(cfg.tag_sep, cfg.postfix)
     if tokenizer.chat_template is not None:
         print('WARNING: existing chat_template will be overwritten with one created from tag_sep + postfix. '
               'This dataset type only recommended for foundation model tuning.')

@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from omegaconf import OmegaConf
 
-from cloneus.data import roles
+from cloneus.data import useridx
 
 
 import config.settings as settings
@@ -42,7 +42,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
     auto_reply_candidates: list = None
     auto_reply_enabled_users: set[discord.User] = set()
     user_aliases: dict = {} # pseudonyms
-    _display_initials: str = ','.join(roles.get_users('initial'))
+    _display_initials: str = ','.join(useridx.get_users('initial'))
     # discord.utils.MISSING 
     #self.cfgmgr = ConfigManager(STATE_CONFIG)
     default_system_msg: str = None
@@ -177,7 +177,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.auto_reply_mode = auto_mode.lower()
 
         self.auto_reply_candidates=None
-        self._display_initials=','.join(roles.get_users('initial'))
+        self._display_initials=','.join(useridx.get_users('initial'))
 
         self.auto_reply_enabled_users.add(ctx.author)
         
@@ -186,7 +186,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
                 self.auto_reply_mode = author_initials[0]+'bot'
                 return await ctx.send(f"Auto reply mode enabled. Auto {self.auto_reply_mode} rollin' out")
                         
-            self.auto_reply_candidates = [roles.get_users('dname',by='initial')[i] for i in author_initials]
+            self.auto_reply_candidates = [useridx.get_users('dname',by='initial')[i] for i in author_initials]
             self._display_initials = ','.join(author_initials)
 
         

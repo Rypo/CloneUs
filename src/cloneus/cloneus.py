@@ -22,7 +22,7 @@ from transformers import (
 )
 import transformers
 
-from cloneus.data import roles, tokenization
+from cloneus.data import tokenization, useridx
 from cloneus.plugins import youtube
 from cloneus.inference import genconfig, load
 
@@ -596,7 +596,7 @@ class Cloneus(GenConfigUtilities):
         
         input_context = self.to_text_input(author_messages, author_seedtext=('###_dummy_author_###','###_dummy_seedtext_###'))
         
-        author_sentinel = roles.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
+        author_sentinel = useridx.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
         seedtext_sentinel = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
 
         input_context, fmt_dummy_seedtext = input_context.split(author_sentinel)
@@ -606,7 +606,7 @@ class Cloneus(GenConfigUtilities):
             seed_text = ''
         
         author_prompts = [authseed_template
-                          .replace(author_sentinel, roles.format_author_tag(u, self.cfg.author_tag))
+                          .replace(author_sentinel, useridx.format_author_tag(u, self.cfg.author_tag))
                           .replace(seedtext_sentinel, seed_text) 
                           for u in seed_authors]
         
@@ -879,7 +879,7 @@ class CloneusTag(Cloneus):
     def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: list[transformers.StoppingCriteria]|None = None):
         '''For foundation models, add a chat template derived from tag markup and custom stopping critera'''
         # assign a simple custom template built with tag_sep and post_fix
-        tokenizer.chat_template = roles.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
+        tokenizer.chat_template = useridx.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
 
         tokenizer = tokenization.set_tokenizer_inference(tokenizer)
         
@@ -894,7 +894,7 @@ class CloneusTag(Cloneus):
             
             if self.cfg.postfix == '\n':
                 # use formatted author tags for early stop to prevent unterminated outputs 
-                auth_tags = [roles.format_author_tag(u, self.cfg.author_tag) for u in roles.get_users('dname')]
+                auth_tags = [useridx.format_author_tag(u, self.cfg.author_tag) for u in useridx.get_users('dname')]
                 stop_criteria.append(genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0))
             elif postfix_stop.stop_token_ids[0].shape[0] == 1:
                 # If the postfix is a single token, we can added it to the genconfig eos_token_ids for much more efficient processing
@@ -911,7 +911,7 @@ class CloneusTag(Cloneus):
             nospace_eos_id = tokenizer(f'A{EOS}', add_special_tokens=False)['input_ids'][1:]
             
             if eos_id != nospace_eos_id:
-                pretag = roles.format_author_tag(user_display_name='###DUMMY', author_tag=self.cfg.author_tag, insert_raw=True).split('###DUMMY')[0]
+                pretag = useridx.format_author_tag(user_display_name='###DUMMY', author_tag=self.cfg.author_tag, insert_raw=True).split('###DUMMY')[0]
                 
                 eos_pretag = f'{EOS}{pretag}'
                 nospace_eos_pretag_id = tokenizer(f'A{eos_pretag}', add_special_tokens=False)['input_ids'][1:]
@@ -940,7 +940,7 @@ class CloneusTag(Cloneus):
         chat_content = []
         
         for author,message in author_messages:
-            role_tag = roles.format_author_tag(author, self.cfg.author_tag) # for TagFormat, tag_sep is baked in to chat_template via to_jinja_template
+            role_tag = useridx.format_author_tag(author, self.cfg.author_tag) # for TagFormat, tag_sep is baked in to chat_template via to_jinja_template
             chat_content.append({"role": role_tag, "content": message})
         
         return chat_content
@@ -968,7 +968,7 @@ class CloneusRole(Cloneus):
         chat_content.append({"role": "system", "content": self.cfg.fprompt})
         
         for author,message in author_messages:
-            role_tag = roles.format_author_tag(author, self.cfg.author_tag)
+            role_tag = useridx.format_author_tag(author, self.cfg.author_tag)
             chat_content.append({"role": role_tag, "content": message})
         
         return chat_content
@@ -990,7 +990,7 @@ class CloneusUA(Cloneus):
         [USER:Gamma, NAME:Greg] I am Greg, thanks<|im_end|>
     '''
     def apply_content_prefix(self, author:str, text_content:str, tag_sep:str):
-        atag=roles.format_author_tag(author, self.cfg.author_tag)
+        atag=useridx.format_author_tag(author, self.cfg.author_tag)
         return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
 
     def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
@@ -1075,18 +1075,18 @@ class CloneusUntuned(CloneusUA):
     @staticmethod
     def create_default_cfg(model_id:str, system_prompt_template:str|SystemPromptTemplate = None, author_display_names:list[str]=None, author_tag:str=None, tag_sep:str=' ', attn_implementation:str='flash_attention_2', **kwargs):
         if author_display_names is None:
-            author_display_names = roles.get_users('dname')
+            author_display_names = useridx.get_users('dname')
 
         if author_tag is not None:
             assert r'{author}' in author_tag or r'{fname}' in author_tag, 'At least one of "{author}" or "{fname}" needs to be in author_tag template!'
         else:
             # Use first names if defined
-            if all(roles.get_users('fname', by='dname').get(author) for author in author_display_names):
+            if all(useridx.get_users('fname', by='dname').get(author) for author in author_display_names):
                 author_tag = '[USER:{author}, NAME:{fname}]:'
             else:
                 author_tag = '[USER:{author}]:'
         
-        name_mapping = ', '.join(roles.format_author_tag(author, author_tag) for author in author_display_names)
+        name_mapping = ', '.join(useridx.format_author_tag(author, author_tag) for author in author_display_names)
 
         has_system = tokenization.check_if_system(AutoTokenizer.from_pretrained(model_id, trust_remote_code=True))
 

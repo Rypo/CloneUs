@@ -8,7 +8,7 @@ from peft import LoraConfig, LoftQConfig, AutoPeftModelForCausalLM
 
 import cloneus.training.trainer as mtrain
 import cloneus.training.model as mllm
-from cloneus.data import dataset, tokenization, roles
+from cloneus.data import dataset, tokenization, useridx
 from cloneus.core import paths as cpaths
 
 def safe_train(trainer:mtrain.Trainer, checkpoint_path=None):
@@ -32,7 +32,7 @@ def write_first_batches(trainer, batchsample_dir='_tmp/sample_batches'):
 def verify_config(cfg):
     if 'fname' in cfg.author_tag:
         # Check that all users have assigned firstName if using "fname" in tag
-        for dispname, fname in roles.get_users('fname', by='dname').items():
+        for dispname, fname in useridx.get_users('fname', by='dname').items():
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
     
@@ -182,7 +182,7 @@ def main(args):
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
     if cfg.prompt.template:
-        name_mapping = ', '.join(roles.format_author_tag(author, cfg.author_tag) for author in roles.get_users('dname'))
+        name_mapping = ', '.join(useridx.format_author_tag(author, cfg.author_tag) for author in useridx.get_users('dname'))
         cfg.prompt.name_mapping = name_mapping
         cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
 

@@ -17,7 +17,7 @@ from discord.ext import commands, tasks
 from omegaconf import OmegaConf
 import torch
 
-from cloneus.data import roles
+from cloneus.data import useridx
 
 import config.settings as settings
 from utils import text as text_utils, io as io_utils
@@ -338,7 +338,7 @@ class TextGen(commands.Cog, SetConfig):
         Args:
             context: which chat history to clear. a/all, b/base, or d/discord  
         '''
-        bot_name = roles.get_users('dname', include_bot = True)[0]
+        bot_name = useridx.get_users('dname', include_bot = True)[0]
         msg = ''
         context = context.lower()
         if context.startswith('a'):
@@ -467,7 +467,7 @@ class TextGen(commands.Cog, SetConfig):
         author_candidates = None
         
         if author_initials:
-            author_candidates = [roles.get_users('dname', by='initial')[i] for i in author_initials]
+            author_candidates = [useridx.get_users('dname', by='initial')[i] for i in author_initials]
 
             if len(author_candidates) == 1:
                 return await self.anybot(ctx, author_candidates[0], seed_text=seed_text, _needsdefer=False)
@@ -481,7 +481,7 @@ class TextGen(commands.Cog, SetConfig):
             next_author = await self.clomgr.predict_author(message_cache, self.auto_reply_mode, self.auto_reply_candidates)
         else: 
             # <author_initial>bot. e.g.: j1bot, abot, qbot, d11bot
-            next_author = roles.get_users('dname', by='initial')[self.auto_reply_mode.replace('bot','')]
+            next_author = useridx.get_users('dname', by='initial')[self.auto_reply_mode.replace('bot','')]
     
         ctx = await self.bot.get_context(message_cache[-1])
         await self.anybot(ctx, next_author, seed_text=None)
@@ -537,7 +537,7 @@ class TextGen(commands.Cog, SetConfig):
             seed_text: Text to start off responses with.
         """
         
-        authors = [roles.get_users('dname', by='initial')[i] for i in author_initials]
+        authors = [useridx.get_users('dname', by='initial')[i] for i in author_initials]
         
         if len(authors)==1:
             return await self.anybot(ctx, authors[0], seed_text=seed_text)
@@ -555,7 +555,7 @@ class TextGen(commands.Cog, SetConfig):
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
             
-    @commands.command(name='author_initial', aliases=roles.get_users('initial'))
+    @commands.command(name='author_initial', aliases=useridx.get_users('initial'))
     async def author_initial_commands(self, ctx: commands.Context, *, seed_text:str = None):
         """(pseudo-command). Call a bot by initial. e.g: `!a seed some text`.
         
@@ -564,11 +564,11 @@ class TextGen(commands.Cog, SetConfig):
         """
         
         if ctx.invoked_with == ctx.command.name:
-            return await ctx.send('Command should not be called directly. Use `!<initial> [SEED_TEXT]`. Options: '+' '.join(f'`!{i}`' for i in roles.get_users('initial')))
+            return await ctx.send('Command should not be called directly. Use `!<initial> [SEED_TEXT]`. Options: '+' '.join(f'`!{i}`' for i in useridx.get_users('initial')))
         
         print(ctx.prefix, ctx.invoked_with, ctx.args[2:], ctx.kwargs)
         author_initial = ctx.invoked_with
-        await self.anybot(ctx, roles.get_users('dname', by='initial')[author_initial], seed_text=seed_text)
+        await self.anybot(ctx, useridx.get_users('dname', by='initial')[author_initial], seed_text=seed_text)
 
     @commands.hybrid_command(name='xbot')
     @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')

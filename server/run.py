@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cloneus.data import roles
+from cloneus.data import useridx
 
 import config.settings as settings
 
@@ -243,5 +243,5 @@ def main():
 if __name__ == '__main__':
     settings._init_dirs()
     settings.setup_logging()
-    roles.check_author_initials()
+    useridx.check_author_initials()
     main()

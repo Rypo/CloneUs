@@ -10,7 +10,7 @@ import numpy as np
 from tqdm.auto import tqdm
 import torch
 
-from cloneus.data import roles
+from cloneus.data import useridx
 from cloneus import Cloneus
 
 
@@ -38,7 +38,7 @@ def mock_msgcache(*amsgs):
     '''Format <initial>:<message>
     e.g. a:what's up everyone, b:nm you?,...'''
     mcache = []
-    i_to_dname = roles.get_users('dname', by='initial')
+    i_to_dname = useridx.get_users('dname', by='initial')
     for amsg in amsgs:
         a,msg = amsg.split(':',1)
         auth = i_to_dname[a]
@@ -112,7 +112,7 @@ def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', ge
     if genconfig_modes is None:
         genconfig_modes = ['cs','ms']
     
-    author_display_names = roles.get_users('dname')
+    author_display_names = useridx.get_users('dname')
 
     if question_author is None:
         question_author = author_display_names[0]
@@ -156,7 +156,7 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
     clo = Cloneus(model_path)
     clo.load_model()
     
-    author_display_names = roles.get_users('dname')
+    author_display_names = useridx.get_users('dname')
 
     if question_author is None:
         question_author = author_display_names[0]

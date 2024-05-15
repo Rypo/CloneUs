@@ -1,11 +1,11 @@
 from discord import app_commands
 
-from cloneus.data import roles
+from cloneus.data import useridx
 import config.settings as settings
 
 from managers import imgman
 
-AUTHOR_DISPLAY_NAMES = [app_commands.Choice(name=n,value=n) for n in roles.get_users('dname')]
+AUTHOR_DISPLAY_NAMES = [app_commands.Choice(name=n,value=n) for n in useridx.get_users('dname')]
 
 MODEL_GENERATIONS = [app_commands.Choice(name=m['desc'], value=m['name']) for m in settings.BEST_MODELS]
 MODEL_YEARS = [app_commands.Choice(name=m['years'], value=m['years']) for m in settings.YEAR_MODELS]+[app_commands.Choice(name='random', value='random')]

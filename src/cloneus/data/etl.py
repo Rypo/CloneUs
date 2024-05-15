@@ -7,7 +7,7 @@ import itertools
 import numpy as np
 import pandas as pd
 
-from cloneus.data import roles
+from cloneus.data import useridx
 from cloneus.plugins import youtube
 
 def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None) -> list[dict]:
@@ -53,7 +53,7 @@ def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005,
         'isBot': True},
         *df_users.to_dict('records')
     ]
-    roles.update_initials(user_index, priority_order=('fname', 'dname', 'uname'))
+    useridx.update_initials(user_index, priority_order=('fname', 'dname', 'uname'))
     return user_index
 
 
@@ -61,12 +61,12 @@ def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, b
     '''ALWAYS INCLUDES BOT AS INDEX 0. Get or create user index.'''
     # TODO: Maybe WildCard user for if data has long tail distrib? -- all users < threshold = WildCardUser
 
-    if not roles.USERS_FILEPATH.exists():
+    if not useridx.USERS_FILEPATH.exists():
         user_data_map = user_index_from_chat(df_chat, msg_threshold=msg_threshold, excluded_users=excluded_users, bot_usernames=bot_usernames)
-        roles.write_user_index(user_data_map)
+        useridx.write_user_index(user_data_map)
 
     else:
-        all_names = set([*roles.get_users('uname'), *roles.get_users('fname'), *roles.get_users('dname') ])
+        all_names = set([*useridx.get_users('uname'), *useridx.get_users('fname'), *useridx.get_users('dname') ])
 
         hits = df_chat[username_column].isin(all_names).sum()
         samples = df_chat.shape[0]
@@ -77,7 +77,7 @@ def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, b
             print(r'Usernames do not match existing users.json. Creating ephemeral user index...')
             user_data_map = user_index_from_chat(df_chat, msg_threshold=msg_threshold, excluded_users=excluded_users, bot_usernames=bot_usernames)
         else:
-            user_data_map = roles.get_users(include_bot=True)
+            user_data_map = useridx.get_users(include_bot=True)
 
     return user_data_map
 
@@ -100,7 +100,7 @@ def _targeted_chat_filter(df_chat, enable=False):
     Nothing will be dropped unless these conditions apply, but set enable=False to bypass.
     '''
     if enable:
-        mask_user_colon = df_chat['text'].str.contains('|'.join(u + ':' for u in roles.get_users('dname')), case=False)
+        mask_user_colon = df_chat['text'].str.contains('|'.join(u + ':' for u in useridx.get_users('dname')), case=False)
         mask_23ju18 = df_chat['Date'].dt.date == pd.to_datetime('2018-07-23').date()
         df_chat = df_chat.drop(index=df_chat[mask_user_colon & mask_23ju18].index)
     return df_chat
@@ -210,7 +210,7 @@ def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','ot
         df_chat = df_chat.dropna(subset='text').reset_index(drop=True) # Drop nulled texts
     
     # use displayName for user column
-    id_to_dname = roles.get_users('dname', by='id', include_bot=True, user_index=user_index)
+    id_to_dname = useridx.get_users('dname', by='id', include_bot=True, user_index=user_index)
     df_chat['user'] = df_chat['AuthorID'].map(id_to_dname)
 
     is_cloneus_bot = df_chat['AuthorID'] == int(bot_data['id'])
@@ -344,7 +344,7 @@ def format_chat_groups(df_proc: pd.DataFrame, author_tag:str, tag_sep:str=None, 
     # Join consecutive author messages with new line
     df_chats['text'] = df_chats['text'].str.join('\n')
 
-    df_chats['formatted_author_tag'] = df_chats['user'].apply(roles.format_author_tag, author_tag=author_tag) + ('' if tag_sep is None else tag_sep)
+    df_chats['formatted_author_tag'] = df_chats['user'].apply(useridx.format_author_tag, author_tag=author_tag) + ('' if tag_sep is None else tag_sep)
 
     # BUG until 2023-11-29 was df_proc.text instead of df_all
     df_chats['formatted_text'] = df_chats['formatted_author_tag'] + df_chats['text'] + ('' if postfix is None else postfix)  

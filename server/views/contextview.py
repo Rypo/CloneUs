@@ -7,7 +7,7 @@ import more_itertools
 import discord
 from discord.ext import commands
 
-from cloneus.data import roles
+from cloneus.data import useridx
 
 
 class BaseButtonPageView(discord.ui.View):
@@ -134,7 +134,7 @@ class PagedChangelogView(BaseButtonPageView): #discord.ui.View):
         await self.update_message(self.data[0])
 
     def create_embed(self, data):
-        botname = roles.get_users('dname',include_bot=True)[0]
+        botname = useridx.get_users('dname',include_bot=True)[0]
         embed = discord.Embed(
             color=discord.Color.dark_green(),
             title=f"{botname} ({data['version']})",
