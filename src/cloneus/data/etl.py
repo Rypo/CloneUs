@@ -40,7 +40,6 @@ def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005,
         df_users['isBot'] = False if bot_usernames is None else df_users['username'].isin(bot_usernames)
 
 
-
     df_users.rename(columns={'AuthorID':'id'}, inplace=True)
     df_users = df_users[['id', 'firstName', 'authorInitial', 'username', 'displayName', 'isBot']].drop_duplicates().reset_index(drop=True)
     
@@ -56,31 +55,6 @@ def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005,
     ]
     roles.update_initials(user_index, priority_order=('fname', 'dname', 'uname'))
     return user_index
-
-def cleanup_url(url):
-    if not isinstance(url,str):
-        return url
-    
-    urls = url.split(',') if ',' in url else [url]
-    cleaned_urls = []
-    for u in urls:
-        pr=urllib.parse.urlparse(u)
-        new_pr = urllib.parse.ParseResult(pr.scheme, pr.netloc, pr.path, '', '', '')
-        cleaned_urls.append(urllib.parse.urlunparse(new_pr))
-    
-    return ','.join(cleaned_urls)
-
-
-
-def _targeted_chat_filter(df_chat, enable=False):
-    '''Drop very specific instance in 2018 when Char RNN trained on chat was dumped in chat.
-    Nothing will be dropped unless these conditions apply, but set enable=False to bypass.
-    '''
-    if enable:
-        mask_user_colon = df_chat['text'].str.contains('|'.join(u + ':' for u in roles.get_users('dname')), case=False)
-        mask_23ju18 = df_chat['Date'].dt.date == pd.to_datetime('2018-07-23').date()
-        df_chat = df_chat.drop(index=df_chat[mask_user_colon & mask_23ju18].index)
-    return df_chat
 
 
 def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None, username_column:str = 'Author'):
@@ -108,39 +82,41 @@ def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, b
     return user_data_map
 
 
-def process_csv(chat_csv:str, youtube_encode_fetch:bool|tuple[bool,bool]=True, filter_prefixes:tuple[str, ...] = ('!','/'), merge_window:float = 7.0):
-    df_chat = pd.read_csv(chat_csv)
-    csv_columns = set(df_chat.columns.str.upper())
-
-    discord_required_cols = set([c.upper() for c in ["AuthorID","Author", "Content", "Date"]])
-    generic_required_cols = set([c.upper() for c in ["username", "text"]])
-
-    if (discord_required_cols & csv_columns) == discord_required_cols:
-        return process_discord_chat(df_chat, cmd_prefixes=filter_prefixes, youtube_encode_fetch=youtube_encode_fetch)
+def cleanup_url(url):
+    if not isinstance(url,str):
+        return url
     
-    if (generic_required_cols & csv_columns) == generic_required_cols:
-        return process_generic_chat(df_chat, youtube_encode_fetch, merge_window=merge_window)
+    urls = url.split(',') if ',' in url else [url]
+    cleaned_urls = []
+    for u in urls:
+        pr=urllib.parse.urlparse(u)
+        new_pr = urllib.parse.ParseResult(pr.scheme, pr.netloc, pr.path, '', '', '')
+        cleaned_urls.append(urllib.parse.urlunparse(new_pr))
     
-    raise RuntimeError('Missing required columns. Columns should have at least: '
-                       f'{discord_required_cols!r} for Discord Chat or '
-                       f'{generic_required_cols!r} for other chat exports.')
+    return ','.join(cleaned_urls)
 
+def _targeted_chat_filter(df_chat, enable=False):
+    '''Drop very specific instance in 2018 when Char RNN trained on chat was dumped in chat.
+    Nothing will be dropped unless these conditions apply, but set enable=False to bypass.
+    '''
+    if enable:
+        mask_user_colon = df_chat['text'].str.contains('|'.join(u + ':' for u in roles.get_users('dname')), case=False)
+        mask_23ju18 = df_chat['Date'].dt.date == pd.to_datetime('2018-07-23').date()
+        df_chat = df_chat.drop(index=df_chat[mask_user_colon & mask_23ju18].index)
+    return df_chat
 
-def apply_youtube_encoding(text_col:pd.Series, youtube_encode_fetch: bool|tuple[bool,bool]=(True,True)):
-    if isinstance(youtube_encode_fetch, bool):
-        youtube_encode_fetch = (youtube_encode_fetch,youtube_encode_fetch)
+def discord_text_filters(text_col: pd.Series, cmd_prefixes:tuple[str, ...]=('!','/'),):
+    '''Null out: command calls, discord image urls'''
+    #RE_ATTACHMENTS = re.compile(r'https://cdn.discordapp.com/attachments/\d+/\d+/([^\s,]+)')
+    #df_gsc['Attachments'] = df_gsc.Attachments.apply(cleanup_url).str.replace(RE_ATTACHMENTS, r'attachments/\g<1>',regex=True)
+    #df_gsc['Content'] = df_gsc.Content.str.replace(RE_ATTACHMENTS, 'attachments/\g<1>', regex=True)
     
-    yt_encode, yt_fetch = youtube_encode_fetch
-    ytm = youtube.YouTubeManager(allow_fetch=yt_fetch, enabled=yt_encode)
+    # Drop Command calls
+    text_col = text_col.where(~text_col.str.startswith(cmd_prefixes, na=True))
+    # strip out all discord image urls
+    text_col = text_col.str.replace('(https://cdn.discordapp.com\S+)','', regex=True).replace('',None) 
     
-    if yt_fetch:
-        # do fetch in a batches of 50 for best api quota usage efficency
-        video_ids = text_col.str.extractall(youtube.RE_YOUTUBE_URL_ID).video_id.to_list()
-        _ = ytm.get_videos(video_ids=video_ids, query='', allow_fetch=yt_fetch)
-    
-    # Transform all youtube URLs into custom metadata tag for better LLM comprehension
-    return text_col.apply(ytm.encode)
-
+    return text_col
 
 def to_common_format(df_chat:pd.DataFrame):
     '''Converts generic csv columns to standard discord-style format
@@ -161,100 +137,77 @@ def to_common_format(df_chat:pd.DataFrame):
 
     return df_chat[['AuthorID', 'Author', 'Date', 'Content']]
 
+
+def apply_youtube_encoding(text_col:pd.Series, youtube_encode_fetch: bool|tuple[bool,bool]=(True,True)):
+    if isinstance(youtube_encode_fetch, bool):
+        youtube_encode_fetch = (youtube_encode_fetch,youtube_encode_fetch)
     
-def process_generic_chat(df_chat: pd.DataFrame, youtube_encode_fetch:bool|tuple[bool,bool]=True, merge_window:float = 7.0):
+    yt_encode, yt_fetch = youtube_encode_fetch
+    ytm = youtube.YouTubeManager(allow_fetch=yt_fetch, enabled=yt_encode)
+    
+    if yt_fetch:
+        # do fetch in a batches of 50 for best api quota usage efficency
+        video_ids = text_col.str.extractall(youtube.RE_YOUTUBE_URL_ID).video_id.to_list()
+        _ = ytm.get_videos(video_ids=video_ids, query='', allow_fetch=yt_fetch)
+    
+    # Transform all youtube URLs into custom metadata tag for better LLM comprehension
+    return text_col.apply(ytm.encode)
+
+
+def process_csv(chat_csv:str, youtube_encode_fetch:bool|tuple[bool,bool]=True, filter_prefixes:tuple[str, ...] = ('!','/'), merge_window:float = 7.0):
+    df_chat = pd.read_csv(chat_csv)
+    csv_columns = set(df_chat.columns.str.upper())
+
+    required_cols_discord = set([c.upper() for c in ["AuthorID","Author", "Content", "Date"]])
+    required_cols_other = set([c.upper() for c in ["username", "text"]])
+
+    if (required_cols_discord & csv_columns) == required_cols_discord:
+        return process_discord_chat(df_chat, cmd_prefixes=filter_prefixes, youtube_encode_fetch=youtube_encode_fetch)
+    
+    if (required_cols_other & csv_columns) == required_cols_other:
+        return process_other_chat(df_chat, youtube_encode_fetch, merge_window=merge_window)
+    
+    raise RuntimeError('Missing required columns. Columns should have at least: '
+                       f'{required_cols_discord!r} for Discord Chat or '
+                       f'{required_cols_other!r} for other chat exports.')
+    
+def process_other_chat(df_chat: pd.DataFrame, youtube_encode_fetch:bool|tuple[bool,bool]=True, merge_window:float = 7.0):
     '''Required columns: ["username", "text"]. _Strongly_ recommended columns: ["timestamp"].
     
     timestamp should be column of datetimes with at least minute resolution and a consistent formatting (e.g. YYYY-mm-dd HH:MM:SS).
 
     If timestamp is not provided, all messages will be assumed to have been sent at an exact 5 minute interval ending 2024-01-01.
     '''
-    df_chat = pd.read_csv(df_chat) if isinstance(df_chat,str) else df_chat
     df_chat = df_chat.rename(columns=str.lower) # normalize col names
     df_chat = to_common_format(df_chat)
+    df_chat = _process_chat(df_chat, 'other', youtube_encode_fetch=youtube_encode_fetch, merge_window=merge_window)
 
+    return df_chat
+
+def process_discord_chat(df_chat: pd.DataFrame, cmd_prefixes:tuple[str, ...]=('!','/'), youtube_encode_fetch: bool|tuple[bool,bool]=True):
+    '''Required columns: ["AuthorID", "Author", "Date", "Content" ]. Unused columns: ["Reactions", "Attachments"]'''
+    df_chat = df_chat.rename(columns=str.title).rename(columns={'Authorid':'AuthorID'}) # normalize col names
+    # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
+    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
+    df_chat = _process_chat(df_chat, 'discord', youtube_encode_fetch=youtube_encode_fetch, merge_window=7.0, cmd_prefixes=cmd_prefixes)
+
+    return df_chat
+
+def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','other'], youtube_encode_fetch:bool|tuple[bool,bool]=True, merge_window:float = 7.0, cmd_prefixes:tuple[str, ...]=None):
     user_index = get_usermap(df_chat)
     bot_data = user_index[0]
-
+    
     nrec_init = df_chat.shape[0]
-
+    
     # replace 2+ newlines with 1 newline, since we may use \n\n to separate messages
     df_chat['text'] = df_chat['Content'].str.replace(r'\n{2,}','\n', regex=True)
     df_chat = df_chat.dropna(subset='text').reset_index(drop=True)
 
-    # use displayName for user column
-    id_to_dname = roles.get_users('dname', by='id', include_bot=True, user_index=user_index)
-    df_chat['user'] = df_chat['AuthorID'].map(id_to_dname)
-
-    is_cloneus_bot = df_chat['AuthorID'] == int(bot_data['id'])
-
-    df_chat['pre_bot'] = True
-    if is_cloneus_bot.any():
-        # use the first message by bot to denote potentially unsafe training data
-        df_chat['pre_bot'] = df_chat.index < df_chat[is_cloneus_bot].index[0]
-        df_chat = df_chat[~is_cloneus_bot] # drop Cloneus messages
-
-    # Drop any messages from users not in the users.json (too few messages, in exclusion list) 
-    nrec_before_user = df_chat.shape[0]
-    df_chat = df_chat.dropna(subset='user').reset_index(drop=True)
-    nrec_drop_users = df_chat.shape[0]
-
-
-    # Want this to be AFTER filtering to avoid YouTube API calls on omitted content
-    df_chat.loc[:,'text'] = apply_youtube_encoding(df_chat['text'], youtube_encode_fetch)
-    # drop text that was only an invalid YouTube links.
-    df_chat = df_chat[df_chat['text'] != ''].reset_index(drop=True)
-
-    # TODO: Consider implications of assigning sequence/sessions after filtering vs before filtering
-    df_chat['time_gap'] = df_chat['Date'].diff().fillna(pd.Timedelta(0)).dt.total_seconds()
-    # If message is from a different user or time gap is greater than merge_window minutes, then it's a new sequence
-    df_chat['user_sequence'] = (((df_chat['user'] != df_chat['user'].shift(1)) | (df_chat['time_gap']>(merge_window*60))).cumsum())
-    
-    nrec_final = df_chat.shape[0]
-    
-    print(
-        f'Init Record Count: {nrec_init}\n'
-        f'Dropped {nrec_before_user-nrec_drop_users} messages with missing/removed users\n'
-        f'Final Record Count: {nrec_final} (drop total: {nrec_init-nrec_final})'
-        )
-    
-    return df_chat
-
-def discord_text_filters(text_col: pd.Series, cmd_prefixes:tuple[str, ...]=('!','/'),):
-    '''Null out: command calls, discord image urls'''
-    #RE_ATTACHMENTS = re.compile(r'https://cdn.discordapp.com/attachments/\d+/\d+/([^\s,]+)')
-    #df_gsc['Attachments'] = df_gsc.Attachments.apply(cleanup_url).str.replace(RE_ATTACHMENTS, r'attachments/\g<1>',regex=True)
-    #df_gsc['Content'] = df_gsc.Content.str.replace(RE_ATTACHMENTS, 'attachments/\g<1>', regex=True)
-    
-    # Drop Command calls
-    text_col = text_col.where(~text_col.str.startswith(cmd_prefixes, na=True))
-    #df_chat = df_chat[~is_command_call]
-    # strip out all discord image urls
-    text_col = text_col.str.replace('(https://cdn.discordapp.com\S+)','', regex=True).replace('',None) 
-    
-
-    return text_col
-
-def process_discord_chat(df_chat: pd.DataFrame, cmd_prefixes:tuple[str, ...]=('!','/'), youtube_encode_fetch: bool|tuple[bool,bool]=True):
-    '''Required columns: [["AuthorID", "Author", "Date", "Content" ]. Unused columns: ["Reactions", "Attachments"]'''
-    df_chat = pd.read_csv(df_chat) if isinstance(df_chat,str) else df_chat
-    df_chat = df_chat.rename(columns=str.title).rename(columns={'Authorid':'AuthorID'}) # normalize col names
-    
-    # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
-    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
-
-    user_index = get_usermap(df_chat)
-    bot_data = user_index[0]
-    
-    nrec_init = df_chat.shape[0]
-    
-    # replace 2+ newlines with 1 newline, since we may use \n\n to separate messages
-    df_chat['text'] = df_chat['Content'].str.replace(r'\n{2,}','\n', regex=True)
-    
-    # Feel free to set enable=False unless you also happen to have spammed your server with a CharRNN July 23, 2018
-    df_chat = _targeted_chat_filter(df_chat, enable=True).reset_index(drop=True)
-    df_chat.loc[:,'text'] = discord_text_filters(df_chat['text'], cmd_prefixes=cmd_prefixes)
-    df_chat = df_chat.dropna(subset='text').reset_index(drop=True) # Drop nulled texts
+    if data_source == 'discord':
+        # Feel free to set enable=False unless you also happen to have spammed your server with a CharRNN July 23, 2018
+        df_chat = _targeted_chat_filter(df_chat, enable=True).reset_index(drop=True)
+        df_chat.loc[:,'text'] = discord_text_filters(df_chat['text'], cmd_prefixes=cmd_prefixes)
+        df_chat = df_chat.dropna(subset='text').reset_index(drop=True) # Drop nulled texts
     
     # use displayName for user column
     id_to_dname = roles.get_users('dname', by='id', include_bot=True, user_index=user_index)
@@ -285,7 +238,7 @@ def process_discord_chat(df_chat: pd.DataFrame, cmd_prefixes:tuple[str, ...]=('!
     df_chat['time_gap'] = df_chat['Date'].diff().fillna(pd.Timedelta(0)).dt.total_seconds()
     # If message is from a different user or time gap is greater than 7 minutes, then it's a new sequence
     # - https://www.reddit.com/r/discordapp/comments/9u2tdz/whats_the_new_cutoff_time_for_separating_messages/
-    df_chat['user_sequence'] = (((df_chat['user'] != df_chat['user'].shift(1)) | (df_chat['time_gap']>(7*60))).cumsum())
+    df_chat['user_sequence'] = (((df_chat['user'] != df_chat['user'].shift(1)) | (df_chat['time_gap']>(merge_window*60))).cumsum())
 
 
     nrec_final = df_chat.shape[0]
@@ -298,10 +251,8 @@ def process_discord_chat(df_chat: pd.DataFrame, cmd_prefixes:tuple[str, ...]=('!
         #f'Drop Bad YT Links: {nrec_drop_users-nrec_drop_bad_ytlink} records\n'
         f'Final Record Count: {nrec_final} (drop total: {nrec_init-nrec_final})'
         )
-
+    
     return df_chat
-
-
 
 
 
