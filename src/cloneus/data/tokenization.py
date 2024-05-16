@@ -21,7 +21,20 @@ def check_if_system(tokenizer):
     return has_system
 
 
-
+def to_jinja_template(tag_sep:str, postfix:str):
+    # role will be the pre-formated author tag
+    template=(
+        "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}"
+        "{{ bos_token }}"
+        "{% for message in messages %}"
+        "{{ message['role'] + '__TAG_SEP__' + message['content'] + '__POSTFIX__' }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ '' }}"
+        "{% endif %}"
+    )
+    template = template.replace('__TAG_SEP__',tag_sep).replace('__POSTFIX__', postfix)
+    return template
 
 
 def smart_tokenizer_and_embedding_resize(

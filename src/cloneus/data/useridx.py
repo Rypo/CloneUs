@@ -1,6 +1,7 @@
 import re
 import json
-import typing
+import copy
+from typing import Literal
 import warnings
 import functools
 from collections import defaultdict
@@ -13,6 +14,23 @@ USERS_FILEPATH = cpaths.ROOT_DIR/'config/users.json'
 
 USER_INDEX = None
 
+DEFAULT_CLONEUS_USER = {
+    'id': 000000000000000000,     # replace in config/users.json (used by server)
+    'firstName': 'Cloney',        # Not used.
+    'authorInitial': 'b0',        # Do Not Change. Special assignment to differentiate from other bots. 
+    'username': 'cloneus',        # replace in config/users.json (optional)
+    'displayName': 'Cloneus',     # replace in config/users.json (used by server)
+    'isBot': True
+}
+
+def user_index_exists() -> bool:
+    '''Returns True if config/user.json exists and contains valid json parsable content, else False'''
+    try:
+        with USERS_FILEPATH.open('r') as f:
+            return any(json.load(f))
+    except (FileNotFoundError,json.JSONDecodeError):
+        return False
+
 def _read_user_index():
     try:
         with open(USERS_FILEPATH,'r') as f:
@@ -21,26 +39,41 @@ def _read_user_index():
     except FileNotFoundError as e:
         raise FileNotFoundError('Missing config/users.json. You must run `scripts/build.py` or otherwise create users.json to proceed.')
 
-def write_user_index(user_index:dict, write_initials:bool=True, overwrite:bool=False):
-    if write_initials:
-        user_index = update_initials(user_index, priority_order=('fname', 'dname', 'uname'), overwrite_existing=True)
-        
-    if USERS_FILEPATH.exists() and not overwrite:
+def write_user_index(user_index:dict,  overwrite:bool=False):        
+    if user_index_exists() and not overwrite:
         raise FileExistsError(f'{USERS_FILEPATH} exists and overwrite=False')
     
     with open(USERS_FILEPATH, 'w') as f:
         json.dump(user_index, f, indent=2)
-        print('Created users file at:', str(USERS_FILEPATH))
+        print('Saved user index file:', str(USERS_FILEPATH))
 
 
+def get_cloneus_user(allow_default:bool=True) -> dict[str,]:
+    '''Return cloneus bot entry from config/user.json if set, otherwise use DEFAULT_CLONEUS_USER
+    
+    Args:
+        allow_default: If False, raise exception if cloneus bot not in config/user.json or file does not exist
+
+    Raises:
+         AssertionError: cloneus bot not in config/user.json
+         FileNotFoundError: config/user.json does not exist
+    '''
+    if not allow_default:
+        return get_users(include_bot=True)[0]
+    
+    try:
+        bot_record = get_users(include_bot=True)[0]
+    except (AssertionError, FileNotFoundError):
+        bot_record = DEFAULT_CLONEUS_USER
+    return bot_record
 
 # if k and v: return dict mapping all user's k -> v
 # if k and no v: return dict of dicts indexed by k where values are each user's whole data dict (including k)
 # if v and no k: return list of values, all user's v in no particular order
 # if neither k nor v: return list of dicts of all user's data dicts
 # @functools.cache
-def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|None = None, 
-              by: typing.Literal['dname','initial','fname','uname','id']|None = None, 
+def get_users(get: Literal['dname','initial','fname','uname','bot','id']|None = None, 
+              by:  Literal['dname','initial','fname','uname','id']|None = None, 
               *, include_bot:bool=False, user_index: list[dict] = None,
               ) -> dict[str,] | dict[str, dict[str,]] | list | list[dict[str,]]:
     '''Reindex and filter user data index.
@@ -51,7 +84,7 @@ def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|
         get: The value to select from each user's data. If None, return unfiltered user data
         by: The key to index user data by. If None, return a list instead of a dict
         include_bot: If True, include Cloneus bot as first entry in the returned data
-        user_index: The user data index to use. If None, will use global default (config/users.json) 
+        user_index: The user data index to use, any returned dicts WILL be mutable. If None, will use a deep copy of global default (config/users.json) 
 
     Returns:
         dict: { by : user_index[get] } if both `by` and `get`
@@ -69,16 +102,19 @@ def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|
         if USER_INDEX is None:
             USER_INDEX = _read_user_index()
     
-        user_index = USER_INDEX
+        user_index = copy.deepcopy(USER_INDEX)
     
+    user_index = user_index[:] # shallow copy so we don't pop off bot from orig source
+    bot_data = next(filter(lambda u: u['authorInitial']=='b0', user_index), None)
     
-    if not include_bot:
-        if user_index[0]['isBot']:
-            user_index = user_index[1:]
-    else:
-        assert user_index[0]['isBot'], 'Cloneus bot not in user data!'
-        user_index = user_index[:] # shallow copy just for consistency with exclude
-        #user_index = [bot_data, *user_index[1:]]
+    # remove from current arbitrary index
+    if bot_data is not None:
+        user_index.remove(bot_data) 
+    # insert back at head of list if include_bot
+    if include_bot:
+        assert bot_data is not None, 'Cloneus bot not in user index!'
+        user_index.insert(0, bot_data) 
+
         
     
     alias = {'dname':'displayName', 'initial':'authorInitial', 'fname':'firstName', 'uname':'username', 'bot':'isBot', 'id':'id'}
@@ -124,27 +160,7 @@ def get_users(get: typing.Literal['dname','initial','fname','uname','bot','id']|
 
 
 
-def format_author_tag(user_display_name:str, author_tag:str, *, insert_raw:bool=False):
-    if insert_raw:
-        return author_tag.format(author=user_display_name, lauthor=user_display_name, fname=user_display_name)
-    
-    return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=get_users('fname', 'dname').get(user_display_name,user_display_name))
 
-
-def to_jinja_template(tag_sep:str, postfix:str):
-    # role will be the pre-formated author tag
-    template=(
-        "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}"
-        "{{ bos_token }}"
-        "{% for message in messages %}"
-        "{{ message['role'] + '__TAG_SEP__' + message['content'] + '__POSTFIX__' }}"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}"
-        "{{ '' }}"
-        "{% endif %}"
-    )
-    template = template.replace('__TAG_SEP__',tag_sep).replace('__POSTFIX__', postfix)
-    return template
 
 def check_author_initials(user_initials:list[str] = None):
     if user_initials is None:
@@ -191,7 +207,7 @@ def assign_initials(names:list[str]) -> dict[str,str]:
 
 
 
-def create_default_initials(user_index:list[dict], priority_order:tuple[typing.Literal['fname','dname','uname'], ...]=('fname','dname','uname')) -> tuple[dict[str, str], typing.Literal['fname','dname','uname']]:
+def create_default_initials(user_index:list[dict], priority_order:tuple[Literal['fname','dname','uname'], ...]=('fname','dname','uname')) -> tuple[dict[str, str], Literal['fname','dname','uname']]:
     '''Get initials for each user based name. 
     
     Initial assignment priority is given by priority_order, but digitless assignments take precendence over order.
@@ -216,12 +232,22 @@ def create_default_initials(user_index:list[dict], priority_order:tuple[typing.L
     # if none can be represented by only a char, return first tried since it was highest priorty
     return name_ini_maps[0]
 
-def update_initials(user_index:list[dict],priority_order:tuple[typing.Literal['fname','dname','uname'], ...]=('fname','dname','uname'), overwrite_existing:bool=True) -> None:
-    '''Updates initials IN PLACE.'''
-    if overwrite_existing or not all(get_users('initial', user_index=user_index)):
+def update_initials(user_index:list[dict],priority_order:tuple[Literal['fname','dname','uname'], ...]=('fname','dname','uname'), overwrite_existing:bool=True) -> None:
+    '''Updates initials IN PLACE. Will never overwrite cloneus user special initial entry.'''
+    if overwrite_existing or not all(get_users('initial', user_index=user_index,  include_bot=False)):
         name_to_ini,namekey = create_default_initials(user_index, priority_order = priority_order)
         user_index_by_name = get_users(by=namekey, user_index=user_index, include_bot=False)
         
         for name,ini in name_to_ini.items():
             # if not ud[name]['authorInitial']:
             user_index_by_name[name]['authorInitial'] = ini
+
+
+
+# TODO: Figure out a better place to put this
+
+def format_author_tag(user_display_name:str, author_tag:str, *, insert_raw:bool=False):
+    if insert_raw:
+        return author_tag.format(author=user_display_name, lauthor=user_display_name, fname=user_display_name)
+    
+    return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=get_users('fname', 'dname').get(user_display_name,user_display_name))
