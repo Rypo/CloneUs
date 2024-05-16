@@ -17,8 +17,6 @@ from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_pef
 from trl import SFTTrainer
 # from trl.trainer import ConstantLengthDataset
 
-from ..training.evaluation import test_model
-
 def _get_cosine_const_schedule_with_warmup_lr_lambda(current_step: int, *, num_warmup_steps: int, num_const_steps:int, num_training_steps: int, num_cycles: float):
     
     if current_step < num_warmup_steps:
@@ -277,53 +275,53 @@ class PeftSavingCallback(TrainerCallback):
             os.remove(os.path.join(checkpoint_path, "pytorch_model.bin"))
 
 
-class GenerationCallback(TrainerCallback):
-    "A callback tests model every `predict_steps` steps and logs the results to `args.output_dir/logs/generations.log`"
+# class GenerationCallback(TrainerCallback):
+#     "A callback tests model every `predict_steps` steps and logs the results to `args.output_dir/logs/generations.log`"
 
-    def __init__(self, log_step_multiplier=10):
-        self.log_step_multiplier = log_step_multiplier
-        self.logfile = None
+#     def __init__(self, log_step_multiplier=10):
+#         self.log_step_multiplier = log_step_multiplier
+#         self.logfile = None
 
-    def _init_logfile(self, args):
-        logdir = os.path.join(args.output_dir, 'logs')
-        os.makedirs(logdir, exist_ok=True)
-        self.logfile = os.path.join(logdir, 'generations.log')
+#     def _init_logfile(self, args):
+#         logdir = os.path.join(args.output_dir, 'logs')
+#         os.makedirs(logdir, exist_ok=True)
+#         self.logfile = os.path.join(logdir, 'generations.log')
 
-    def on_log(self, args, state, control, **kwargs):
-        if state.global_step % int(state.logging_steps*self.log_step_multiplier) == 0:
-            if self.logfile is None:
-                self._init_logfile(args)
+#     def on_log(self, args, state, control, **kwargs):
+#         if state.global_step % int(state.logging_steps*self.log_step_multiplier) == 0:
+#             if self.logfile is None:
+#                 self._init_logfile(args)
             
             
-            model = kwargs.get('model')
-            tokenizer = kwargs.get('tokenizer')
+#             model = kwargs.get('model')
+#             tokenizer = kwargs.get('tokenizer')
 
-            shared_genargs = dict(
-                max_new_tokens=128,
-                renormalize_logits=True,
-                repetition_penalty=1.1, # Setting this too high may prevent sequential same-author messages. 
-                eos_token_id=model.config.eos_token_id,
-                pad_token_id=model.config.pad_token_id,
-            )
+#             shared_genargs = dict(
+#                 max_new_tokens=128,
+#                 renormalize_logits=True,
+#                 repetition_penalty=1.1, # Setting this too high may prevent sequential same-author messages. 
+#                 eos_token_id=model.config.eos_token_id,
+#                 pad_token_id=model.config.pad_token_id,
+#             )
 
-            cs_genconf = GenerationConfig(penalty_alpha=0.6, top_k=4, **shared_genargs) #contrastive
-            #bsms_genconf = GenerationConfig(do_sample=True, top_p=0.95, temperature=0.9, num_beams=4, early_stopping=True, **shared_genargs)
-            #dbsd_genconf = GenerationConfig(do_sample=False, num_beams=4, num_beam_groups=4, early_stopping=True, diversity_penalty=0.5, **shared_genargs)
-            ms_genconf = GenerationConfig(do_sample=True, top_p=1, temperature=1, **shared_genargs)
-            #gd_genconf = GenerationConfig(do_sample=False, num_beams=1, **shared_genargs)
+#             cs_genconf = GenerationConfig(penalty_alpha=0.6, top_k=4, **shared_genargs) #contrastive
+#             #bsms_genconf = GenerationConfig(do_sample=True, top_p=0.95, temperature=0.9, num_beams=4, early_stopping=True, **shared_genargs)
+#             #dbsd_genconf = GenerationConfig(do_sample=False, num_beams=4, num_beam_groups=4, early_stopping=True, diversity_penalty=0.5, **shared_genargs)
+#             ms_genconf = GenerationConfig(do_sample=True, top_p=1, temperature=1, **shared_genargs)
+#             #gd_genconf = GenerationConfig(do_sample=False, num_beams=1, **shared_genargs)
             
-            header = f"{'-'*25} [Step: {state.global_step}] {'-'*25}"
-            seper = '-'*64
-            nlsep = '\n'+seper+'\n'
-            footer = '='*64
-            with torch.inference_mode():
-                in_text, out_texts = test_model(model, tokenizer, [cs_genconf,ms_genconf,], do_print=False)
+#             header = f"{'-'*25} [Step: {state.global_step}] {'-'*25}"
+#             seper = '-'*64
+#             nlsep = '\n'+seper+'\n'
+#             footer = '='*64
+#             with torch.inference_mode():
+#                 in_text, out_texts = test_model(model, tokenizer, [cs_genconf,ms_genconf,], do_print=False)
 
-            #fstring = '\n'.join([header, in_text, seper, sout_text, footer])
-            fstring = '\n'.join([header, in_text, seper]) + '\n' + nlsep.join(out_texts) + '\n' + footer
+#             #fstring = '\n'.join([header, in_text, seper, sout_text, footer])
+#             fstring = '\n'.join([header, in_text, seper]) + '\n' + nlsep.join(out_texts) + '\n' + footer
             
-            with open(self.logfile, 'a') as f:
-                f.write(fstring+'\n')
+#             with open(self.logfile, 'a') as f:
+#                 f.write(fstring+'\n')
             
 
         
