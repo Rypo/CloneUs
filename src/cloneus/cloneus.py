@@ -448,8 +448,8 @@ class Cloneus(GenConfigUtilities):
         if seedtext is None:
             seedtext = ''
         
-        fake_seedtext = '###_dummy_seedtext_###'
-        author_messages += [(author, fake_seedtext)]
+        seedtext_surrogate = '###_dummy_seedtext_###'
+        author_messages += [(author, seedtext_surrogate)]
         text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
         # split on dummy text to KEEP pre-content formatting but REMOVE post content formatting
         # this effectively removes the tag_sep dependency
@@ -457,7 +457,7 @@ class Cloneus(GenConfigUtilities):
         # e.g. Llama-3: <|start_header_id|>(AUTHOR_TAG)<|end_header_id|>\n\n(CONTENT)<|eot_id|>
         # rather than requiring tag_sep = <|end_header_id|>, just don't use it all
         
-        text = text.split(fake_seedtext)[0] + seedtext
+        text = text.split(seedtext_surrogate)[0] + seedtext
         
         #text += self.apply_content_prefix(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
 
@@ -511,11 +511,12 @@ class Cloneus(GenConfigUtilities):
         # NOTE: bottom line: this is wrong (sometimes). We're forcing the model to generate a username 
         # when it possibly has only ever generated author_tag segment + username segment ...
         # e.g. kirby -> ["kir", "by"] vs [USER:kirb -> [..., ":k", "ir", "by"]
-        input_text = self.to_text_input(author_messages+[('###_dummy_author_###', 'ignored')], author_seedtext=None)
+        author_surrogate = '###_dummy_author_###'
+        input_text = self.to_text_input(author_messages+[(author_surrogate, 'ignored')], author_seedtext=None)
     
         # By splitting on dummy author, all prior formatting will be applied exactly, take this and discard the rest
         # so if author_tag is [USER:{author}] and llama-3 model, we'd get: ((CONTEXT))<|start_header_id|>[USER:
-        input_text = input_text.split('###_dummy_author_###')[0]
+        input_text = input_text.split(author_surrogate)[0]
         #print(input_text)
         inputs = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)
 
@@ -596,18 +597,18 @@ class Cloneus(GenConfigUtilities):
         
         input_context = self.to_text_input(author_messages, author_seedtext=('###_dummy_author_###','###_dummy_seedtext_###'))
         
-        author_sentinel = useridx.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
-        seedtext_sentinel = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
+        author_surrogate = useridx.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
+        seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
 
-        input_context, fmt_dummy_seedtext = input_context.split(author_sentinel)
-        authseed_template = author_sentinel+fmt_dummy_seedtext
+        input_context, fmt_dummy_seedtext = input_context.split(author_surrogate)
+        authseed_template = author_surrogate+fmt_dummy_seedtext
         
         if seed_text is None: 
             seed_text = ''
         
         author_prompts = [authseed_template
-                          .replace(author_sentinel, useridx.format_author_tag(u, self.cfg.author_tag))
-                          .replace(seedtext_sentinel, seed_text) 
+                          .replace(author_surrogate, useridx.format_author_tag(u, self.cfg.author_tag))
+                          .replace(seedtext_surrogate, seed_text) 
                           for u in seed_authors]
         
         return input_context, author_prompts
@@ -879,7 +880,7 @@ class CloneusTag(Cloneus):
     def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: list[transformers.StoppingCriteria]|None = None):
         '''For foundation models, add a chat template derived from tag markup and custom stopping critera'''
         # assign a simple custom template built with tag_sep and post_fix
-        tokenizer.chat_template = useridx.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
+        tokenizer.chat_template = tokenization.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
 
         tokenizer = tokenization.set_tokenizer_inference(tokenizer)
         
