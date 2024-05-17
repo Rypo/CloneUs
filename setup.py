@@ -12,6 +12,7 @@ setup(
         'python-dotenv',
         'omegaconf',
         'more-itertools',
+        'unidecode',
         'ujson',
         'ipython',
         'matplotlib',
@@ -27,7 +28,7 @@ setup(
         'trl',
         'wandb',
         'flash-attn',
-        'unsloth[conda] @ git+https://github.com/unslothai/unsloth.git',
+        'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git',
     ],
     extras_require={
         'discord': [ 
