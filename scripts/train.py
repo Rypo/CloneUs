@@ -57,6 +57,11 @@ def main(args):
     config_filepath = args.config if args.config else cpaths.ROOT_DIR/'config'/'train'/'train_config.yaml'
     cfg = OmegaConf.load(config_filepath)
     
+    if args.datapath:
+        rel_dpath = args.datapath #os.path.relpath(args.datapath, cpaths.ROOT_DIR)
+        cfg.dataset.chatlog_csv = rel_dpath
+        print('Training with data:', rel_dpath)
+
     
     resume_ckpt = None
     # command line resume path takes precedence over config
@@ -232,9 +237,12 @@ def main(args):
     return train_args
 
 def get_cli_args():
-    parser = argparse.ArgumentParser(description='Finetune an LLM on your Discord chat export data.')
+    parser = argparse.ArgumentParser(description='Finetune an LLM on your chat export data. Send in the clones.')
     parser.add_argument('-c','--config', default=None, type=str, required=False,
                         help='Path/to/config_file.yaml. If not set, will use file at ./config/train/train_config.yaml')
+    
+    parser.add_argument('-d','--datapath', default=None, type=str, required=False,
+                        help='Path/to/chat.csv. If set, will take precedence over dataset.chatlog_csv in config.yaml.')
     
     parser.add_argument('-r','--resume', default=None, type=str, required=False,
                         help='Path/to/checkpoint-dir to resume training from. If set, --config will be ignored and the local config.yaml file will be used.')
