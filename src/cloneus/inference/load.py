@@ -19,7 +19,6 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
-from awq import AutoAWQForCausalLM
 from unsloth import FastLanguageModel, load_correct_tokenizer
 
 
@@ -78,7 +77,7 @@ def load_awq_exl2(awq_dirpath, max_seq_len=8192, batch_size=1, fuse_layers=False
     `use_exllama_v2`: use exllamav2 inplace of GEMM 
     `fuse_layers`: Whether or not to use fused layers. Incompat with flash-attn.
     '''
-    
+    from awq import AutoAWQForCausalLM
     model = AutoAWQForCausalLM.from_quantized(
         awq_dirpath, 
         max_seq_len=max_seq_len,
@@ -241,11 +240,15 @@ def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16,
         device_map="auto",
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
+        use_cache=True,
+        trust_remote_code=True
     )
     if quant_config is None:
         pt_kwargs.pop('quantization_config')
     
-    model = AutoModelForCausalLM.from_pretrained(checkpoint_dirpath, **pt_kwargs) #.to_bettertransformer()
+    peft_config = PeftConfig.from_pretrained(checkpoint_dirpath)
+    base_model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path, **pt_kwargs) #.to_bettertransformer()
+    model = PeftModel.from_pretrained(base_model, model_id=checkpoint_dirpath, is_trainable=False, config=peft_config)
     
     if not model.active_adapters():
         print('No active adapters auto loaded. Attempting manual')

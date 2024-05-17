@@ -13,7 +13,6 @@ import transformers
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model, AutoPeftModelForCausalLM
 from unsloth import FastLanguageModel
 from trl import setup_chat_format
-from awq import AutoAWQForCausalLM
 
 from ..utils import misc
 from ..data import tokenization
@@ -76,6 +75,7 @@ def get_awq(model_id, peft_config, max_seq_len:int, batch_size:int, chat_templat
     
     # ref1: https://github.com/huggingface/transformers/blob/096f304695f7e7b169b031f7814352e900ad71c4/src/transformers/quantizers/quantizer_awq.py#L111
     # ref2: https://github.com/huggingface/transformers/blob/096f304695f7e7b169b031f7814352e900ad71c4/src/transformers/quantizers/quantizer_awq.py#L115C29-L115C84
+    from awq import AutoAWQForCausalLM
     model = AutoAWQForCausalLM.from_quantized(model_id, 
                                               fuse_layers=False, # True and False work. False was in train example  -- You cannot save an AWQ model that uses fused modules! - ref1
                                               device_map='auto', 
