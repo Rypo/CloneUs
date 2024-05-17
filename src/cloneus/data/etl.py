@@ -179,7 +179,7 @@ def to_common_format(df_chat:pd.DataFrame):
     
     if 'AuthorID' not in df_chat:
         # Assign an arbitrary id
-        df_chat['AuthorID'] = df_chat['Author'].apply(lambda a: abs(hash(a)))
+        df_chat['AuthorID'] = df_chat['Author'].apply(useridx.fake_author_id)
 
     return df_chat[['AuthorID', 'Author', 'Date', 'Content']]
 

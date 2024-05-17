@@ -102,7 +102,7 @@ def read_chat_csv(chat_csvfile:str|Path):
     
     if data_source=='other':
         df_chat = df_chat.rename(columns=str.lower) # normalize col names
-        df_chat['AuthorID'] = df_chat['username'].apply(lambda a: abs(hash(a)))
+        df_chat['AuthorID'] = df_chat['username'].apply(useridx.fake_author_id)
         return df_chat
 
 

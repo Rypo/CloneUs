@@ -1,6 +1,7 @@
 import re
 import json
 import copy
+import hashlib
 from typing import Literal
 import warnings
 import functools
@@ -159,7 +160,10 @@ def get_users(get: Literal['dname','initial','fname','uname','bot','id']|None = 
 # USER_DATA['USERS']: get_users(include_bot=False)
 
 
-
+def fake_author_id(name:str):
+    asciibyte_name = ascii(name).encode('utf-8')
+    b16_enc_hexname = int(hashlib.md5(asciibyte_name, usedforsecurity=False).hexdigest(), 16)
+    return int(b16_enc_hexname**(1/2)) # sqrt just to make it shorter
 
 
 def check_author_initials(user_initials:list[str] = None):
