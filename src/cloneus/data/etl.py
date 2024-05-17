@@ -1,3 +1,4 @@
+import sys
 import json
 import urllib
 import typing
@@ -10,62 +11,98 @@ import pandas as pd
 from cloneus.data import useridx
 from cloneus.plugins import youtube
 
-def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None) -> list[dict]:
+def ask_fill_fnames(display_names: list[str]):
+    n_missing = len(display_names)
+    inp=''
+    while (inp+'?')[0] not in ['y','n','q']:
+        inp=input(f'Missing {n_missing} users\' firstName. Do you want to add these for the model to learn? (y/n/q) ').lower()
+    
+    if inp.startswith('q'):
+        print('Aborted.')
+        sys.exit(0)
+    
+    dname_to_fname = {}
+    if inp.startswith('y'):
+        for i,dn in enumerate(display_names,1): 
+            dname_to_fname[dn] = input(f'[{i}/{n_missing}] First Name ({dn!r}):')
+        print("Done. Be sure to update `author_tag` your training_config.yaml with the 'fname' fmtstring to utilize first names: e.g. '{author} ({fname})'")
+    
+    return dname_to_fname
+
+def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None, interactive:bool=False) -> list[dict]:
     '''Create user index from chat with assumptions. 
     Column format: ['AuthorID', 'Author', ...]. 
     Optional columns: ['username', 'displayName', 'firstName', 'authorInitial', 'isBot']
     '''
     df_users = df_chat.copy()
+    df_users['AuthorID'] = df_users['AuthorID'].astype(int)
+    
+    # one must be in included
+    if 'Author' in df_users:
+        if 'username' not in df_users:
+            df_users.rename(columns={'Author':'username'}, inplace=True)
+    elif 'username' not in df_users:
+        raise KeyError('At least one of "Author" or "username" must be specified in columns')
+
     
     if excluded_users:
-        df_users = df_users[~df_users['Author'].isin(excluded_users)]
-        
+        df_users = df_users[~df_users['username'].isin(excluded_users)]
+    
     # Exclude users with too few messages
     msg_counts = df_users['AuthorID'].value_counts(normalize=isinstance(msg_threshold, float))
     df_users = df_users[df_users['AuthorID'].isin(msg_counts[msg_counts >= msg_threshold].index)]
 
-    if 'username' not in df_users:
-        df_users['username'] = df_users['Author']
+    for col in ['displayName', 'firstName', 'authorInitial', 'isBot']:
+        df_users[col] = df_users.get(col, default=None)
     
-    if 'displayName' not in df_users:
-        df_users['displayName'] = df_users['Author']
-    
-    if 'firstName' not in df_users:
-        df_users['firstName'] = None
-    
-    if 'authorInitial' not in df_users:
-        df_users['authorInitial'] = None
-
-    if 'isBot' not in df_users:
-        df_users['isBot'] = False if bot_usernames is None else df_users['username'].isin(bot_usernames)
-
-
     df_users.rename(columns={'AuthorID':'id'}, inplace=True)
     df_users = df_users[['id', 'firstName', 'authorInitial', 'username', 'displayName', 'isBot']].drop_duplicates().reset_index(drop=True)
+
+     # Try to fill missing values with current user index, if any
+    if useridx.user_index_exists():
+        df_user_index = pd.DataFrame(useridx.get_users(include_bot=True))
+        df_users = df_users.set_index('id').fillna(df_user_index.set_index('id')).reset_index()
     
 
-    user_index = [{
-        'id': 000000000000000000,     # replace in config/users.json (required for server)
-        'firstName': 'Cloney',        # Not used.
-        'authorInitial': 'b0',        # Not used.
-        'username': 'cloneus',        # replace in config/users.json (optional)
-        'displayName': 'Cloneus',     # replace in config/users.json (optional)
-        'isBot': True},
-        *df_users.to_dict('records')
-    ]
-    useridx.update_initials(user_index, priority_order=('fname', 'dname', 'uname'))
+    df_users['displayName'] = df_users['displayName'].fillna(df_users['username'])
+    
+    df_users['isBot'] = df_users['isBot'].where(df_users['isBot'].notna(), 
+        False if bot_usernames is None else df_users['username'].isin(bot_usernames))
+   
+    if interactive:
+        dnames_missing_fnames = df_users['displayName'].where(df_users['firstName'].isna()).dropna().to_list()
+        if dnames_missing_fnames:
+            dname_to_fname = ask_fill_fnames(dnames_missing_fnames)
+            df_users['firstName'] = df_users['firstName'].where(df_users['firstName'].notna(), df_users['displayName'].map(dname_to_fname)).fillna('').str.title()
+    #elif df_users['firstName'].isna().any():
+    #   print("(Recommended) Update config/users.json with each user's first name")
+
+    user_index = df_users.to_dict('records')
+    
+    if df_users['authorInitial'].isna().any():
+        priority_order = ['fname', 'dname', 'uname']
+        pcols = ['firstName', 'displayName','username']
+        for i,pcol in enumerate(pcols):
+            if df_users[pcol].isna().any():
+                priority_order.pop(i)
+
+        useridx.update_initials(user_index, priority_order=tuple(priority_order))
+
+    clobot = useridx.get_cloneus_user()
+    if clobot not in user_index:
+        user_index = [clobot, *user_index]
+    else:
+        # Only purpose is to shuffle bot to front of list. Wasteful? probably.
+        user_index = useridx.get_users(user_index=user_index, include_bot=True)
+
     return user_index
 
 
 def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None, username_column:str = 'Author'):
-    '''ALWAYS INCLUDES BOT AS INDEX 0. Get or create user index.'''
+    ''' Get or create user index. Always includes cloneus record first entry.'''
     # TODO: Maybe WildCard user for if data has long tail distrib? -- all users < threshold = WildCardUser
 
-    if not useridx.USERS_FILEPATH.exists():
-        user_data_map = user_index_from_chat(df_chat, msg_threshold=msg_threshold, excluded_users=excluded_users, bot_usernames=bot_usernames)
-        useridx.write_user_index(user_data_map)
-
-    else:
+    if useridx.user_index_exists():
         all_names = set([*useridx.get_users('uname'), *useridx.get_users('fname'), *useridx.get_users('dname') ])
 
         hits = df_chat[username_column].isin(all_names).sum()
@@ -78,6 +115,11 @@ def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, b
             user_data_map = user_index_from_chat(df_chat, msg_threshold=msg_threshold, excluded_users=excluded_users, bot_usernames=bot_usernames)
         else:
             user_data_map = useridx.get_users(include_bot=True)
+
+    else:
+        user_data_map = user_index_from_chat(df_chat, msg_threshold=msg_threshold, excluded_users=excluded_users, bot_usernames=bot_usernames)
+        useridx.write_user_index(user_data_map)
+
 
     return user_data_map
 
@@ -123,10 +165,14 @@ def to_common_format(df_chat:pd.DataFrame):
     
     ['username', 'text', 'timestamp'] -> ['AuthorID', 'Author', 'Date', 'Content']
     '''
+    df_chat = df_chat.rename(columns=str.lower) # normalize col names
     if 'timestamp' in df_chat:
-        df_chat['Date'] = df_chat['timestamp'].pipe(pd.to_datetime, utc=True, format='mixed')#'ISO8601')
+        df_chat.rename(columns={'timestamp':'Date'}, inplace=True)
+        #df_chat['Date'] = df_chat['timestamp'].pipe(pd.to_datetime, utc=True, format='mixed')#'ISO8601')
     else:
+        print()
         warnings.warn('No timestamp column. Using 5 minute intervals in place of message timestamps. Expect data quality loss.')
+        print()
         df_chat['Date'] = pd.date_range(end='1/1/2024', periods=df_chat.shape[0], unit="s", freq="5min")
     
     df_chat.rename(columns={'username':'Author', 'text':'Content'}, inplace=True)
@@ -153,23 +199,36 @@ def apply_youtube_encoding(text_col:pd.Series, youtube_encode_fetch: bool|tuple[
     # Transform all youtube URLs into custom metadata tag for better LLM comprehension
     return text_col.apply(ytm.encode)
 
-
-def process_csv(chat_csv:str, youtube_encode_fetch:bool|tuple[bool,bool]=True, filter_prefixes:tuple[str, ...] = ('!','/'), merge_window:float = 7.0):
-    df_chat = pd.read_csv(chat_csv)
+def data_source_format(df_chat: pd.DataFrame, ):
     csv_columns = set(df_chat.columns.str.upper())
 
-    required_cols_discord = set([c.upper() for c in ["AuthorID","Author", "Content", "Date"]])
-    required_cols_other = set([c.upper() for c in ["username", "text"]])
+    required_cols_discord = ["AuthorID","Author", "Content", "Date"]
+    required_cols_other = ["username", "text"]
 
-    if (required_cols_discord & csv_columns) == required_cols_discord:
-        return process_discord_chat(df_chat, cmd_prefixes=filter_prefixes, youtube_encode_fetch=youtube_encode_fetch)
+    cols_discord_upset = set(map(str.upper, required_cols_discord))
+    cols_other_upset = set(map(str.upper, required_cols_other))
+
+    if (cols_discord_upset & csv_columns) == cols_discord_upset:
+        return 'discord'
     
-    if (required_cols_other & csv_columns) == required_cols_other:
-        return process_other_chat(df_chat, youtube_encode_fetch, merge_window=merge_window)
+    if (cols_other_upset & csv_columns) == cols_other_upset:
+        return 'other'
     
     raise RuntimeError('Missing required columns. Columns should have at least: '
                        f'{required_cols_discord!r} for Discord Chat or '
                        f'{required_cols_other!r} for other chat exports.')
+
+
+def process_csv(chat_csv:str, youtube_encode_fetch:bool|tuple[bool,bool]=True, filter_prefixes:tuple[str, ...] = ('!','/'), merge_window:float = 7.0):
+    df_chat = pd.read_csv(chat_csv)
+    data_source = data_source_format(df_chat)
+
+    if data_source == 'discord':
+        return process_discord_chat(df_chat, cmd_prefixes=filter_prefixes, youtube_encode_fetch=youtube_encode_fetch)
+    
+    if data_source == 'other':
+        return process_other_chat(df_chat, youtube_encode_fetch, merge_window=merge_window)
+    
     
 def process_other_chat(df_chat: pd.DataFrame, youtube_encode_fetch:bool|tuple[bool,bool]=True, merge_window:float = 7.0):
     '''Required columns: ["username", "text"]. _Strongly_ recommended columns: ["timestamp"].
@@ -178,7 +237,6 @@ def process_other_chat(df_chat: pd.DataFrame, youtube_encode_fetch:bool|tuple[bo
 
     If timestamp is not provided, all messages will be assumed to have been sent at an exact 5 minute interval ending 2024-01-01.
     '''
-    df_chat = df_chat.rename(columns=str.lower) # normalize col names
     df_chat = to_common_format(df_chat)
     df_chat = _process_chat(df_chat, 'other', youtube_encode_fetch=youtube_encode_fetch, merge_window=merge_window)
 
@@ -188,7 +246,7 @@ def process_discord_chat(df_chat: pd.DataFrame, cmd_prefixes:tuple[str, ...]=('!
     '''Required columns: ["AuthorID", "Author", "Date", "Content" ]. Unused columns: ["Reactions", "Attachments"]'''
     df_chat = df_chat.rename(columns=str.title).rename(columns={'Authorid':'AuthorID'}) # normalize col names
     # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
-    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
+    #df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
     df_chat = _process_chat(df_chat, 'discord', youtube_encode_fetch=youtube_encode_fetch, merge_window=7.0, cmd_prefixes=cmd_prefixes)
 
     return df_chat
@@ -199,6 +257,9 @@ def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','ot
     
     nrec_init = df_chat.shape[0]
     
+    # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
+    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
+
     # replace 2+ newlines with 1 newline, since we may use \n\n to separate messages
     df_chat['text'] = df_chat['Content'].str.replace(r'\n{2,}','\n', regex=True)
     df_chat = df_chat.dropna(subset='text').reset_index(drop=True)
