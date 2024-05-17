@@ -23,9 +23,12 @@ def convo_token_count(convo:list[dict], tokenizer):
     if isinstance(convo, dict):
         convo = [convo]
     # This method adds BOS (e.g '<s>' (1)) to beginning
-    # n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), return_length=True)['length'][0]
+    #n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), return_length=True)['length']
+
     # This method does not
-    n_tokens = tokenizer.apply_chat_template(convo, tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length'][0]
+    n_tokens = tokenizer.apply_chat_template(convo, tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length']
+    if not isinstance(n_tokens, int):
+        n_tokens=n_tokens[0]
     return n_tokens
 
 
