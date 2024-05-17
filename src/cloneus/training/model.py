@@ -207,7 +207,7 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
 
             
     elif cfg.flashattn_lib=='unsloth':
-        print('peft before:',peft_config)
+        #print('peft before:',peft_config)
         model, tokenizer = get_unsloth(name_or_path, 
                                        peft_config, 
                                        max_seq_length=cfg.chunk_size, 
