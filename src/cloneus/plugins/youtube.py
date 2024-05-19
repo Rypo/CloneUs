@@ -227,6 +227,9 @@ class YouTubeManager:
         self.allow_fetch = allow_fetch
         self.quota_usage = 0
 
+        self.invalid_ids = set()
+        self.video_index = YouTubeVideoCollection()
+
         if not os.getenv('YOUTUBE_API_KEY'):
             if self.enabled:
                 self.enabled = False
