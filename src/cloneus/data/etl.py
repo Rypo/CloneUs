@@ -35,7 +35,7 @@ def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005,
     Optional columns: ['username', 'displayName', 'firstName', 'authorInitial', 'isBot']
     '''
     df_users = df_chat.copy()
-    df_users['AuthorID'] = df_users['AuthorID'].astype(int)
+    # NOTE: AuthorID needs to be uint64, do NOT cast int, will overflow
     
     # one must be in included
     if 'Author' in df_users:
@@ -98,7 +98,7 @@ def user_index_from_chat(df_chat: pd.DataFrame, msg_threshold:float|int = 0.005,
     return user_index
 
 
-def get_usermap(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None, username_column:str = 'Author'):
+def get_make_userindex(df_chat, msg_threshold=0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None, username_column:str = 'Author'):
     ''' Get or create user index. Always includes cloneus record first entry.'''
     # TODO: Maybe WildCard user for if data has long tail distrib? -- all users < threshold = WildCardUser
 
@@ -168,12 +168,12 @@ def to_common_format(df_chat:pd.DataFrame):
     df_chat = df_chat.rename(columns=str.lower) # normalize col names
     if 'timestamp' in df_chat:
         df_chat.rename(columns={'timestamp':'Date'}, inplace=True)
-        #df_chat['Date'] = df_chat['timestamp'].pipe(pd.to_datetime, utc=True, format='mixed')#'ISO8601')
+        df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed')#'ISO8601')
     else:
         print()
         warnings.warn('No timestamp column. Using 5 minute intervals in place of message timestamps. Expect data quality loss.')
         print()
-        df_chat['Date'] = pd.date_range(end='1/1/2024', periods=df_chat.shape[0], unit="s", freq="5min")
+        df_chat['Date'] = pd.NaT#pd.date_range(end='1/1/2024', periods=df_chat.shape[0], unit="s", freq="5min")
     
     df_chat.rename(columns={'username':'Author', 'text':'Content'}, inplace=True)
     
@@ -191,7 +191,7 @@ def apply_youtube_encoding(text_col:pd.Series, youtube_encode_fetch: bool|tuple[
     yt_encode, yt_fetch = youtube_encode_fetch
     ytm = youtube.YouTubeManager(allow_fetch=yt_fetch, enabled=yt_encode)
     
-    if yt_fetch:
+    if yt_fetch and ytm.enabled:
         # do fetch in a batches of 50 for best api quota usage efficency
         video_ids = text_col.str.extractall(youtube.RE_YOUTUBE_URL_ID).video_id.to_list()
         _ = ytm.get_videos(video_ids=video_ids, query='', allow_fetch=yt_fetch)
@@ -224,9 +224,11 @@ def process_csv(chat_csv:str, youtube_encode_fetch:bool|tuple[bool,bool]=True, f
     data_source = data_source_format(df_chat)
 
     if data_source == 'discord':
+        print('Using format: Discord')
         return process_discord_chat(df_chat, cmd_prefixes=filter_prefixes, youtube_encode_fetch=youtube_encode_fetch)
     
     if data_source == 'other':
+        print('Using format: Other')
         return process_other_chat(df_chat, youtube_encode_fetch, merge_window=merge_window)
     
     
@@ -246,19 +248,19 @@ def process_discord_chat(df_chat: pd.DataFrame, cmd_prefixes:tuple[str, ...]=('!
     '''Required columns: ["AuthorID", "Author", "Date", "Content" ]. Unused columns: ["Reactions", "Attachments"]'''
     df_chat = df_chat.rename(columns=str.title).rename(columns={'Authorid':'AuthorID'}) # normalize col names
     # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
-    #df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
+    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
     df_chat = _process_chat(df_chat, 'discord', youtube_encode_fetch=youtube_encode_fetch, merge_window=7.0, cmd_prefixes=cmd_prefixes)
 
     return df_chat
 
 def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','other'], youtube_encode_fetch:bool|tuple[bool,bool]=True, merge_window:float = 7.0, cmd_prefixes:tuple[str, ...]=None):
-    user_index = get_usermap(df_chat)
+    user_index = get_make_userindex(df_chat)
     bot_data = user_index[0]
     
     nrec_init = df_chat.shape[0]
     
     # format="%Y-%m-%dT%H:%M:%S.%f%z")#, format='%m/%d/%Y %I:%M %p')
-    df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
+    #df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed') #  ISO8601
 
     # replace 2+ newlines with 1 newline, since we may use \n\n to separate messages
     df_chat['text'] = df_chat['Content'].str.replace(r'\n{2,}','\n', regex=True)
@@ -271,10 +273,10 @@ def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','ot
         df_chat = df_chat.dropna(subset='text').reset_index(drop=True) # Drop nulled texts
     
     # use displayName for user column
-    id_to_dname = useridx.get_users('dname', by='id', include_bot=True, user_index=user_index)
+    id_to_dname = useridx.get_users('dname', by='id', user_index=user_index, include_bot=True)
     df_chat['user'] = df_chat['AuthorID'].map(id_to_dname)
-
-    is_cloneus_bot = df_chat['AuthorID'] == int(bot_data['id'])
+    #return df_chat, user_index
+    is_cloneus_bot = df_chat['AuthorID'] == bot_data['id']
 
     df_chat['pre_bot'] = True
     if is_cloneus_bot.any():
@@ -293,13 +295,16 @@ def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','ot
     # this will drop ~< 500 samples with invalid YouTube links as the only source of text. Verified that these are indeed not valid links
     df_chat = df_chat[df_chat['text'] != ''].reset_index(drop=True)
     
-    
-    # TODO: Consider what to do about extremely long chat streaks (e.g. 367 consectutive messages by a user on 2023-01-19)
-    # TODO: Consider implications of assigning sequence/sessions after filtering vs before filtering
-    df_chat['time_gap'] = df_chat['Date'].diff().fillna(pd.Timedelta(0)).dt.total_seconds()
-    # If message is from a different user or time gap is greater than 7 minutes, then it's a new sequence
-    # - https://www.reddit.com/r/discordapp/comments/9u2tdz/whats_the_new_cutoff_time_for_separating_messages/
-    df_chat['user_sequence'] = (((df_chat['user'] != df_chat['user'].shift(1)) | (df_chat['time_gap']>(merge_window*60))).cumsum())
+    if df_chat['Date'].isna().any():
+        df_chat['time_gap'] = None
+        df_chat['user_sequence'] =(df_chat['user'] != df_chat['user'].shift(1)).cumsum()
+    else:
+        # TODO: Consider what to do about extremely long chat streaks (e.g. 367 consectutive messages by a user on 2023-01-19)
+        # TODO: Consider implications of assigning sequence/sessions after filtering vs before filtering
+        df_chat['time_gap'] = df_chat['Date'].diff().fillna(pd.Timedelta(0)).dt.total_seconds()
+        # If message is from a different user or time gap is greater than 7 minutes, then it's a new sequence
+        # - https://www.reddit.com/r/discordapp/comments/9u2tdz/whats_the_new_cutoff_time_for_separating_messages/
+        df_chat['user_sequence'] = (((df_chat['user'] != df_chat['user'].shift(1)) | (df_chat['time_gap']>(merge_window*60))).cumsum())
 
 
     nrec_final = df_chat.shape[0]
@@ -369,12 +374,34 @@ def assign_split(df_chat:pd.DataFrame, eval_frac: (float|typing.Literal['after_b
     else:
         # Use the last eval_frac chat groups for eval
         n_eval = int(df_chat.shape[0]*eval_frac)
-        eval_start_date = df_chat.iloc[-n_eval].Date
-        
-        df_chat['split'] = (df_chat.Date < eval_start_date).apply(lambda x: 'train' if x else 'eval')
-        print(f'Using messages after {eval_start_date} for eval set. n_messages = {n_eval}')
+        if df_chat['Date'].isna().any():
+            df_chat['split'] = 'train'
+            df_chat.iloc[-n_eval:, -1] = 'eval'
+            print(f'Using last {n_eval} messages for evaluation set')
+        else:
+            eval_start_date = df_chat['Date'].iloc[-n_eval]
+            df_chat.loc[:, 'split'] = (df_chat['Date'] < eval_start_date).apply(lambda x: 'train' if x else 'eval')
+            n_date_eval = (df_chat['split']=='eval').sum()
+            assert n_date_eval == n_eval, f'Bad split assignment! Eval set size missmatch: {n_date_eval} != {n_eval}'
+            print(f'Using messages after {eval_start_date} for eval set. n_messages = {n_date_eval}')
     
     return df_chat
+
+def format_text_tags(df_proc:pd.DataFrame, author_tag:str, tag_sep:str=None, postfix:str=None, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
+    df_chats = df_proc.groupby('user_sequence', as_index=False)[
+        ['user', 'Date', 'time_gap', 'text','pre_bot']].agg(
+        {'user':'first', 'Date':'last', 'time_gap':'first', 'text':list, 'pre_bot':'first'}).copy()
+    
+    # Join consecutive author messages with new line
+    df_chats['text'] = df_chats['text'].str.join('\n')
+
+    df_chats['formatted_author_tag'] = df_chats['user'].apply(useridx.format_author_tag, author_tag=author_tag) + ('' if tag_sep is None else tag_sep)
+
+    # BUG until 2023-11-29 was df_proc.text instead of df_all
+    df_chats['formatted_text'] = df_chats['formatted_author_tag'] + df_chats['text'] + ('' if postfix is None else postfix)  
+    
+    df_chats = assign_split(df_chats, eval_frac)
+    return df_chats
 
 def format_chat_groups(df_proc: pd.DataFrame, author_tag:str, tag_sep:str=None, postfix:str=None, hours_between_sessions:(int|list[int]|None) = 4, min_session_length:int=1, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
     """Prepares data for use in hf dataset. Creates a formatted text col, merges user messages, and assigns train, eval split.
@@ -398,19 +425,8 @@ def format_chat_groups(df_proc: pd.DataFrame, author_tag:str, tag_sep:str=None, 
     """
     # TODO: Argument to allow for data subset training 
     # df_proc = df_proc[(df_proc.Date > '2020') & (df_proc.Date < '2022')].copy()
-
-    df_chats = df_proc.groupby('user_sequence', as_index=False)[
-        ['user', 'Date', 'time_gap', 'text','pre_bot']].agg(
-        {'user':'first', 'Date':'last', 'time_gap':'first', 'text':list, 'pre_bot':'first'})
-    # Join consecutive author messages with new line
-    df_chats['text'] = df_chats['text'].str.join('\n')
-
-    df_chats['formatted_author_tag'] = df_chats['user'].apply(useridx.format_author_tag, author_tag=author_tag) + ('' if tag_sep is None else tag_sep)
-
-    # BUG until 2023-11-29 was df_proc.text instead of df_all
-    df_chats['formatted_text'] = df_chats['formatted_author_tag'] + df_chats['text'] + ('' if postfix is None else postfix)  
+    df_chats = format_text_tags(df_proc, author_tag, tag_sep=tag_sep, postfix=postfix, eval_frac=eval_frac)
     
-    df_chats = assign_split(df_chats, eval_frac)
     if hours_between_sessions is None:
         return df_chats
     
