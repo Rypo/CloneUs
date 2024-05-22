@@ -19,14 +19,15 @@ from .tokenization import check_if_system, to_jinja_template
 
 
 
-def convo_token_count(convo:list[dict], tokenizer):
+def convo_token_count(convo:list[dict], tokenizer: PreTrainedTokenizerFast):
     if isinstance(convo, dict):
         convo = [convo]
     # This method adds BOS (e.g '<s>' (1)) to beginning
     #n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), return_length=True)['length']
+    n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True)['length']
 
     # This method does not
-    n_tokens = tokenizer.apply_chat_template(convo, tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length']
+    #n_tokens = tokenizer.apply_chat_template(convo, tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length']
     if not isinstance(n_tokens, int):
         n_tokens=n_tokens[0]
     return n_tokens
@@ -41,34 +42,35 @@ def assign_roles(messages:list[str], role_labels:list[str]=None):
 
     return chat_content
 
-
-def add_sys_msg(chat_convo:list[dict], system_msg:str|dict[str,str], has_system:bool, append_first_msg:bool):
+def add_sys_msg(chat_convo:list[dict], system_msg:str|dict[str,str]|list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],):
     if isinstance(system_msg, str):
         system_msg = {'role':'system', 'content':system_msg}
 
-    if has_system: 
-        if chat_convo[0]['role'] != 'system':
-            assert system_msg not in chat_convo, 'system found in wrong position!'
-            chat_convo = [system_msg]+chat_convo
+    # TODO: Should tag_only accept a system message? Foundation models don't really do that, but I guess it's not gonna break anything
+    if tag_placement != 'content_prefix':
+        chat_convo = [system_msg]+chat_convo
         return chat_convo
 
     # Below here, roles are overwritten. Custom roles should never reach this point in code 
     # because if roles are customizable then it follows that a role can = "system".
     
-    system_msg['role'] = 'user'
+    
     rolecycle = itertools.cycle(['user','assistant'])
+    if isinstance(system_msg, list):
+        assert len(system_msg) == 2,'SYN ACK format must be 2 messages exactly'
+        assert system_msg[0]['role'] == 'user', 'SYN ACK format must be role0=user'
+        assert system_msg[1]['role'] == 'assistant', 'SYN ACK format must be role1=assistant'
+        # [{"role": "user", "content": fprompt}), {"role": "assistant", "content": "OK"}]
+    else:
+        assert system_msg['role'] != 'assistant', 'System message cannot start with assistant'
+        system_msg = [{'role': next(rolecycle), 'content': system_msg['content']}]
+    
 
-    if system_msg['content'] not in chat_convo[0]['content']:
-        if append_first_msg:
-            system_msg['content'] += chat_convo[0]['content']
-            chat_convo[0] = system_msg
-        else:
-            # if not appending, first message will be user with system prompt, assistant as first chat message
-            chat_convo = [system_msg] + chat_convo
+    chat_convo = system_msg + chat_convo
+
+    for c in chat_convo:
+        c['role'] = next(rolecycle)
         
-        for c in chat_convo:
-            c['role'] = next(rolecycle)
-
 
     return chat_convo
 
@@ -310,6 +312,202 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
     dset = datasets.DatasetDict({
         'train': datasets.Dataset.from_dict({'text': [chunk for session_chunks in df_chunked_sessions['train'].to_list() for chunk in session_chunks]}),
         'validation': datasets.Dataset.from_dict({'text': [chunk for session_chunks in df_chunked_sessions['eval'].to_list() for chunk in session_chunks]}),
+    })
+    # https://huggingface.co/learn/nlp-course/chapter5/3
+    if not text_only:
+        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
+
+    return dset
+
+
+def fill_cfg_from_data(formatted_author_tag_col:pd.Series, cfg):
+    fprompt = cfg.fprompt
+    name_mapping = cfg.prompt.name_mapping
+    
+    if name_mapping is None:
+        name_mapping = ', '.join(formatted_author_tag_col.unique())
+        cfg.prompt.name_mapping = name_mapping
+    
+    if fprompt is None:
+        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
+        cfg.fprompt = fprompt
+    
+    return cfg
+
+def apply_conv_format(df_all:pd.DataFrame, cfg, has_system:bool=None):
+    '''WILL SET cfg.fprompt and cfg.name_mapping IF THEY ARE NONE'''
+    fprompt = cfg.fprompt
+    name_mapping = cfg.prompt.name_mapping
+    
+    if name_mapping is None:
+        name_mapping = ', '.join(df_all.formatted_author_tag.unique())
+        cfg.prompt.name_mapping = name_mapping
+    
+    if fprompt is None:
+        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
+        cfg.fprompt = fprompt
+    
+    group_keys = ['split']
+    if 'chat_session' in df_all:
+        group_keys += ['chat_session']
+    
+    sr_convo = df_all.groupby(group_keys)[['formatted_author_tag','text']].agg(list).apply(
+        lambda r: to_conversation_format(r.formatted_author_tag, r.text, 
+                                         tag_placement=cfg.tag_placement, fprompt=cfg.fprompt, 
+                                         has_system=has_system, append_msg=cfg.prompt.append_msg), axis=1)
+    
+    #sr_convo.apply(tokenizer.apply_chat_template, tokenize = False,).apply(lambda x: tokenizer(x, add_special_tokens=False, return_length=True)['length'])
+    
+    return sr_convo
+
+def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],  fprompt:str=None, has_system: bool=None, append_msg:bool=None) -> list[dict[str,str]]:
+    # NOTE: formatted_author_tags INCLUDE TAG SEP (if not None)
+    # https://github.com/benfred/py-spy
+    atag_tcontent = zip(formatted_author_tags, raw_texts)
+    chat_content = []
+    
+    if fprompt is None:
+        if tag_placement == 'content_prefix':
+            for fauth_tag,text in atag_tcontent:
+                content = fauth_tag + text
+                chat_content.append({"role": next(rolecycle), "content": content})
+        else:
+            for role_tag,content in atag_tcontent:
+                # for TagFormat, tag_sep is baked in to chat_template via to_jinja_template
+                chat_content.append({"role": role_tag, "content": content})
+
+        return chat_content
+    
+    
+    if tag_placement in ['replace_role','tag_only']:
+        # '''For tag only, markup free, format''' # '''For chatml with custom roles as usernames'''
+        
+        if tag_placement == 'replace_role':
+            chat_content.append({"role": "system", "content": fprompt})
+        
+        for role_tag,content in atag_tcontent:
+            #role_tag = useridx.format_author_tag(author, self.cfg.author_tag) # for TagFormat, tag_sep is baked in to chat_template via to_jinja_template
+            chat_content.append({"role": role_tag, "content": content})
+        
+        return chat_content
+    
+    elif tag_placement == 'content_prefix':
+        rolecycle = itertools.cycle(['user','assistant'])
+            
+        if fprompt is not None:
+            assert append_msg is not None, 'content_prefix requires append_msg set True/False'
+            assert has_system is not None, 'content_prefix requires has_system set True/False'
+            
+            if has_system:
+                chat_content.append({"role": "system", "content": fprompt})
+            elif append_msg=='legacy':
+                tag0, text0 = next(atag_tcontent)
+                content0 = tag0 + text0 
+                # make sure first iter starts on assistant now
+                chat_content.append({"role": next(rolecycle), "content": fprompt+content0})
+            elif append_msg:
+                chat_content.append({"role": "user", "content": fprompt})
+                chat_content.append({"role": "assistant", "content": "OK"})
+            
+        for fauth_tag,text in atag_tcontent:
+            content = fauth_tag + text
+            chat_content.append({"role": next(rolecycle), "content": content})
+
+        return chat_content
+
+    
+
+
+def batched_token_count(convo:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, ) -> np.ndarray[int]:
+    '''Returns an array of approximate token lens for all items in a list. Each will be treated as it's own batch if not already batched.
+    
+    [{"role":...,"content":... }, {"role":...,"content":... }, ] will become [[{"role":...,"content":... }], [{"role":...,"content":... }], ]
+    [[{"role":...,"content":... }], [{"role":...,"content":... }], ] will be left as is
+    '''
+    
+    batched_convo = [[c] if isinstance(c, dict) else c for c in convo]
+    return tokenizer(tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length']
+
+def split_overflow(sys_convo_batches, tokenizer, system_msg, tag_placement, max_length):
+    convo_lens = batched_token_count(sys_convo_batches, tokenizer)
+    overlen_indices = np.flatnonzero(convo_lens > max_length)
+    
+    while overlen_indices.size > 0:
+        for i in overlen_indices:
+            b_over = sys_convo_batches.pop(i)
+            h = len(b_over)//2
+            h_left = b_over[:h]
+            h_right = add_sys_msg(b_over[h:], system_msg, tag_placement=tag_placement)
+            # right first, then left since it inserts *before* index. Alt would be left, right@i+1
+            sys_convo_batches.insert(i, h_right)
+            sys_convo_batches.insert(i, h_left)
+    
+        convo_lens = batched_token_count(sys_convo_batches, tokenizer)
+        overlen_indices = np.flatnonzero(convo_lens > max_length)
+        if overlen_indices.size == 1:
+            assert len(sys_convo_batches[overlen_indices[0]]) > 1, 'At least one message+system > max_length tokens. Truncation required.'
+        
+        print(overlen_indices, convo_lens[overlen_indices])
+    
+    return sys_convo_batches
+
+def consecutive_max_batch(convo, all_msg_lens, token_limit:int):
+    #all_msg_lens = batched_token_count(convo, tokenizer)
+    batches = []
+    batch = []
+    total = 0
+    
+    for i,v in enumerate(all_msg_lens):
+        if total + v > token_limit:
+            batches.append(batch)
+            batch = [convo[i]]
+            total = v
+        else:
+            batch.append(convo[i])
+            total+=v
+    
+    return batches
+
+def convo_batch_max_tokens(convo:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg:str | dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
+    syslen = batched_token_count([system_msg],tokenizer)[0]
+    all_msg_lens = batched_token_count(convo, tokenizer)
+    
+    token_limit = (max_length-syslen)
+    assert all_msg_lens.max() <= token_limit,'At least one message+system > max_length tokens. Truncation required.'
+
+    convo_batches = consecutive_max_batch(convo, all_msg_lens, token_limit)
+
+    sys_convo_batches = [add_sys_msg(c, system_msg, tag_placement=tag_placement) for c in convo_batches]
+    sys_convo_batches = split_overflow(sys_convo_batches, tokenizer, system_msg, tag_placement, max_length=max_length) # not token_limit, since system has been added
+    
+
+    return sys_convo_batches
+
+
+def dateless_dataset(chat_csv, tokenizer, cfg, text_only=False):
+    '''Dataset groupings of sequential texts concatenated up to a maximum of `cfg.chunk_size` total tokens
+    
+    Chat sessions are NOT assigned, and no Date or timestamps fields are used or created.
+    '''
+    df_proc = etl.process_csv(chat_csv, youtube_encode_fetch=True, filter_prefixes=('!', '/'), merge_window=None)
+    df_all = etl.format_text_tags(df_proc, author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix,  eval_frac=cfg.dataset.get('eval_frac',0.01))
+    
+    df_tall = df_all.query('split=="train"')
+    df_eall = df_all.query('split=="eval"')
+    # get base tokens before any system is added
+    convo_train = to_conversation_format(df_tall['formatted_author_tag'], df_tall['text'], tag_placement=cfg.tag_placement)
+    convo_eval = to_conversation_format(df_eall['formatted_author_tag'], df_eall['text'], tag_placement=cfg.tag_placement)
+    
+    system_message = cfg.fprompt
+    if cfg.tag_placement == 'content_prefix' and cfg.prompt.append_msg:
+        if cfg.prompt.append_msg != 'legacy':
+            system_message = [{'role':'user', 'content': cfg.fprompt}, 
+                              {'role':'assistant', 'content':cfg.prompt.append_msg}]
+
+
+    dset = datasets.DatasetDict({
+        'train': datasets.Dataset.from_dict({'text': convo_batch_max_tokens(convo_train, tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)}, split='train'),
+        'validation': datasets.Dataset.from_dict({'text': convo_batch_max_tokens(convo_eval, tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)}, split='validation'),
     })
     # https://huggingface.co/learn/nlp-course/chapter5/3
     if not text_only:
