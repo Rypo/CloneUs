@@ -1,5 +1,6 @@
 import gc
 import os
+import warnings
 import argparse
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
@@ -36,10 +37,19 @@ def verify_config(cfg):
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
     
-    if cfg.chat_template_format == 'chatml' and cfg.tag_sep != '\n':
-        print('NOTE: for chat_template_format=chatml, tag_sep must = \\n. Setting tag_sep=\\n')
-        cfg.tag_sep = '\n'
-    
+    # if cfg.chat_template_format == 'chatml' and cfg.tag_sep != '\n':
+    #     print('NOTE: for chat_template_format=chatml, tag_sep must = \\n. Setting tag_sep=\\n')
+    #     cfg.tag_sep = '\n'
+    if cfg.tag_placement == 'replace_role':
+        if any([cfg.tag_sep is not None, cfg.postfix is not None]):
+            print("NOTE: tag_placement == 'replace_role' does not use postfix/tag_sep -- postfix, tag_sep will be set to None")
+            cfg.tag_sep = None 
+            cfg.postfix = None 
+    elif cfg.tag_placement == 'content_prefix':
+        if any([cfg.postfix is not None]):
+            print("NOTE: tag_placement == 'content_prefix' does not use postfix -- postfix will be set to None")
+            cfg.postfix = None
+
     if cfg.flashattn_lib == 'unsloth': 
         if cfg.quant_method != 'bnb4':
             raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
@@ -49,6 +59,11 @@ def verify_config(cfg):
             print('NOTE: Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
             cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
+    if cfg.dataset.name != 'max_tokens':
+        from cloneus.data.etl import has_time_column
+        if not has_time_column(cfg.dataset.chatlog_csv):
+            warnings.warn(f'Warning: Neither "Date" or "timestamp" found in csv columns. dataset.name {cfg.dataset.name} requires date column. Config will be updated: dataset.name="max_tokens"')
+            cfg.dataset.name = 'max_tokens'
 
 def main(args):
     # Decent example for HfArgumentParser
@@ -177,6 +192,8 @@ def main(args):
         num_new_vocab = tokenizer.add_special_tokens(special_token_overrides)
         assert num_new_vocab==0, 'Using non-vocab special tokens is not currently supported.'
     
+    data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
+    
     # Config Autofill
     cfg.special_tokens = tokenizer.special_tokens_map
     cfg.model_architecture = model.config.architectures[0]
@@ -186,28 +203,32 @@ def main(args):
     cfg.fprompt = None
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    if cfg.prompt.template:
-        name_mapping = ', '.join(useridx.format_author_tag(author, cfg.author_tag) for author in useridx.get_users('dname'))
-        cfg.prompt.name_mapping = name_mapping
-        cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
+    # if cfg.prompt.template:
+    #     if not useridx.user_index_exists():
+    #         from cloneus.data import etl
+    #         etl.process_csv(data_file_path) # cold run
+    #     name_mapping = ', '.join(useridx.format_author_tag(author, cfg.author_tag) for author in useridx.get_users('dname'))
+    #     # these are filled in dataset creation now
+    #     cfg.prompt.name_mapping = name_mapping
+    #     cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
 
-    data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
     
     text_only_dataset = cfg.use_sft_trainer
 
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:
         dset = dataset.jsonl_dataset(cfg.train_jsonl, cfg.eval_jsonl, tokenizer, cfg, text_only=text_only_dataset) 
+    elif cfg.dataset.name == 'max_tokens':
+        dset = dataset.max_tokens_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
     elif cfg.dataset.name == 'ungrouped':
         dset = dataset.ungrouped_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
-    elif cfg.dataset.name == 'chunk_maxlen':
-        dset = dataset.max_tokens_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
-    
-    elif cfg.tag_placement == 'replace_role':
-        dset = dataset.author_roletags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
-    elif cfg.tag_placement == 'content_prefix':
-        dset = dataset.ua_tags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)    
-    elif cfg.tag_placement == 'tag_only':
-        dset = dataset.tag_only_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+    else:
+        dset = dataset.chat_sessions_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+    # elif cfg.tag_placement == 'replace_role':
+    #     dset = dataset.author_roletags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+    # elif cfg.tag_placement == 'content_prefix':
+    #     dset = dataset.ua_tags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)    
+    # elif cfg.tag_placement == 'tag_only':
+    #     dset = dataset.tag_only_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
     
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]

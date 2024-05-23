@@ -199,6 +199,14 @@ def apply_youtube_encoding(text_col:pd.Series, youtube_encode_fetch: bool|tuple[
     # Transform all youtube URLs into custom metadata tag for better LLM comprehension
     return text_col.apply(ytm.encode)
 
+def has_time_column(df_or_csv:str|pd.DataFrame):
+    if not isinstance(df_or_csv, pd.DataFrame):
+        df_or_csv = pd.read_csv(df_or_csv, nrows=0)
+    
+    column_names = df_or_csv.columns.str.upper()
+
+    return column_names.isin(['DATE','TIMESTAMP']).any()
+
 def data_source_format(df_chat: pd.DataFrame, ):
     csv_columns = set(df_chat.columns.str.upper())
 
@@ -388,6 +396,20 @@ def assign_split(df_chat:pd.DataFrame, eval_frac: (float|typing.Literal['after_b
     return df_chat
 
 def format_text_tags(df_proc:pd.DataFrame, author_tag:str, tag_sep:str=None, postfix:str=None, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
+    '''Creates a formatted text col, merges user messages, and assigns train, eval split.
+
+    Groups chat data by user_sequence and join by a new line. Creates formatted_text column where each takes the form: 
+        `author_tag` `tag_sep` <TEXT> `postfix`.
+    Assigns a split column for training and evaluation based on the `eval_frac` parameter.
+
+    Args:
+        df_proc: DataFrame containing preprocessed chat data.
+        author_tag: The format string for the author tag. e.g. '[USER:{author}]'.
+        tag_sep: Separator string to use between the author tag and the text.
+        postfix: String to append at the end of each formatted text. 
+        eval_frac (float|'after_bot'): If float, the fraction of chat groups to use for evaluation. If 'after_bot', use all messages after the bot's first message (default: 0.005).
+    '''
+    
     df_chats = df_proc.groupby('user_sequence', as_index=False)[
         ['user', 'Date', 'time_gap', 'text','pre_bot']].agg(
         {'user':'first', 'Date':'last', 'time_gap':'first', 'text':list, 'pre_bot':'first'}).copy()
@@ -403,30 +425,22 @@ def format_text_tags(df_proc:pd.DataFrame, author_tag:str, tag_sep:str=None, pos
     df_chats = assign_split(df_chats, eval_frac)
     return df_chats
 
-def format_chat_groups(df_proc: pd.DataFrame, author_tag:str, tag_sep:str=None, postfix:str=None, hours_between_sessions:(int|list[int]|None) = 4, min_session_length:int=1, eval_frac: (float|typing.Literal['after_bot']) = 0.005):
-    """Prepares data for use in hf dataset. Creates a formatted text col, merges user messages, and assigns train, eval split.
-
-    Groups chat data by user_sequence and join by a new line. Creates formatted_text column where each takes the form: 
-        `author_tag` `tag_sep` <TEXT> `postfix`.
-    Assigns a split column for training and evaluation based on the `eval_frac` parameter.
+def label_chat_sessions(df_proc: pd.DataFrame, hours_between_sessions:(int|list[int]|None) = 4, min_session_length:int=1):
+    """Prepares data for use in hf dataset. 
     If min_session_length>1, any groups containing fewer than `min_session_length` messages will be forcably regrouped until.
 
     Args:
         df_proc: DataFrame containing preprocessed chat data.
-        author_tag: The format string for the author tag. e.g. '[USER:{author}]'.
-        tag_sep: Separator string to use between the author tag and the text.
-        postfix: String to append at the end of each formatted text. 
         hours_between_sessions: Hours of silence before starting a new group. If a list is given, will copy the data group for each (default: 4).
         min_session_length: The minimum number of messages required for a session to be considered valid (default: 1).
-        eval_frac (float|'after_bot'): If float, the fraction of chat groups to use for evaluation. If 'after_bot', use all messages after the bot's first message (default: 0.005).
 
     Returns:
         pd.DataFrame: A DataFrame with the formatted text and session splits for training and evaluation.
     """
     # TODO: Argument to allow for data subset training 
     # df_proc = df_proc[(df_proc.Date > '2020') & (df_proc.Date < '2022')].copy()
-    df_chats = format_text_tags(df_proc, author_tag, tag_sep=tag_sep, postfix=postfix, eval_frac=eval_frac)
-    
+    #df_chats = format_text_tags(df_proc, author_tag, tag_sep=tag_sep, postfix=postfix, eval_frac=eval_frac)
+    df_chats = df_proc.copy()
     if hours_between_sessions is None:
         return df_chats
     

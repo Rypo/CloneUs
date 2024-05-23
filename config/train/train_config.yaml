@@ -35,7 +35,7 @@ custom_scheduler: # warmup_const_cosine # to enable, needs lr_scheduler: linear
 dataset:
   chatlog_csv: 'data/discord/YOUR_CHAT_FILE.csv' 
   # created from calling scripts/build.py with your DiscordChatExporter JSON export or chat csv
-  name: chunkh # chunkh135
+  name: chunkh # chunkh, or max_tokens if no Date or timestamp column
   train_jsonl:
   eval_jsonl:
   hours_between_sessions: 4 # [1, 3, 5]
