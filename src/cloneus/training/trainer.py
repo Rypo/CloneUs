@@ -16,6 +16,8 @@ from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_pef
 
 from trl import SFTTrainer
 # from trl.trainer import ConstantLengthDataset
+# import wandb.vendor.pynvml.pynvml
+# wandb.vendor.pynvml.pynvml.nvmlDeviceGetName = lambda handle: "NVIDIA GeForce RTX 3090"
 
 def _get_cosine_const_schedule_with_warmup_lr_lambda(current_step: int, *, num_warmup_steps: int, num_const_steps:int, num_training_steps: int, num_cycles: float):
     
@@ -218,7 +220,7 @@ def create_args(base_outdir, peft_config: LoraConfig, chunk_size=512,  n_custom_
         gradient_accumulation_steps=kwargs.pop('gradient_accumulation_steps', 1),
         gradient_checkpointing=True, # add # If True, use gradient checkpointing to save memory at the expense of slower backward pass.
         #gradient_checkpointing_kwargs = dict(use_reentrant=True), # when = False, vRAM usage sky rockets. Not sure if bug or bad.
-        evaluation_strategy='steps',
+        eval_strategy='steps',
         eval_steps=kwargs.pop('eval_steps', None), # Will default to the same value as logging_steps
         save_strategy=kwargs.pop('save_strategy','epoch'),
         save_steps=kwargs.pop('save_steps',500),
@@ -242,15 +244,16 @@ def create_args(base_outdir, peft_config: LoraConfig, chunk_size=512,  n_custom_
         save_total_limit=kwargs.pop('save_total_limit', None),
         save_safetensors=True,
         group_by_length=kwargs.pop('group_by_length', True), # Might have consequences, disable? -- yep, will consume absurd memory when combining largest items (unless truncated beforehand)
-        report_to="wandb",
+        report_to="none", #"wandb",
         run_name="{modelname}-{dirargs}-{optim}-b{batchsize}-mgn{max_gradnorm}",
+        **kwargs,
     )
     args = format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens, attn_implementation, custom_scheduler)
 
-    if kwargs:
-        nargs=args.to_dict()
-        nargs.update(kwargs)
-        args = TrainingArguments(**nargs)
+    # if kwargs:
+    #     nargs=args.to_dict()
+    #     nargs.update(kwargs)
+    #     args = TrainingArguments(**nargs)
 
     return args
 
