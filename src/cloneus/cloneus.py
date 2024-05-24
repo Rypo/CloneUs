@@ -330,7 +330,8 @@ class Cloneus(GenConfigUtilities):
             self.base_dtype = torch.bfloat16 # Avoid ever running as float32
                 
         self.base_has_system = tokenization.check_if_system(self.tokenizer) 
-        
+        self.base_needs_bos = self.base_tokenizer.chat_template and 'bos_token' not in self.base_tokenizer.chat_template
+
         print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {} (use: {}), tag_placement: {}'.format(
             self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
             self.tokenizer.eos_token_id, self.gen_config.eos_token_id,
@@ -481,7 +482,7 @@ class Cloneus(GenConfigUtilities):
         if isinstance(wordslist[0],tuple):
             wordslist,weights = list(zip(*wordslist))
         
-        tokens = self.tokenizer(wordslist, add_special_tokens=False).input_ids
+        tokens = self.tokenizer(wordslist, add_special_tokens=False).input_ids # Do NOT add bos, since want exact token ids
         if weights is not None:
             assert len(wordslist) == len(weights), 'all words need a weight'
             return {tuple(t):w for t,w in zip(tokens,weights)}
@@ -799,7 +800,7 @@ class Cloneus(GenConfigUtilities):
 
         input_text = self.base_to_conversation_format(chat_history, system_prompt=system_prompt)
 
-        inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)
+        inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)
         input_len = inputs.pop('length')[0].item()
         
         with self.model.disable_adapter(), torch.cuda.amp.autocast(dtype=self.base_dtype):
@@ -837,7 +838,7 @@ class Cloneus(GenConfigUtilities):
         streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
         input_text = self.base_to_conversation_format(chat_history, system_prompt=system_prompt)
-        inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
+        inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)#, max_length=1024, truncation=True)
 
         input_len = inputs.pop('length')[0].item()
 
@@ -994,22 +995,29 @@ class CloneusUA(Cloneus):
         atag=useridx.format_author_tag(author, self.cfg.author_tag)
         return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
 
+
     def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
-        rolecycle = itertools.cycle(['user','assistant'])
-
         chat_content = []
-
-        if self.base_has_system:
-            chat_content.append({"role": "system", "content": self.cfg.fprompt})
-        else:
-            pcontent = self.cfg.fprompt
-            if self.cfg.prompt.append_msg:
-                auth, msg = author_messages[0]
-                pcontent += self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
-                author_messages = author_messages[1:]
-            
-            chat_content.append({"role": next(rolecycle), "content": pcontent})
+        rolecycle = itertools.cycle(['user','assistant'])
         
+        if self.cfg.fprompt:
+            if self.base_has_system:
+                system_message = [{'role':'system', 'content': self.cfg.fprompt}]
+            elif self.cfg.prompt.append_msg == 'legacy':
+                content0 = self.apply_content_prefix(*author_messages[0], tag_sep=self.cfg.tag_sep)
+                system_message = [{'role':next(rolecycle), 'content': self.cfg.fprompt + content0}]
+                author_messages = author_messages[1:]
+                
+            elif self.cfg.prompt.append_msg:
+                system_message = [
+                    {'role':'user', 'content': self.cfg.fprompt}, 
+                    {'role':'assistant', 'content': self.cfg.prompt.append_msg}]
+            else:
+                system_message = [{'role': next(rolecycle), 'content': self.cfg.fprompt}]
+
+            chat_content.extend(system_message)
+            
+
         for auth,msg in author_messages:
             message = self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
             chat_content.append({"role": next(rolecycle), "content": message})
@@ -1036,14 +1044,14 @@ class SystemPromptTemplate:
     
     no_system_role_addendum: str = (
         '\n-----------\n'
-        'If you understand the objective, respond to this message (and only this message) with "OK". '
+        'If you understand the objective, respond to this message (and only this message) with "{addendum_followup}". '
         'Afterwards, I will send the first message and we will begin.')
-    
+    addendum_followup: str = "OK"
     template_format_str: str = '{task}\n{meta}{addendum}'
     
 
     def get_template(self, name_mapping:str = None):
-        addendum = '' if self.has_system_role else self.no_system_role_addendum
+        addendum = '' if self.has_system_role else self.no_system_role_addendum.format(self.addendum_followup)
             
         template = self.template_format_str.format(task=self.task_description, meta=self.meta_description, addendum=addendum)
         
