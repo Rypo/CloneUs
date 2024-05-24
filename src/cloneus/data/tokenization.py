@@ -106,6 +106,16 @@ def get_tokenizer(model_id, padding_side=None):
         
     return tokenizer
 
+def bos_chat_template(tokenizer):
+    '''Return a chat_template that begins with bos_token if tokenizer's does not already use it'''
+    # Phi-3 medium requires BOS, but will not add as special token or in chat template.
+    # it's unclear if this is a bug or intentional
+    chat_template = tokenizer.chat_template
+    if chat_template and 'bos_token' not in chat_template:
+        print(r'NOTE: bos_token not in chat template. {{ bos_token }} will be prepended to chat_template')
+        chat_template = "{{ bos_token }}"+tokenizer.chat_template
+
+    return chat_template
 
 def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
     if tokenizer.pad_token is None:
@@ -131,6 +141,7 @@ def configure_tokenizer(tokenizer, padding_side:str, custom_chat_template:str):
         print('Using custom chat template')
         tokenizer.chat_template = custom_chat_template
     
+    tokenizer.chat_template = bos_chat_template(tokenizer)
     print(f'Tokenizer using PAD = {tokenizer.pad_token}({tokenizer.pad_token_id})')
     return tokenizer
 

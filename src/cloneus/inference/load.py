@@ -43,6 +43,7 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
 
     tokenizer.padding_side = 'left'
     tokenizer.pad_token_id = tokenizer.eos_token_id
+    #tokenizer.chat_template = tokenization.bos_chat_template(tokenizer)
     return tokenizer
 
         
