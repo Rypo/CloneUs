@@ -75,7 +75,7 @@ def get_cloneus_user(allow_default:bool=True) -> dict[str,]:
 # @functools.cache
 def get_users(get: Literal['dname','initial','fname','uname','bot','id']|None = None, 
               by:  Literal['dname','initial','fname','uname','id']|None = None, 
-              *, include_bot:bool=False, user_index: list[dict] = None,
+              *,  user_index: list[dict] = None, include_bot:bool=False,
               ) -> dict[str,] | dict[str, dict[str,]] | list | list[dict[str,]]:
     '''Reindex and filter user data index.
 
@@ -84,8 +84,9 @@ def get_users(get: Literal['dname','initial','fname','uname','bot','id']|None = 
     Args:
         get: The value to select from each user's data. If None, return unfiltered user data
         by: The key to index user data by. If None, return a list instead of a dict
+        user_index: The user data index to use, any returned dicts WILL be mutable. If None, will use a deep copy of global default (config/users.json)
         include_bot: If True, include Cloneus bot as first entry in the returned data
-        user_index: The user data index to use, any returned dicts WILL be mutable. If None, will use a deep copy of global default (config/users.json) 
+         
 
     Returns:
         dict: { by : user_index[get] } if both `by` and `get`

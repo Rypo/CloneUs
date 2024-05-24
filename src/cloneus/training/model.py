@@ -42,7 +42,8 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         fix_tokenizer=True,
         load_in_4bit = (peft_config.init_lora_weights != 'loftq'),
         device_map = "sequential",
-        use_gradient_checkpointing = True, #"unsloth",
+        use_gradient_checkpointing = True,
+        # use_gradient_checkpointing = "unsloth",
     )
     if Path(model_id).exists():
         return model,tokenizer
@@ -58,7 +59,8 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
         lora_alpha = peft_config.lora_alpha,
         lora_dropout = 0, # Currently only supports dropout = 0
         bias = "none",    # Currently only supports bias = "none"
-        use_gradient_checkpointing = True,#"unsloth",, 
+        use_gradient_checkpointing = True,
+        # use_gradient_checkpointing = "unsloth",
         random_state = 3407,
         max_seq_length = max_seq_length,
         use_rslora=peft_config.use_rslora,
