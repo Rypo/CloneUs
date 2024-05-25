@@ -40,15 +40,23 @@ def convo_token_count(convo:list[dict], tokenizer: PreTrainedTokenizerFast):
     return n_tokens
 
 
-def batched_token_count(convo:list[list[dict]]|list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, ) -> np.ndarray[int]:
+def batched_token_count(convo:list[list[dict]]|list[dict[str,str]], tokenizer:PreTrainedTokenizerFast) -> np.ndarray[int]:
     '''Returns an array of approximate token lens for all items in a list. Each will be treated as it's own batch if not already batched.
     
     [{"role":...,"content":... }, {"role":...,"content":... }, ] will become [[{"role":...,"content":... }], [{"role":...,"content":... }], ]
     [[{"role":...,"content":... }], [{"role":...,"content":... }], ] will be left as is
     '''
-    
-    batched_convo = [[c] if isinstance(c, dict) else c for c in convo]
-    return tokenizer(tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length']
+    # This will throw off sum lengths by 1*n_messages when applying batching to a single conversation
+    # But, on the otherhand, this is exactly what would happen if {{bos_token}} was in the chat_template... so it's consistent I guess? 
+    batched_convo = convo[:]
+    bos_discount = 0
+    if isinstance(convo[0], dict):
+        # NOTE: this will break if mistral format. Because we are treating each message like it's own conversation, the roles will be wrong. 
+        # batched_convo = [[c] if isinstance(c, dict) else c for c in convo]
+        batched_convo = [[c] for c in convo]
+        bos_discount = 1
+        #print('treating each item as own convo')
+    return tokenizer(tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length'] - bos_discount
 
 
 def add_sys_msg(chat_convo:list[dict], system_msg:dict[str,str]|list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],):
@@ -93,10 +101,6 @@ def add_sys_msg(chat_convo:list[dict], system_msg:dict[str,str]|list[dict[str,st
         system_msg = [{'role': msg0['role'], 'content': system_msg['content'] + msg0['content']}]
         
         chat_convo = system_msg + chat_convo
-        #for c in chat_convo:
-        #    c['role'] = next(rolecycle)
-
-    #chat_convo = system_msg + chat_convo
         
 
     return chat_convo
@@ -131,7 +135,6 @@ def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str],
         for role_tag,content in atag_tcontent:
             chat_content.append({"role": role_tag, "content": content})
         
-
         return add_sys_msg(chat_content, system_msg=system_msg, tag_placement=tag_placement)
     
     elif tag_placement == 'content_prefix':
@@ -218,106 +221,91 @@ def prepare_system_msg(cfg, tokenizer):
 
 def chat_lull_idx(time_gaps:list[float], tail_strip:float=0.05, top_one:bool=True):
     tg_asort = np.argsort(time_gaps)
-    if tg_asort.size < 1/tail_strip:
+    if not tail_strip or tg_asort.size < 1/tail_strip:
         cand_inds = tg_asort
     else:
         ntrim = int(tail_strip*tg_asort.size)
         cand_inds = tg_asort[(ntrim<tg_asort) & (tg_asort<tg_asort.size-ntrim)]
     if top_one:
-        return cand_inds[-1]
+        return cand_inds[-1:]
     
     return cand_inds[::-1]
     
-def exact_time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
+def greedy_time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
     '''Slower version of time_split. Always used the longest time gap for splitting. 
     
-    Runs multiple iterations until complete. May split one batch in to many more than 2 sub-batches.'''
+    Runs multiple iterations until complete. May split one batch in to many small sub batches depending on how sparse the conversation is.'''
     # intermission, latency, inactivity, idle time, lull, elapsed, lapse, timeout, interval, interlude, downtime.. why naming so hard
+    original_n_batches = len(batched_sys_convos)
+
     convo_lens = batched_token_count(batched_sys_convos, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
+    new_batched_sys_convos = []
+    new_batched_time_gaps = []
+
     if overlen_indices.size > 0:
         print(f'Splitting {overlen_indices.size} conversations with tokens > {max_length} using max intermission time.')
         assert all([len(batched_sys_convos[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
 
-    while overlen_indices.size > 0:
-        for offset,i in enumerate(overlen_indices):
-            i+=offset
-            c_over = batched_sys_convos.pop(i)
-            t_over = batched_time_gaps.pop(i)
-            h = chat_lull_idx(t_over, tail_strip=0.05)
-            c_left = c_over[:h]
-            c_right = add_sys_msg(c_over[h:], system_msg, tag_placement=tag_placement)
-            
-            t_left = t_over[:h]
-            t_right = [0.0]+t_over[h:] # prepend 0.0 for added system message
-            
-            # right first, then left since it inserts *before* index. Alt would be left, right@i+1
-            batched_sys_convos.insert(i, c_right)
-            batched_time_gaps.insert(i, t_right)
-            
-            batched_sys_convos.insert(i, c_left)
-            batched_time_gaps.insert(i, t_left)
-    
-        convo_lens = batched_token_count(batched_sys_convos, tokenizer)
-        overlen_indices = np.flatnonzero(convo_lens > max_length)
-        if overlen_indices.size == 1:
-            assert len(batched_sys_convos[overlen_indices[0]]) > 1, 'At least one message+system > max_length tokens. Truncation required.'
-        
-        print('lens:',convo_lens[overlen_indices]) # 'idx:',overlen_indices, 
-    
-    return batched_sys_convos
+    for i in range(original_n_batches):
+        if i not in overlen_indices:
+            new_batched_sys_convos.append(batched_sys_convos[i])
+            new_batched_time_gaps.append(batched_time_gaps[i])
+            continue
 
-# def time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
-#     '''Split on the longest time gap that successfully partitions both sides to be under max_length. 
+        orig_length = convo_lens[i]
+        excess_tokens = (orig_length-max_length)
+        
+        c_over = batched_sys_convos[i]
+        t_over = batched_time_gaps[i]
+        
+        h = chat_lull_idx(t_over, tail_strip=0.05, top_one=True)[0]
+        
+        c_left = c_over[:h]
+        c_right = add_sys_msg(copy.deepcopy(c_over[h:]), system_msg, tag_placement=tag_placement)
+        
+        t_left = t_over[:h]
+        t_right= t_over[h:] 
+        # might change anywhere from 0-2 new messages depending on append_msg/tag_placement
+        zpad = [0.0]*(len(c_right) - len(t_right))
+        t_right = zpad + t_right # prepend 0.0s for added system message
+        
+        #tok_left, tok_right = batched_token_count([c_left, c_right], tokenizer) 
+        
+        new_batched_sys_convos.extend([c_left, c_right])
+        new_batched_time_gaps.extend([t_left, t_right])
+        
     
-#     Each over length batch is split into exactly 2 sub batches.'''
-#     # intermission, latency, inactivity, idle time, lull, elapsed, lapse, timeout, interval, interlude, downtime.. why naming so hard
-#     convo_lens = batched_token_count(batched_sys_convos, tokenizer)
-#     overlen_indices = np.flatnonzero(convo_lens > max_length)
-#     new_batched_sys_convos = []
-#     if overlen_indices.size > 0:
-#         print(f'Splitting {overlen_indices.size} conversations with tokens > {max_length} using max intermission time.')
-#         assert all([len(batched_sys_convos[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
+    convo_lens = batched_token_count(new_batched_sys_convos, tokenizer)
+    overlen_indices = np.flatnonzero(convo_lens > max_length)
     
+    if overlen_indices.size > 0:
+        print('remaining over length:', convo_lens[overlen_indices], 'idx:',overlen_indices)
+        return greedy_time_split_overlength(new_batched_sys_convos, new_batched_time_gaps, tokenizer, system_msg, tag_placement, max_length)
         
-#         for offset,i in enumerate(overlen_indices):
-#             orig_length = convo_lens[i]
-#             i += offset
-#             c_over = batched_sys_convos.pop(i) #overlen_sys_convos[i]
-#             t_over = batched_time_gaps.pop(i)#overlen_time_gaps[i]
-#             cand_splits = chat_lull_idx(t_over, tail_strip=0.02, top_one=False)
-#             for h in cand_splits:
-#                 c_left = c_over[:h]
-#                 c_right = add_sys_msg(c_over[h:], system_msg, tag_placement=tag_placement)
-#                 n_sys = len(c_right)-len(c_over[h:]) # might change anywhere from 0-2 new messages depending on append_msg/tag_placement
-#                 tok_split = batched_token_count([c_left, c_right], tokenizer) 
-#                 if (tok_split <= max_length).all():
-#                     t_left = t_over[:h]
-#                     t_right = ([0.0]*n_sys) + t_over[h:] # prepend 0.0 for added system message
-#                     print(orig_length, '->', tok_split, 'sum', tok_split.sum(), 'n_batch', len(batched_sys_convos), 'n_sys', n_sys)
-#                     # right first, then left since it inserts *before* index. Alt would be left, right@i+1
-#                     batched_sys_convos.insert(i, c_right)
-#                     batched_time_gaps.insert(i, t_right)
-                    
-#                     batched_sys_convos.insert(i, c_left)
-#                     batched_time_gaps.insert(i, t_left)
-#                     print('nbatch after insert', len(batched_sys_convos))
-#                     break
-        
-#         convo_lens = batched_token_count(batched_sys_convos, tokenizer)
-#         overlen_indices = np.flatnonzero(convo_lens > max_length)
-        
-#         if overlen_indices.size > 0:
-#             print('remaining over length:', convo_lens[overlen_indices], 'idx:',overlen_indices)
-#             return time_split_overlength(batched_sys_convos, batched_time_gaps, tokenizer, system_msg, tag_placement, max_length)
+    return new_batched_sys_convos
 
-    
-#     return batched_sys_convos
+
+def top_time_split_indices(cuml_tokens:np.ndarray[int], time_gaps:list[float], excess_tokens:int, max_length:int, ):
+    # if convo_length_start is None:
+    #     convo_length_start = cuml_tokens[-1]
+    # excess_tokens = (convo_length_start-max_length)
+
+    valid_mask = (cuml_tokens > excess_tokens) & (cuml_tokens < max_length) # create a mask s.t. True if it partitions into 2 sides where both < max_tokens
+    time_gap_order = np.argsort(time_gaps) # sort index from smallest to largest time gap
+    valid_mask_sorted = valid_mask[time_gap_order] # get mask in argsorted order by time gaps
+    splitable_indices = time_gap_order[valid_mask_sorted] # filter indices down to only those that can partion both sides < max_length while also preserving sort order
+    cand_splits = splitable_indices[::-1] # reverse order so longest gaps are first in array
+
+    # depending on system message length, this should reduce the search down to a few iterations
+
+    return cand_splits
 
 def time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
     '''Split on the longest time gap that successfully partitions both sides to be under max_length. 
     
-    Each over length batch is split into exactly 2 sub batches.'''
+    Each over length batch is split into exactly 2 sub batches if possible, 
+    otherwise if it exceeds 2*`max_length` it will be split again via a recursive call.'''
     # intermission, latency, inactivity, idle time, lull, elapsed, lapse, timeout, interval, interlude, downtime.. why naming so hard
     original_n_batches = len(batched_sys_convos)
 
@@ -340,19 +328,32 @@ def time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps
         
         c_over = batched_sys_convos[i]
         t_over = batched_time_gaps[i]
-        cand_splits = chat_lull_idx(t_over, tail_strip=0.02, top_one=False)
         
+        excess_tokens = (orig_length-max_length)
+        top_only = excess_tokens > max_length # if it's going to require multiple runs anyway, no sense in iterating over everything
+        try:
+            assert not top_only, 'Multi-iter needed'
+            # need try-catch for jinja exceptions since will be treating each role+content as it's own convo
+            cuml_tokens = batched_token_count(c_over, tokenizer).cumsum()
+            cand_splits = top_time_split_indices(cuml_tokens, t_over, excess_tokens, max_length)
+            # c_over_toksum = cuml_tokens[-1]
+            #print(f'{orig_length=} | {c_over_toksum=}')
+        except Exception as e:
+            print(e)
+            cand_splits = chat_lull_idx(t_over, tail_strip=0.05, top_one=top_only)
+
         for h in cand_splits:
             c_left = c_over[:h]
             c_right = add_sys_msg(copy.deepcopy(c_over[h:]), system_msg, tag_placement=tag_placement)
             
-            n_sys = len(c_right)-len(c_over[h:]) # might change anywhere from 0-2 new messages depending on append_msg/tag_placement
-            #print('n_sys', n_sys,)
             tok_split = batched_token_count([c_left, c_right], tokenizer) 
             
-            if (tok_split <= max_length).all():
+            if (tok_split <= max_length).all() or cand_splits.size==1:
                 t_left = t_over[:h]
-                t_right = ([0.0]*n_sys) + t_over[h:] # prepend 0.0 for added system message
+                t_right= t_over[h:] 
+                # might change anywhere from 0-2 new messages depending on append_msg/tag_placement
+                zpad = [0.0]*(len(c_right) - len(t_right))
+                t_right = zpad + t_right # prepend 0.0s for added system message, only matters if need to do another iteration
                 
                 new_batched_sys_convos.append(c_left)
                 new_batched_sys_convos.append(c_right)
@@ -360,7 +361,7 @@ def time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps
                 new_batched_time_gaps.append(t_left)
                 new_batched_time_gaps.append(t_right)
 
-                print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),  f'n_batches: {len(new_batched_sys_convos)} / {original_n_batches}')
+                print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),  f'n_batch: {len(new_batched_sys_convos)} / {original_n_batches}')
 
                 break
     
@@ -389,8 +390,8 @@ def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
 
 
     df_convo['conversation'] = df_convo.apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement, system_message), axis=1)
-    # prepend 0.0 for inserted system message
-    df_convo['intrn_time_gap'] = df_convo['intrn_time_gap'].apply(lambda x: [0.0]+x)
+    # prepend from 0 to 2 0.0 for inserted system message(s)
+    df_convo['intrn_time_gap'] = (df_convo['conversation'].str.len() - df_convo['intrn_time_gap'].str.len()).apply(lambda zpad: [0.0]*zpad) + df_convo['intrn_time_gap']
 
     eval_convo = df_convo.loc['eval']
     train_convo = df_convo.loc['train']
@@ -411,29 +412,60 @@ def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
 
 
 def bisect_overlength(batched_sys_convos, tokenizer, system_msg, tag_placement, max_length):
+    original_n_batches = len(batched_sys_convos)
+
     convo_lens = batched_token_count(batched_sys_convos, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
+    new_batched_sys_convos = []
+    
     if overlen_indices.size > 0:
         print(f'Splitting {overlen_indices.size} conversations with tokens > {max_length} in half.')
         assert all([len(batched_sys_convos[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
+        if overlen_indices.size == 1:
+            i = overlen_indices[0]
+            print(len(batched_sys_convos[i]))
+            print(batched_token_count(batched_sys_convos[i], tokenizer))
+
     
-    while overlen_indices.size > 0:
-        for offset,i in enumerate(overlen_indices):
-            i+=offset
-            b_over = batched_sys_convos.pop(i)
-            h = len(b_over)//2
-            h_left = b_over[:h]
-            h_right = add_sys_msg(b_over[h:], system_msg, tag_placement=tag_placement)
-            # right first, then left since it inserts *before* index. Alt would be left, right@i+1
-            batched_sys_convos.insert(i, h_right)
-            batched_sys_convos.insert(i, h_left)
+    for i in range(original_n_batches):
+        if i not in overlen_indices:
+            new_batched_sys_convos.append(batched_sys_convos[i])
+            continue
     
-        convo_lens = batched_token_count(batched_sys_convos, tokenizer)
-        overlen_indices = np.flatnonzero(convo_lens > max_length)
+        orig_length = convo_lens[i]
+        c_over = batched_sys_convos[i]    
+        #excess_tokens = (orig_length-max_length)
+        #top_only = excess_tokens > max_length # if it's going to require multiple runs anyway, no sense in iterating over everything
+        try:
+            cuml_tokens = batched_token_count(c_over, tokenizer).cumsum()
+            #orig_length = cuml_tokens[-1]
+            #cand_inds = np.abs(cuml_tokens-(max_length//2)).argsort() # .argmin()
+            h = np.abs(cuml_tokens-(max_length//2)).argmin()
+            # nearest to balanced tokens on both sides of split
+            # for h in cand_inds:
+            #     if h >= 3 or cuml_tokens.size-h >= 3: 
+            #         break # need at least 3 to have a mid idx to split
+           
+        except Exception as e:
+            print(e)
+            h = len(c_over)//2 # fall back is just cut the convo in half
         
-        print('idx:',overlen_indices, 'lens:',convo_lens[overlen_indices])
+        c_left = c_over[:h]
+        c_right = add_sys_msg(copy.deepcopy(c_over[h:]), system_msg, tag_placement=tag_placement)
+        new_batched_sys_convos.extend([c_left, c_right])
+        
+        tok_split = batched_token_count([c_left, c_right], tokenizer) 
+        print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),)
+
     
-    return batched_sys_convos
+    convo_lens = batched_token_count(new_batched_sys_convos, tokenizer)
+    overlen_indices = np.flatnonzero(convo_lens > max_length)
+    
+    if overlen_indices.size > 0:
+        print('remaining over length:', convo_lens[overlen_indices], 'idx:',overlen_indices)
+        return bisect_overlength(new_batched_sys_convos, tokenizer, system_msg, tag_placement, max_length)
+   
+    return new_batched_sys_convos
 
 def consecutive_max_batch(convo, all_msg_lens, token_limit:int):
     #all_msg_lens = batched_token_count(convo, tokenizer)
@@ -442,7 +474,7 @@ def consecutive_max_batch(convo, all_msg_lens, token_limit:int):
     total = 0
     
     for i,v in enumerate(all_msg_lens):
-        if total + v > token_limit:
+        if total + v >= token_limit:
             batches.append(batch)
             batch = [convo[i]]
             total = v
@@ -452,16 +484,16 @@ def consecutive_max_batch(convo, all_msg_lens, token_limit:int):
     
     return batches
 
-def convo_batch_max_tokens(convo:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
-    syslen = batched_token_count([system_msg], tokenizer)[0] #TODO: this will break for append_msg contpfx
-    all_msg_lens = batched_token_count(convo, tokenizer)
+def convo_batch_max_tokens(sys_convo_batches:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
+    #syslen = batched_token_count(system_msg, tokenizer)[0] #TODO: this will break for append_msg content_prefix
+    all_msg_lens = batched_token_count(sys_convo_batches, tokenizer)
     
-    token_limit = (max_length-syslen)
-    assert all_msg_lens.max() <= token_limit,'At least one message+system > max_length tokens. Truncation required.'
+    #token_limit = (max_length-syslen)
+    assert all_msg_lens.max() <= max_length,'At least one message+system > max_length tokens. Truncation required.'
     # TODO: allow overlength for later truncation
-    convo_batches = consecutive_max_batch(convo, all_msg_lens, token_limit)
+    sys_convo_batches = consecutive_max_batch(sys_convo_batches, all_msg_lens, max_length)
 
-    sys_convo_batches = [add_sys_msg(c, system_msg, tag_placement=tag_placement) for c in convo_batches]
+    #sys_convo_batches = [add_sys_msg(c, system_msg, tag_placement=tag_placement) for c in convo_batches]
     sys_convo_batches = bisect_overlength(sys_convo_batches, tokenizer, system_msg, tag_placement, max_length=max_length) # not token_limit, since system has been added
     
 
@@ -482,13 +514,14 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
     df_tall = df_all.query('split=="train"')
     df_eall = df_all.query('split=="eval"')
     # get base tokens before any system is added
-    convo_train = to_conversation_format(df_tall['formatted_author_tag'], df_tall['text'], tag_placement=cfg.tag_placement)
-    convo_eval = to_conversation_format(df_eall['formatted_author_tag'], df_eall['text'], tag_placement=cfg.tag_placement)
+    convo_train = to_conversation_format(df_tall['formatted_author_tag'], df_tall['text'], tag_placement=cfg.tag_placement, system_msg=system_message)
+    convo_eval = to_conversation_format(df_eall['formatted_author_tag'], df_eall['text'], tag_placement=cfg.tag_placement, system_msg=system_message)
     
     dset = datasets.DatasetDict({
         'train': datasets.Dataset.from_dict({'text': convo_batch_max_tokens(convo_train, tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)}, split='train'),
         'validation': datasets.Dataset.from_dict({'text': convo_batch_max_tokens(convo_eval, tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)}, split='validation'),
     })
+    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
     # https://huggingface.co/learn/nlp-course/chapter5/3
     if not text_only:
         dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
@@ -530,6 +563,7 @@ def ungrouped_dataset(chat_csv, tokenizer, cfg, text_only=False):
         'train': datasets.Dataset.from_pandas(df_all.loc['train'], split='train', preserve_index=False),
         'validation': datasets.Dataset.from_pandas(df_all.loc['eval'], split='validation', preserve_index=False)
     })
+    #dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
     if not text_only:
         ds_ungrouped = map_to_inputs(ds_ungrouped, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, text_field='text')
     
