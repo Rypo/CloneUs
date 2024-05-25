@@ -420,7 +420,7 @@ class CloneusManager():
 
     def to_discord_output(self, model_output, author, seed_text):
         model_output = text_utils.splitout_tag(model_output, self.RE_ANY_USERTAG)
-        if self.clo.cfg.postfix in model_output:
+        if self.clo.cfg.postfix and self.clo.cfg.postfix in model_output:
             print('WARNING: postfix detected in model_output, removing')
             model_output = model_output.replace(self.clo.cfg.postfix, '')
         # space at the end of a sentence encodes a special token (28705). Shouldn't pass space in seed text or results are sub optimal  

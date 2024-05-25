@@ -399,7 +399,7 @@ class TextGen(commands.Cog, SetConfig):
             llm_input_messages = text_utils.llm_input_transform(self.msgmgr.get_mcache(ctx), user_aliases=self.user_aliases)
             if raw:
                 llm_text = self.clomgr.clo.to_text_input(llm_input_messages)
-                split_on = self.clomgr.clo.tokenizer.eos_token if self.clomgr.clo.stop_criteria is None else self.clomgr.clo.cfg.postfix
+                split_on = self.clomgr.clo.tokenizer.eos_token if self.clomgr.clo.stop_criteria is None else self.clomgr.clo.stop_criteria[0].words[0]
                 llm_input_messages = [(i,pmsg+split_on) for i,pmsg in enumerate(filter(None, llm_text.split(split_on))) if pmsg]
             
 
