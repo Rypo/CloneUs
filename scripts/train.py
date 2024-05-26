@@ -118,7 +118,8 @@ def main(args):
         'microsoft/Phi-3-mini-4k-instruct':'Phi-3-mini-4k-instruct',
         'NousResearch/Hermes-2-Pro-Llama-3-8B':'llama3-8b-hermes2-pro'
         
-        
+        #https://huggingface.co/NousResearch/Hermes-2-Theta-Llama-3-8B
+        #https://huggingface.co/RLHFlow/LLaMA3-iterative-DPO-final
         # Add aliases for new models here
     }
 
@@ -155,33 +156,13 @@ def main(args):
     train_args = mtrain.create_args(
         base_outdir,
         peft_config,
-        chunk_size=cfg.chunk_size,
-        batch_size=cfg.batch_size,
-        gradient_accumulation_steps = cfg.gradient_accumulation_steps,
+        cfg,
         n_custom_tokens=num_custom_tokens,
-        attn_implementation=cfg.attn_implementation,
-        bf16=cfg.bf16,
-        fp16=cfg.fp16,
-        tf32=cfg.tf32,
         #bf16_full_eval=cfg.bf16, #  faster and save memory but can harm metric values (default: False)
-        num_train_epochs=cfg.num_epochs,
-        warmup_ratio=cfg.warmup_ratio,
-        warmup_steps=cfg.warmup_steps,
-        learning_rate=cfg.learning_rate,
-        save_strategy=('epoch' if isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer else 'steps'), #-- TODO Think about better solution
-        save_steps=cfg.save_steps,
-        #eval_steps=cfg.eval_steps,
-        logging_steps=cfg.logging_steps, # appears that trl fixed the iteration number issue (5 if cfg.use_sft_trainer else cfg.logging_steps), 
-        
-        optim=cfg.optimizer,
-        max_grad_norm=cfg.max_grad_norm,
-        lr_scheduler_type=cfg.lr_scheduler, 
-        neftune_noise_alpha=cfg.neftune_noise_alpha,
+        save_strategy=('epoch' if cfg.num_epochs > 1 and (isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer) else 'steps'), #-- TODO Think about better solution
         group_by_length=(cfg.group_by_length and not cfg.use_sft_trainer),
-        weight_decay=cfg.weight_decay,
-        custom_scheduler=cfg.custom_scheduler,
-        logging_first_step=True,
         #torch_compile=True,
+        report_to="none", #"wandb",
         save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
         resume_from_checkpoint=resume_ckpt,
     )
@@ -223,12 +204,6 @@ def main(args):
         dset = dataset.ungrouped_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
     else:
         dset = dataset.chat_sessions_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
-    # elif cfg.tag_placement == 'replace_role':
-    #     dset = dataset.author_roletags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
-    # elif cfg.tag_placement == 'content_prefix':
-    #     dset = dataset.ua_tags_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)    
-    # elif cfg.tag_placement == 'tag_only':
-    #     dset = dataset.tag_only_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
     
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]

@@ -201,50 +201,55 @@ def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens
     return args
 
 
-def create_args(base_outdir, peft_config: LoraConfig, chunk_size=512,  n_custom_tokens=None, attn_implementation=None, custom_scheduler=None, **kwargs):
+def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None,  **kwargs):
     #batch_size, ga_steps = batchsize_gasteps #chunk_to_batchga(chunk_size, target_batch_size=8, chunklen_upperbound=4096)
 
-    warmup_ratio = kwargs.pop('warmup_ratio', 0.0)
-    warmup_steps = kwargs.pop('warmup_steps', 0)
+    warmup_ratio = cfg.warmup_ratio #kwargs.pop('warmup_ratio', 0.0)
+    warmup_steps = cfg.warmup_steps #kwargs.pop('warmup_steps', 0)
     if warmup_ratio is None:
         warmup_ratio = 0.0
     if warmup_steps is None:
         warmup_steps = 0
     
-    batch_size = kwargs.pop('batch_size', 4)
+    # batch_size = kwargs.pop('batch_size', 4)
+    batch_size=cfg.batch_size
+    chunk_size = cfg.chunk_size
+    attn_implementation=cfg.attn_implementation
+    custom_scheduler=cfg.custom_scheduler
     
     args = TrainingArguments(
-        num_train_epochs=kwargs.pop('num_train_epochs', 3),
+        num_train_epochs=cfg.num_epochs,#kwargs.pop('num_train_epochs', 3),
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
-        gradient_accumulation_steps=kwargs.pop('gradient_accumulation_steps', 1),
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,#kwargs.pop('gradient_accumulation_steps', 1),
         gradient_checkpointing=True, # add # If True, use gradient checkpointing to save memory at the expense of slower backward pass.
         #gradient_checkpointing_kwargs = dict(use_reentrant=True), # when = False, vRAM usage sky rockets. Not sure if bug or bad.
         eval_strategy='steps',
         eval_steps=kwargs.pop('eval_steps', None), # Will default to the same value as logging_steps
         save_strategy=kwargs.pop('save_strategy','epoch'),
-        save_steps=kwargs.pop('save_steps',500),
-        learning_rate=kwargs.pop('learning_rate', 2e-4),
-        bf16=kwargs.pop('bf16', True),
-        fp16=kwargs.pop('fp16', False), # https://huggingface.co/docs/transformers/perf_train_gpu_one#mixed-precision-training
-        tf32=kwargs.pop('tf32', True), # add (IMPLICATIONS WITH BF16,gradaccum: https://github.com/huggingface/transformers/issues/14608#issuecomment-1004392537 )
-        logging_steps=kwargs.pop('logging_steps', 5),
+        save_steps=cfg.save_steps,#kwargs.pop('save_steps',500),
+        learning_rate=cfg.learning_rate,#kwargs.pop('learning_rate', 2e-4),
+        bf16=cfg.bf16,#kwargs.pop('bf16', True),
+        fp16=cfg.fp16,#kwargs.pop('fp16', False), # https://huggingface.co/docs/transformers/perf_train_gpu_one#mixed-precision-training
+        tf32=cfg.tf32,#kwargs.pop('tf32', True), # add (IMPLICATIONS WITH BF16,gradaccum: https://github.com/huggingface/transformers/issues/14608#issuecomment-1004392537 )
+        logging_steps=cfg.logging_steps,#kwargs.pop('logging_steps', 5),
         output_dir='{base_outdir}/{tnow}_cnk{chunksize}{ctk_pad}-{scheduler}{warmup}--r{lora_r}a{lora_a}_{lora_modules}{lora_layers}', # -sft256
-        optim=kwargs.pop('optim', 'paged_adamw_32bit'),#'paged_adamw_8bit',# #"adamw_hf"
-        max_grad_norm=kwargs.pop('max_grad_norm', 0.3),
+        optim=cfg.optimizer,#kwargs.pop('optim', 'paged_adamw_32bit'),#'paged_adamw_8bit',# #"adamw_hf"
+        max_grad_norm=cfg.max_grad_norm,#kwargs.pop('max_grad_norm', 0.3),
         warmup_ratio=warmup_ratio,#kwargs.pop('warmup_ratio', 0.00),
         warmup_steps=warmup_steps,#kwargs.pop('warmup_steps', 0),
-        lr_scheduler_type=kwargs.pop('lr_scheduler_type', 'linear'),
-        weight_decay=kwargs.pop('weight_decay',0),
+        lr_scheduler_type=cfg.lr_scheduler, #kwargs.pop('lr_scheduler_type', 'linear'),
+        weight_decay=cfg.weight_decay,#kwargs.pop('weight_decay',0),
         torch_compile=kwargs.pop('torch_compile',False),
         #dataloader_num_workers=kwargs.pop('dataloader_num_workers',0), # Doesn't work with tokenizer
-        neftune_noise_alpha=kwargs.pop('neftune_noise_alpha', None),
+        neftune_noise_alpha=cfg.neftune_noise_alpha,#kwargs.pop('neftune_noise_alpha', None),
 
         disable_tqdm=kwargs.pop('disable_tqdm', None),
         save_total_limit=kwargs.pop('save_total_limit', None),
         save_safetensors=True,
+        logging_first_step=True,
         group_by_length=kwargs.pop('group_by_length', True), # Might have consequences, disable? -- yep, will consume absurd memory when combining largest items (unless truncated beforehand)
-        report_to="none", #"wandb",
+        
         run_name="{modelname}-{dirargs}-{optim}-b{batchsize}-mgn{max_gradnorm}",
         **kwargs,
     )
