@@ -22,7 +22,7 @@ server/config/persistent_storage.yaml
 # Ignore data files but keep structure
 /data/*
 !data/discord
-config/users.json
+config/*.json
 # custom config.yaml files
 config/train/*
 !config/train/train_config.yaml

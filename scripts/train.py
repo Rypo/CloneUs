@@ -1,5 +1,6 @@
 import gc
 import os
+import json
 import warnings
 import argparse
 from omegaconf import OmegaConf
@@ -30,6 +31,24 @@ def write_first_batches(trainer, batchsample_dir='_tmp/sample_batches'):
     with open(cpaths.ROOT_DIR/batchsample_dir/'train.txt', 'w') as f:
         f.writelines(mtrain.get_batch(trainer, train=True))
 
+def model_id_alias(model_id:str, alias_filepath:str=None):
+    '''If `alias_filepath` exists, read and map `model_id` to user defined alias, otherwise return portion of model_id after `/`
+    
+    Args:
+        model_id: huggingface model id repo/model-id-format
+        alias_filepath: path to model aliases json file, if None default ROOT/config/model_aliases.json
+    '''
+    model_map = {}
+    if alias_filepath is None:
+        alias_filepath = cpaths.ROOT_DIR/'config'/'model_aliases.json'
+    try:
+        with open(alias_filepath, 'r') as f:
+            model_map = json.load(f)
+    except FileNotFoundError:
+        pass
+    
+    return model_map.get(model_id, model_id.split('/')[-1])
+
 def verify_config(cfg):
     if 'fname' in cfg.author_tag:
         # Check that all users have assigned firstName if using "fname" in tag
@@ -37,9 +56,6 @@ def verify_config(cfg):
             if fname is None:
                 raise KeyError(f'users.json missing firstName for "{dispname}". Add firstName for all users or remove "fname" from `author_tag` in train_config.yaml')
     
-    # if cfg.chat_template_format == 'chatml' and cfg.tag_sep != '\n':
-    #     print('NOTE: for chat_template_format=chatml, tag_sep must = \\n. Setting tag_sep=\\n')
-    #     cfg.tag_sep = '\n'
     if cfg.tag_placement == 'replace_role':
         if any([cfg.tag_sep is not None, cfg.postfix is not None]):
             print("NOTE: tag_placement == 'replace_role' does not use postfix/tag_sep -- postfix, tag_sep will be set to None")
@@ -94,36 +110,8 @@ def main(args):
     
     verify_config(cfg)
 
-    model_map = {
-        'NousResearch/Llama-2-7b-hf':'llama2-7b-i4', # foundation
-        'mistralai/Mistral-7B-v0.1':'mistral-7b-i4', # foundation
-        'mistralai/Mistral-7B-Instruct-v0.1':'mistral-inst-v01-7b-i4', # instruct
-        'mistralai/Mistral-7B-Instruct-v0.2':'mistral-inst-v02-7b-i4', # instruct
-        'teknium/OpenHermes-2.5-Mistral-7B':'mistral-inst-OpenHermes2.5', # chatml
-        'NousResearch/Llama-2-13b-hf':'llama2-13b-i4', # foundation
-        'TheBloke/Llama-2-13B-GPTQ':'llama2-13b-gptq', # foundation
-        'TinyLlama/TinyLlama-1.1B-Chat-v1.0':'tinyllama1b-chat-v1', # chat (Zephyr)
-        'NousResearch/Nous-Hermes-2-SOLAR-10.7B':'solar-10b-inst-hermes2', # chatml
-        'ISTA-DASLab/Mixtral-8x7b-AQLM-2Bit-1x16-hf':'mixtral-8x7b-aqlm-2bit', # foundation
-        'ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf': 'mixtral-inst-8x7b-aqlm-2bit', # instruct
-        'NousResearch/Nous-Hermes-2-Mistral-7B-DPO': 'mistral-7b-hermes2-dpo', # chatml
-        #'solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ':'mistral-7b-hermes2-dpo-awq'
-        'alpindale/Mistral-7B-v0.2-hf': 'mistral-7b-v2', # foundation
-        'unsloth/Hermes-2-Pro-Mistral-7B-bnb-4bit': 'mistral-7b-hermes2-pro-4bit', # chatml (with tools)
-        'rhysjones/phi-2-orange-v2':'phi2-orange-v2', # chatml
-        'unsloth/llama-3-8b-bnb-4bit': 'llama3-8b-4bit',
-        'unsloth/llama-3-8b-Instruct-bnb-4bit': 'llama3-8b-instruct-4bit',
-        'meta-llama/Meta-Llama-3-8B': 'llama3-8b',
-        'meta-llama/Meta-Llama-3-8B-Instruct': 'llama3-8b-instruct',
-        'microsoft/Phi-3-mini-4k-instruct':'Phi-3-mini-4k-instruct',
-        'NousResearch/Hermes-2-Pro-Llama-3-8B':'llama3-8b-hermes2-pro'
-        
-        #https://huggingface.co/NousResearch/Hermes-2-Theta-Llama-3-8B
-        #https://huggingface.co/RLHFlow/LLaMA3-iterative-DPO-final
-        # Add aliases for new models here
-    }
-
-    model_name = model_map.get(cfg.model_id, cfg.model_id.split('/')[-1])  
+    #https://huggingface.co/RLHFlow/LLaMA3-iterative-DPO-final
+    model_name = model_id_alias(cfg.model_id)
     
     if resume_ckpt:
         peft_config = LoraConfig.from_pretrained(resume_ckpt)
