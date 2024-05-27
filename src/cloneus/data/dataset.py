@@ -59,15 +59,15 @@ def batched_token_count(convo:list[list[dict]]|list[dict[str,str]], tokenizer:Pr
     return tokenizer(tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length'] - bos_discount
 
 
-def add_sys_msg(chat_convo:list[dict], system_msg:dict[str,str]|list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],):
+def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],):
     if isinstance(system_msg, str):
         raise TypeError('No more loosey goosey. dict or list[dict, dict] only')
         #system_msg = {'role':'system', 'content':system_msg}
 
     # TODO: Should tag_only accept a system message? Foundation models don't really do that, but I guess it's not gonna break anything
     if tag_placement in [ 'replace_role', 'tag_only',]:
-        assert system_msg['role'] == 'system', 'Only tag_placement="content_prefix" can have system message with role != system'
-        chat_convo = [system_msg]+chat_convo
+        assert len(system_msg) == 1 and system_msg[0]['role'] == 'system', 'Only tag_placement="content_prefix" can have system message with role != system'
+        chat_convo = system_msg+chat_convo
         return chat_convo
 
     # Below here, roles are overwritten. Custom roles should never reach this point in code 
@@ -81,24 +81,24 @@ def add_sys_msg(chat_convo:list[dict], system_msg:dict[str,str]|list[dict[str,st
             c['role'] = next(rolecycle)
     # content_prefix
     # prompt.append_msg: str != legacy
-    if isinstance(system_msg, list): 
+    if len(system_msg) == 2: 
          # [{"role": "user", "content": fprompt}), {"role": "assistant", "content": "OK"}]
-        assert len(system_msg) == 2,'SYN ACK format must be 2 messages exactly'
+        # assert len(system_msg) == 2,'SYN ACK format must be 2 messages exactly'
         assert system_msg[0]['role'] == 'user', 'SYN ACK format must be role0=user'
         assert system_msg[1]['role'] == 'assistant', 'SYN ACK format must be role1=assistant'
         chat_convo = system_msg + chat_convo
     
-    elif system_msg['role'] == 'system':  # has_system = True
+    elif system_msg[0]['role'] == 'system':  # has_system = True
         #system_msg = [system_msg]
-        chat_convo = [system_msg] + chat_convo
+        chat_convo = system_msg + chat_convo
     
     else:  # append_msg = 'legacy'
         #rolecycle = itertools.cycle(['assistant', 'user']) # NOTE: Reversed because need to take
-        assert system_msg['role'] == 'user', 'System message role must be user for systemless content prefix'
+        assert system_msg[0]['role'] == 'user', 'System message role must be user for systemless content prefix'
         msg0 = chat_convo[0]
         chat_convo = chat_convo[1:]
         # make sure first iter starts on assistant now
-        system_msg = [{'role': msg0['role'], 'content': system_msg['content'] + msg0['content']}]
+        system_msg = [{'role': msg0['role'], 'content': system_msg[0]['content'] + msg0['content']}]
         
         chat_convo = system_msg + chat_convo
         
@@ -139,21 +139,7 @@ def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str],
     
     elif tag_placement == 'content_prefix':
         rolecycle = itertools.cycle(['user','assistant'])
-            
-        # assert append_msg is not None, 'content_prefix requires append_msg set True/False'
-        # assert has_system is not None, 'content_prefix requires has_system set True/False'
-        
-        # if has_system:
-        #     chat_content.append({"role": "system", "content": system_msg})
-        # elif append_msg=='legacy':
-        #     tag0, text0 = next(atag_tcontent)
-        #     content0 = tag0 + text0 
-        #     # make sure first iter starts on assistant now
-        #     chat_content.append({"role": next(rolecycle), "content": system_msg+content0})
-        # elif append_msg:
-        #     chat_content.append({"role": "user", "content": system_msg})
-        #     chat_content.append({"role": "assistant", "content": "OK"})
-            
+                        
         for fauth_tag,text in atag_tcontent:
             content = fauth_tag + text
             chat_content.append({"role": next(rolecycle), "content": content})
@@ -170,7 +156,7 @@ def fill_cfg_from_data(formatted_author_tag_col:pd.Series, cfg):
     name_mapping = cfg.prompt.name_mapping
     
     if name_mapping is None:
-        name_mapping = ', '.join(formatted_author_tag_col.unique())
+        name_mapping = ', '.join(formatted_author_tag_col.str.strip().unique())
         cfg.prompt.name_mapping = name_mapping
     
     if fprompt is None:
@@ -183,7 +169,7 @@ def prepare_system_msg(cfg, tokenizer):
     if not cfg.fprompt and cfg.prompt.template:
         raise RuntimeError('Prompt not formatted. Call `fill_cfg_from_data(formatted_author_tag, cfg)` before proceeding.')
     
-    system_message = {'role':'system', 'content': cfg.fprompt}
+    system_message = [{'role':'system', 'content': cfg.fprompt}]
 
     has_system = True
     append_msg = None
@@ -196,17 +182,17 @@ def prepare_system_msg(cfg, tokenizer):
         tokenizer.chat_template = tag_chat_template
     
     elif cfg.tag_placement == 'replace_role':
-        system_message = {'role':'system', 'content': cfg.fprompt}
+        system_message = [{'role':'system', 'content': cfg.fprompt}]
     
     elif cfg.tag_placement == 'content_prefix':
         has_system = check_if_system(tokenizer)
         append_msg = cfg.prompt.append_msg
         
         if has_system:
-            system_message = {'role':'system', 'content': cfg.fprompt}
+            system_message = [{'role':'system', 'content': cfg.fprompt}]
         
         elif cfg.prompt.append_msg == 'legacy':
-            system_message = {'role':'user', 'content': cfg.fprompt}
+            system_message = [{'role':'user', 'content': cfg.fprompt}]
             # legacy handling done by add_sys_message since requires first chat message
         elif cfg.prompt.append_msg:
             system_message = [
@@ -231,33 +217,33 @@ def chat_lull_idx(time_gaps:list[float], tail_strip:float=0.05, top_one:bool=Tru
     
     return cand_inds[::-1]
     
-def greedy_time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
+def greedy_time_split_overlength(prepared_conversations:list[list[dict]], convo_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
     '''Slower version of time_split. Always used the longest time gap for splitting. 
     
     Runs multiple iterations until complete. May split one batch in to many small sub batches depending on how sparse the conversation is.'''
     # intermission, latency, inactivity, idle time, lull, elapsed, lapse, timeout, interval, interlude, downtime.. why naming so hard
-    original_n_batches = len(batched_sys_convos)
+    original_n_convos = len(prepared_conversations)
 
-    convo_lens = batched_token_count(batched_sys_convos, tokenizer)
+    convo_lens = batched_token_count(prepared_conversations, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
-    new_batched_sys_convos = []
-    new_batched_time_gaps = []
+    new_conversations = []
+    new_time_gaps = []
 
     if overlen_indices.size > 0:
         print(f'Splitting {overlen_indices.size} conversations with tokens > {max_length} using max intermission time.')
-        assert all([len(batched_sys_convos[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
+        assert all([len(prepared_conversations[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
 
-    for i in range(original_n_batches):
+    for i in range(original_n_convos):
         if i not in overlen_indices:
-            new_batched_sys_convos.append(batched_sys_convos[i])
-            new_batched_time_gaps.append(batched_time_gaps[i])
+            new_conversations.append(prepared_conversations[i])
+            new_time_gaps.append(convo_time_gaps[i])
             continue
 
         orig_length = convo_lens[i]
         excess_tokens = (orig_length-max_length)
         
-        c_over = batched_sys_convos[i]
-        t_over = batched_time_gaps[i]
+        c_over = prepared_conversations[i]
+        t_over = convo_time_gaps[i]
         
         h = chat_lull_idx(t_over, tail_strip=0.05, top_one=True)[0]
         
@@ -272,18 +258,18 @@ def greedy_time_split_overlength(batched_sys_convos:list[list[dict]], batched_ti
         
         #tok_left, tok_right = batched_token_count([c_left, c_right], tokenizer) 
         
-        new_batched_sys_convos.extend([c_left, c_right])
-        new_batched_time_gaps.extend([t_left, t_right])
+        new_conversations.extend([c_left, c_right])
+        new_time_gaps.extend([t_left, t_right])
         
     
-    convo_lens = batched_token_count(new_batched_sys_convos, tokenizer)
+    convo_lens = batched_token_count(new_conversations, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
     
     if overlen_indices.size > 0:
         print('remaining over length:', convo_lens[overlen_indices], 'idx:',overlen_indices)
-        return greedy_time_split_overlength(new_batched_sys_convos, new_batched_time_gaps, tokenizer, system_msg, tag_placement, max_length)
+        return greedy_time_split_overlength(new_conversations, new_time_gaps, tokenizer, system_msg, tag_placement, max_length)
         
-    return new_batched_sys_convos
+    return new_conversations
 
 
 def top_time_split_indices(cuml_tokens:np.ndarray[int], time_gaps:list[float], excess_tokens:int, max_length:int, ):
@@ -301,33 +287,38 @@ def top_time_split_indices(cuml_tokens:np.ndarray[int], time_gaps:list[float], e
 
     return cand_splits
 
-def time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
+def time_split_overlength(prepared_conversations:list[list[dict]], convo_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
     '''Split on the longest time gap that successfully partitions both sides to be under max_length. 
     
     Each over length batch is split into exactly 2 sub batches if possible, 
-    otherwise if it exceeds 2*`max_length` it will be split again via a recursive call.'''
+    otherwise if it exceeds 2*`max_length` it will be split again via a recursive call.
+    
+    Args:
+        prepared_conversations: list of conversation with system message included for each
+    '''
     # intermission, latency, inactivity, idle time, lull, elapsed, lapse, timeout, interval, interlude, downtime.. why naming so hard
-    original_n_batches = len(batched_sys_convos)
+    original_n_convos = len(prepared_conversations)
 
-    convo_lens = batched_token_count(batched_sys_convos, tokenizer)
+    convo_lens = batched_token_count(prepared_conversations, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
-    new_batched_sys_convos = []
-    new_batched_time_gaps = []
+    new_conversations = []
+    new_time_gaps = []
 
     if overlen_indices.size > 0:
         print(f'Splitting {overlen_indices.size} conversations with tokens > {max_length} using max intermission time.')
-        assert all([len(batched_sys_convos[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
+        assert all([len(prepared_conversations[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
     
-    for i in range(original_n_batches):
+   # pbar := tqdm(range(original_n_batches), leave=None)
+    for i in (pbar := tqdm(range(original_n_convos), leave=None)):
         if i not in overlen_indices:
-            new_batched_sys_convos.append(batched_sys_convos[i])
-            new_batched_time_gaps.append(batched_time_gaps[i])
+            new_conversations.append(prepared_conversations[i])
+            new_time_gaps.append(convo_time_gaps[i])
             continue
 
         orig_length = convo_lens[i]
         
-        c_over = batched_sys_convos[i]
-        t_over = batched_time_gaps[i]
+        c_over = prepared_conversations[i]
+        t_over = convo_time_gaps[i]
         
         excess_tokens = (orig_length-max_length)
         top_only = excess_tokens > max_length # if it's going to require multiple runs anyway, no sense in iterating over everything
@@ -355,25 +346,35 @@ def time_split_overlength(batched_sys_convos:list[list[dict]], batched_time_gaps
                 zpad = [0.0]*(len(c_right) - len(t_right))
                 t_right = zpad + t_right # prepend 0.0s for added system message, only matters if need to do another iteration
                 
-                new_batched_sys_convos.append(c_left)
-                new_batched_sys_convos.append(c_right)
+                new_conversations.append(c_left)
+                new_conversations.append(c_right)
 
-                new_batched_time_gaps.append(t_left)
-                new_batched_time_gaps.append(t_right)
+                new_time_gaps.append(t_left)
+                new_time_gaps.append(t_right)
 
-                print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),  f'n_batch: {len(new_batched_sys_convos)} / {original_n_batches}')
+                pbar.set_description(f'{orig_length} -> {tok_split} (Δ={tok_split.sum()-orig_length})')
+                pbar.set_postfix({'n_convo': len(new_conversations)})
+                #print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),  f'n_batch: {len(new_batched_sys_convos)} / {original_n_batches}')
 
                 break
     
-    convo_lens = batched_token_count(new_batched_sys_convos, tokenizer)
+    pbar.close()
+    convo_lens = batched_token_count(new_conversations, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
     
     if overlen_indices.size > 0:
         print('remaining over length:', convo_lens[overlen_indices], 'idx:',overlen_indices)
-        return time_split_overlength(new_batched_sys_convos, new_batched_time_gaps, tokenizer, system_msg, tag_placement, max_length)
+        return time_split_overlength(new_conversations, new_time_gaps, tokenizer, system_msg, tag_placement, max_length)
 
     
-    return new_batched_sys_convos
+    return new_conversations
+
+def dedupe_conversations(conversations:list[list[dict]]):
+    unique_convos = []
+    for convo in conversations:
+        if convo not in unique_convos:
+            unique_convos.append(convo)
+    return unique_convos
 
 def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
     df_proc= etl.process_csv(chat_csv, youtube_encode_fetch=True, filter_prefixes=('!', '/'), merge_window=7.0)
@@ -393,15 +394,18 @@ def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
     # prepend from 0 to 2 0.0 for inserted system message(s)
     df_convo['intrn_time_gap'] = (df_convo['conversation'].str.len() - df_convo['intrn_time_gap'].str.len()).apply(lambda zpad: [0.0]*zpad) + df_convo['intrn_time_gap']
 
-    eval_convo = df_convo.loc['eval']
-    train_convo = df_convo.loc['train']
+    # eval_convo = df_convo.loc['eval']
+    # train_convo = df_convo.loc['train']
 
-    eval_batches = time_split_overlength(eval_convo['conversation'].tolist(), eval_convo['intrn_time_gap'].tolist(), tokenizer, system_msg=system_message, tag_placement=cfg.tag_placement, max_length=cfg.chunk_size)
-    train_batches = time_split_overlength(train_convo['conversation'].tolist(), train_convo['intrn_time_gap'].tolist(), tokenizer, system_msg=system_message, tag_placement=cfg.tag_placement, max_length=cfg.chunk_size)
+    eval_convos = time_split_overlength(df_convo.loc['eval','conversation'].tolist(), df_convo.loc['eval','intrn_time_gap'].tolist(), 
+                                        tokenizer, system_msg=system_message, tag_placement=cfg.tag_placement, max_length=cfg.chunk_size)
+    train_convos = time_split_overlength(df_convo.loc['train','conversation'].tolist(), df_convo.loc['train','intrn_time_gap'].tolist(), 
+                                         tokenizer, system_msg=system_message, tag_placement=cfg.tag_placement, max_length=cfg.chunk_size)
+        
     
     dset = datasets.DatasetDict({
-        'train': datasets.Dataset.from_dict({'text': train_batches}, split='train'),
-        'validation': datasets.Dataset.from_dict({'text': eval_batches}, split='validation'),
+        'train': datasets.Dataset.from_dict({'text': dedupe_conversations(train_convos)}, split='train'),
+        'validation': datasets.Dataset.from_dict({'text': dedupe_conversations(eval_convos)}, split='validation'),
     })
     dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
     
@@ -411,29 +415,29 @@ def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
     return dset
 
 
-def bisect_overlength(batched_sys_convos, tokenizer, system_msg, tag_placement, max_length):
-    original_n_batches = len(batched_sys_convos)
+def bisect_overlength(prepared_conversations, tokenizer, system_msg, tag_placement, max_length):
+    original_n_convos = len(prepared_conversations)
 
-    convo_lens = batched_token_count(batched_sys_convos, tokenizer)
+    convo_lens = batched_token_count(prepared_conversations, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
-    new_batched_sys_convos = []
+    new_conversations = []
     
     if overlen_indices.size > 0:
         print(f'Splitting {overlen_indices.size} conversations with tokens > {max_length} in half.')
-        assert all([len(batched_sys_convos[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
+        assert all([len(prepared_conversations[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
         if overlen_indices.size == 1:
             i = overlen_indices[0]
-            print(len(batched_sys_convos[i]))
-            print(batched_token_count(batched_sys_convos[i], tokenizer))
+            print(len(prepared_conversations[i]))
+            print(batched_token_count(prepared_conversations[i], tokenizer))
 
     
-    for i in range(original_n_batches):
+    for i in (pbar := tqdm(range(original_n_convos), leave=None)):
         if i not in overlen_indices:
-            new_batched_sys_convos.append(batched_sys_convos[i])
+            new_conversations.append(prepared_conversations[i])
             continue
     
         orig_length = convo_lens[i]
-        c_over = batched_sys_convos[i]    
+        c_over = prepared_conversations[i]    
         #excess_tokens = (orig_length-max_length)
         #top_only = excess_tokens > max_length # if it's going to require multiple runs anyway, no sense in iterating over everything
         try:
@@ -452,52 +456,59 @@ def bisect_overlength(batched_sys_convos, tokenizer, system_msg, tag_placement, 
         
         c_left = c_over[:h]
         c_right = add_sys_msg(copy.deepcopy(c_over[h:]), system_msg, tag_placement=tag_placement)
-        new_batched_sys_convos.extend([c_left, c_right])
+        new_conversations.extend([c_left, c_right])
         
         tok_split = batched_token_count([c_left, c_right], tokenizer) 
-        print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),)
 
-    
-    convo_lens = batched_token_count(new_batched_sys_convos, tokenizer)
+        pbar.set_description(f'{orig_length} -> {tok_split} (Δ={tok_split.sum()-orig_length})')
+        pbar.set_postfix({'n_convo': len(new_conversations)})
+        #print(orig_length, '->', tok_split, 'sum:', tok_split.sum(),)
+
+    pbar.close()
+    convo_lens = batched_token_count(new_conversations, tokenizer)
     overlen_indices = np.flatnonzero(convo_lens > max_length)
     
     if overlen_indices.size > 0:
         print('remaining over length:', convo_lens[overlen_indices], 'idx:',overlen_indices)
-        return bisect_overlength(new_batched_sys_convos, tokenizer, system_msg, tag_placement, max_length)
+        return bisect_overlength(new_conversations, tokenizer, system_msg, tag_placement, max_length)
    
-    return new_batched_sys_convos
+    return new_conversations
 
-def consecutive_max_batch(convo, all_msg_lens, token_limit:int):
-    #all_msg_lens = batched_token_count(convo, tokenizer)
-    batches = []
-    batch = []
-    total = 0
+def consecutive_max_tokens(unified_conversation:list[dict[str,str]], all_msg_lens:np.ndarray[int], token_limit:int) -> list[list[dict[str,str]]]:
+    conversations = []
+
+    convo = []
+    convo_tokenlen = 0
+    for message, msg_tokenlen in zip(unified_conversation, all_msg_lens):
     
-    for i,v in enumerate(all_msg_lens):
-        if total + v >= token_limit:
-            batches.append(batch)
-            batch = [convo[i]]
-            total = v
+        if convo_tokenlen + msg_tokenlen >= token_limit:
+            conversations.append(convo)
+            convo = [message]
+            convo_tokenlen = msg_tokenlen
         else:
-            batch.append(convo[i])
-            total+=v
+            convo.append(message)
+            convo_tokenlen += msg_tokenlen
     
-    return batches
+    return conversations
 
-def convo_batch_max_tokens(sys_convo_batches:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
-    #syslen = batched_token_count(system_msg, tokenizer)[0] #TODO: this will break for append_msg content_prefix
-    all_msg_lens = batched_token_count(sys_convo_batches, tokenizer)
+def convo_batch_max_tokens(unified_conversation:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
     
-    #token_limit = (max_length-syslen)
-    assert all_msg_lens.max() <= max_length,'At least one message+system > max_length tokens. Truncation required.'
+    # TODO: this will break for append_msg content_prefix
+    syslen = batched_token_count(system_msg, tokenizer).sum() # sum in case is SYN ACK
+    all_msg_lens = batched_token_count(unified_conversation, tokenizer)
+    
+    token_limit = (max_length-syslen)
     # TODO: allow overlength for later truncation
-    sys_convo_batches = consecutive_max_batch(sys_convo_batches, all_msg_lens, max_length)
-
-    #sys_convo_batches = [add_sys_msg(c, system_msg, tag_placement=tag_placement) for c in convo_batches]
-    sys_convo_batches = bisect_overlength(sys_convo_batches, tokenizer, system_msg, tag_placement, max_length=max_length) # not token_limit, since system has been added
+    assert all_msg_lens.max() <= token_limit,'At least one message+system > max_length tokens. Truncation required.'
     
+    # use token_limit instead of max_length because we haven't added system messages yet
+    max_token_conversations = consecutive_max_tokens(unified_conversation, all_msg_lens, token_limit)
 
-    return sys_convo_batches
+    prepared_conversations = [add_sys_msg(c, system_msg, tag_placement=tag_placement) for c in max_token_conversations]
+    # Now use max_length, not token_limit, since system has been added
+    prepared_conversations = bisect_overlength(prepared_conversations, tokenizer, system_msg, tag_placement, max_length=max_length) 
+    
+    return prepared_conversations
 
 
 def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
@@ -511,16 +522,18 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
     cfg = fill_cfg_from_data(df_all['formatted_author_tag'], cfg) # fill fprompt, name_mappings
     system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer) # may update tokenizer
 
-    df_tall = df_all.query('split=="train"')
-    df_eall = df_all.query('split=="eval"')
     # get base tokens before any system is added
-    convo_train = to_conversation_format(df_tall['formatted_author_tag'], df_tall['text'], tag_placement=cfg.tag_placement, system_msg=system_message)
-    convo_eval = to_conversation_format(df_eall['formatted_author_tag'], df_eall['text'], tag_placement=cfg.tag_placement, system_msg=system_message)
+    # Do not add system message since it is a flat list of messages as a single mega conversation
+    sr_flat_convo = df_all.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, 'replace_role'), axis=1)
+    
+    train_convos = convo_batch_max_tokens(sr_flat_convo['train'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
+    eval_convos = convo_batch_max_tokens(sr_flat_convo['eval'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
     
     dset = datasets.DatasetDict({
-        'train': datasets.Dataset.from_dict({'text': convo_batch_max_tokens(convo_train, tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)}, split='train'),
-        'validation': datasets.Dataset.from_dict({'text': convo_batch_max_tokens(convo_eval, tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)}, split='validation'),
+        'train': datasets.Dataset.from_dict({'text': train_convos}, split='train'),
+        'validation': datasets.Dataset.from_dict({'text': eval_convos}, split='validation'),
     })
+    
     dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
     # https://huggingface.co/learn/nlp-course/chapter5/3
     if not text_only:
