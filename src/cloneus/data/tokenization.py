@@ -166,5 +166,6 @@ def batchsafe_tokenizer(tokenizer):
 
 def set_tokenizer_inference(tokenizer):
     tokenizer.padding_side = 'left'
-    tokenizer.pad_token_id = tokenizer.eos_token_id
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     return tokenizer
