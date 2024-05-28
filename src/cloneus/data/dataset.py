@@ -309,7 +309,7 @@ def time_split_overlength(prepared_conversations:list[list[dict]], convo_time_ga
         assert all([len(prepared_conversations[i]) > 1 for i in overlen_indices]), 'At least one message+system > max_length tokens. Truncation required.'
     
    # pbar := tqdm(range(original_n_batches), leave=None)
-    for i in (pbar := tqdm(range(original_n_convos), leave=None)):
+    for i in (pbar := tqdm(range(original_n_convos), leave=False)):
         if i not in overlen_indices:
             new_conversations.append(prepared_conversations[i])
             new_time_gaps.append(convo_time_gaps[i])
@@ -330,7 +330,6 @@ def time_split_overlength(prepared_conversations:list[list[dict]], convo_time_ga
             # c_over_toksum = cuml_tokens[-1]
             #print(f'{orig_length=} | {c_over_toksum=}')
         except Exception as e:
-            print(e)
             cand_splits = chat_lull_idx(t_over, tail_strip=0.05, top_one=top_only)
 
         for h in cand_splits:
@@ -431,7 +430,7 @@ def bisect_overlength(prepared_conversations, tokenizer, system_msg, tag_placeme
             print(batched_token_count(prepared_conversations[i], tokenizer))
 
     
-    for i in (pbar := tqdm(range(original_n_convos), leave=None)):
+    for i in (pbar := tqdm(range(original_n_convos), leave=False)):
         if i not in overlen_indices:
             new_conversations.append(prepared_conversations[i])
             continue
@@ -451,7 +450,7 @@ def bisect_overlength(prepared_conversations, tokenizer, system_msg, tag_placeme
             #         break # need at least 3 to have a mid idx to split
            
         except Exception as e:
-            print(e)
+            #print(e)
             h = len(c_over)//2 # fall back is just cut the convo in half
         
         c_left = c_over[:h]

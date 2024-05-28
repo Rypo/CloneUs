@@ -171,7 +171,7 @@ def to_common_format(df_chat:pd.DataFrame):
         df_chat['Date'] = df_chat['Date'].pipe(pd.to_datetime, utc=True, format='mixed')#'ISO8601')
     else:
         print()
-        warnings.warn('No timestamp column. Using 5 minute intervals in place of message timestamps. Expect data quality loss.')
+        warnings.warn('No timestamp column. Chats will chunk by max tokens only. Expect data quality loss.')
         print()
         df_chat['Date'] = pd.NaT#pd.date_range(end='1/1/2024', periods=df_chat.shape[0], unit="s", freq="5min")
     
