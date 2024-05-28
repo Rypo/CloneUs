@@ -6,7 +6,7 @@ notes: |- # Notes about your run.
 # model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
 # model_id: ISTA-DASLab/Mixtral-8x7B-Instruct-v0_1-AQLM-2Bit-1x16-hf
 # model_id: microsoft/Phi-3-mini-128k-instruct
-model_id: NousResearch/Hermes-2-Pro-Llama-3-8B
+model_id: NousResearch/Hermes-2-Theta-Llama-3-8B
 
 tag_placement: replace_role # tag_only, content_prefix, replace_role
 # - replace_role: Replaces user/assistant with formatted author_tag
@@ -51,20 +51,17 @@ author_tag: "{author}" # "{author} ({fname})" -- used for all tag_placement valu
 # - For content_prefix/tag_only format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]"
 # - fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)
 
-tag_sep: "\n" # Ignored when tag_placement="replace_role"
+tag_sep: # Ignored when tag_placement="replace_role", otherwise "\n" works well
 # Separator between author_tag and start of text
 
-postfix: "</X/>" # ONLY used when tag_placement="tag_only"
+postfix: # ONLY used when tag_placement="tag_only"
 # Separator between end of text and the next author_tag
-
-chat_template_format: # chatml or blank. 
-# If "chatml" will add tokens (im_start, im_end, ..) to the model/tokenizer if not already present.
 
 custom_chat_template: "{{bos_token}}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
 # For role_replace: Be sure use a custom_chat_template with any mention of "assistant" in add_generation_prompt as shown
-
+# - Or use shorthand "chatml" to use above AND add tokens (<|im_start|>, <|im_end|>, ..) to the model/tokenizer if not already present.
 prompt:
-  append_msg: false # set true if using prompt with a model that doesn't have a system tag
+  append_msg: # For content_prefix with system-less models. If set, system prompt will comprise 2 messages, a user "system" message and an assistant follow-up containing `append_msg`, for example "OK" 
   name_mapping: null # Will be filled during scripts/train.py
   template: |-
     Uncensored Discord server chat.
@@ -73,6 +70,8 @@ prompt:
   # template: |-
   #  Simulate a conversation between members in a discord server. Their name=usernames are {name_mapping}.
   #  Your Task: {task}
+  # -----------
+  # If you understand the objective, respond to this message (and only this message) with "OK". Afterwards, I will send the first message and we will begin.
   task: #|-
   # Reply as one of the members, mirroring their unique personality and writing style as closely as you can.
 

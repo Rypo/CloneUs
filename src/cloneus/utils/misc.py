@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 import bitsandbytes as bnb
 from transformers import PreTrainedModel, PreTrainedTokenizer
+from trl.models.utils import ChatMlSpecialTokens
 
 warnings.filterwarnings(action = "ignore", category = UserWarning, module = "torch")
 
@@ -146,49 +147,115 @@ def load_lora_custom(model, peft_config, lora_target_linear=True):
 
     return model, peft_config
 
+# from trl default
+# @dataclass
+# class ChatMlSpecialTokens:
+#     """Dataclass for special tokens used in ChatML, including system, user, assistant, bos, eos, and pad tokens."""
 
+#     bos_token: str = "<|im_start|>"
+#     eos_token: str = "<|im_end|>"
+#     pad_token: str = "<|im_end|>"
 
-# from trl
+#     @property
+#     def system(self):
+#         return f"{self.bos_token}system"
+
+#     @property
+#     def user(self):
+#         return f"{self.bos_token}user"
+
+#     @property
+#     def assistant(self):
+#         return f"{self.bos_token}assistant"
+
+#     @property
+#     def chat_template(self):
+#         return (
+#             "{% for message in messages %}"
+#             f"{{{{'{self.bos_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
+#             "{% endfor %}"
+#             "{% if add_generation_prompt %}"
+#             f"{{{{ '{self.assistant}\n' }}}}"
+#             "{% endif %}"
+#         )
+    
+
 @dataclass
 class ChatMlXSpecialTokens:
-    """Dataclass for special tokens used in ChatML, including system, user, assistant, bos, eos, and pad tokens."""
+    """Dataclass for special tokens used in ChatML - OpenHermes2.5 flavor, including system, user, assistant, bos, eos, and pad tokens."""
 
     bos_token: str = "<s>"
-    bosx_token: str = "<|im_start|>"
+    bot_token: str = "<|im_start|>"
     eos_token: str = "<|im_end|>"
     pad_token: str = "</s>"
-
+    custom_roles: bool = True
+    
     @property
     def system(self):
-        return f"{self.bosx_token}system"
+        return f"{self.bot_token}system"
 
     @property
     def user(self):
-        return f"{self.bosx_token}user"
+        return f"{self.bot_token}user"
 
     @property
     def assistant(self):
-        return f"{self.bosx_token}assistant"
+        return f"{self.bot_token}assistant"
 
     @property
     def chat_template(self):
         return (
             "{% for message in messages %}"
-            f"{{{{'{self.bosx_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
+            f"{{{{'{self.bot_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
             "{% endfor %}"
             "{% if add_generation_prompt %}"
-            f"{{{{ '{self.assistant}\n' }}}}"
+            +(f"{{{{ '{self.bot_token}' }}}}" if self.custom_roles else f"{{{{ '{self.assistant}\n' }}}}")+
             "{% endif %}"
         )
 
+# inspired by: https://huggingface.co/NousResearch/Hermes-2-Theta-Llama-3-8B/blob/main/tokenizer_config.json
+@dataclass
+class ChatMlHybridSpecialTokens:
+    """Dataclass for special tokens used in ChatML that reuses existing BOS and PAD if available"""
 
-FORMAT_MAPPING = {"chatmlX": ChatMlXSpecialTokens}
+    bos_token: str
+    pad_token: str
+    bot_token: str = "<|im_start|>"
+    eos_token: str = "<|im_end|>"
+    custom_roles: bool = True
+    
+    @property
+    def system(self):
+        return f"{self.bot_token}system"
+
+    @property
+    def user(self):
+        return f"{self.bot_token}user"
+
+    @property
+    def assistant(self):
+        return f"{self.bot_token}assistant"
+
+    @property
+    def chat_template(self):
+        return (
+            f"{{{{'{self.bos_token}'}}}}"
+            "{% for message in messages %}"
+            f"{{{{'{self.bot_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            +(f"{{{{ '{self.bot_token}' }}}}" if self.custom_roles else f"{{{{ '{self.assistant}\n' }}}}")+
+            "{% endif %}"
+        )
+
+FORMAT_MAPPING = {"chatml": ChatMlSpecialTokens, "chatmlX": ChatMlXSpecialTokens, "chatmlH": ChatMlHybridSpecialTokens}
 
 
 def setup_chat_format_patched(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
-    format: typing.Optional[typing.Literal["chatmlX"]] = "chatmlX",
+    format: typing.Optional[typing.Literal["chatmlH","chatmlX"]] = "chatmlH",
+    custom_roles: bool = True,
     resize_to_multiple_of: typing.Optional[int] = None,
 ) -> typing.Tuple[PreTrainedModel, PreTrainedTokenizer]:
     """
@@ -207,13 +274,22 @@ def setup_chat_format_patched(
     if format not in FORMAT_MAPPING:
         raise ValueError(f"Format {format} not available. Please use one of {FORMAT_MAPPING.keys()}")
 
-    chat_format = FORMAT_MAPPING[format]()
+    if format == "chatmlH":
+        if tokenizer.pad_token is not None:
+            pad_token = tokenizer.pad_token
+        else:
+            pad_token = tokenizer.eos_token # use the model's existing eos *not* <|im_end|>
+        chat_format = ChatMlHybridSpecialTokens(bos_token = tokenizer.bos_token, pad_token=pad_token, custom_roles=custom_roles)
+    elif format == "chatmlX":
+        chat_format = ChatMlXSpecialTokens(custom_roles=custom_roles)
+    else:
+        chat_format = FORMAT_MAPPING[format]()
 
     # set special tokens and them
     tokenizer.eos_token = chat_format.eos_token
     tokenizer.pad_token = chat_format.pad_token
     tokenizer.bos_token = chat_format.bos_token
-    tokenizer.add_special_tokens({"additional_special_tokens": [chat_format.bosx_token, chat_format.eos_token]})
+    tokenizer.add_special_tokens({"additional_special_tokens": [chat_format.bot_token, chat_format.eos_token]})
     # set chat format for tokenizer
     tokenizer.chat_template = chat_format.chat_template
 
@@ -221,6 +297,11 @@ def setup_chat_format_patched(
     model.resize_token_embeddings(
         len(tokenizer), pad_to_multiple_of=resize_to_multiple_of if resize_to_multiple_of is not None else None
     )
+    # Update the model config to use the new eos & bos tokens
+    if getattr(model, "config", None) is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.config.bos_token_id = tokenizer.bos_token_id
+        model.config.eos_token_id = tokenizer.eos_token_id
     # Make sure to update the generation config to use the new eos & bos token
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.bos_token_id = tokenizer.bos_token_id

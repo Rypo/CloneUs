@@ -12,26 +12,28 @@ from transformers.utils.quantization_config import  QuantizationConfigMixin
 import transformers
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model, AutoPeftModelForCausalLM
 from unsloth import FastLanguageModel
-from trl import setup_chat_format
 
 from ..utils import misc
 from ..data import tokenization
 
-def adjust_chat_format(model, tokenizer, chat_template_format:typing.Literal['chatml']=None):
-    if chat_template_format is None:
-        return model, tokenizer
+def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str|typing.Literal['chatml'] = None):
+    # from trl import setup_chat_format
+    # if chat_template_format is None:
+    #     return model, tokenizer
     
-    if chat_template_format == 'chatml': 
+    if custom_chat_template == 'chatml': 
         if any(v not in tokenizer.get_added_vocab() for v in ['<|im_start|>', '<|im_end|>']):
-            print('NOTE: chat_template_format=chatml but detected non-chatml format. Missing chatml tokens will be added.')
+            print('NOTE: custom_chat_template="chatml" but detected non-chatml format. Missing chatml tokens will be added.')
             # tweaked based on Hermes models
-            model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlX')
-    else:
-        raise ValueError(f'Unsupported chat_template_format: {chat_template_format!r}')
+        model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlH', custom_roles=True)
+        custom_chat_template = tokenizer.chat_template
+    #else:
+    #    raise ValueError(f'Unsupported chat_template_format: {chat_template_format!r}')
     
+    tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
     return model, tokenizer
 
-def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_template_format=None, padding_side=None, custom_chat_template=None,):
+def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
     # pip install -e "git+https://github.com/unslothai/unsloth.git#egg=unsloth
     # https://pip.pypa.io/en/stable/cli/pip_install/
 
@@ -48,8 +50,8 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
     if Path(model_id).exists():
         return model,tokenizer
     # https://old.reddit.com/r/LocalLLaMA/comments/1cc7gtr/llama3_8b_finetuning_2x_faster_fixed_endless/
-    model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
-    tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
+    model, tokenizer = adjust_chat_format(model, tokenizer, padding_side, custom_chat_template)
+    #tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
 
     # Do model patching and add fast LoRA weights
     model = FastLanguageModel.get_peft_model(
@@ -70,7 +72,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, chat_tem
     
     return model, tokenizer
 
-def get_awq(model_id, peft_config, max_seq_len:int, batch_size:int, chat_template_format=None, padding_side=None, custom_chat_template=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def get_awq(model_id, peft_config, max_seq_len:int, batch_size:int, padding_side=None, custom_chat_template=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     # TODO: awq peft training?
     # - https://github.com/casper-hansen/AutoAWQ/blob/main/examples/train.py
     # test on : https://huggingface.co/solidrust/Nous-Hermes-2-Mistral-7B-DPO-AWQ/tree/main
@@ -92,8 +94,8 @@ def get_awq(model_id, peft_config, max_seq_len:int, batch_size:int, chat_templat
     
     
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
-    tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
+    model, tokenizer = adjust_chat_format(model, tokenizer, padding_side, custom_chat_template)
+    #tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
     
     # NOTE: model.model is *required*, just model will error out
     model = prepare_model_for_kbit_training(model.model, use_gradient_checkpointing=True)
@@ -109,7 +111,6 @@ def get_model(model_id,
               peft_config: LoraConfig, 
               quant_config:typing.Literal['bnb4','aqlm', 'gptq']|QuantizationConfigMixin='bnb4', 
               attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2", 
-              chat_template_format=None,
               padding_side=None,
               custom_chat_template=None,
               custom_tokens_map=None):
@@ -150,8 +151,8 @@ def get_model(model_id,
 
     model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs, trust_remote_code=True)
 
-    model, tokenizer = adjust_chat_format(model, tokenizer, chat_template_format)
-    tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
+    model, tokenizer = adjust_chat_format(model, tokenizer, padding_side, custom_chat_template)
+    #tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
 
 
     if custom_tokens_map is not None:
@@ -193,7 +194,6 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
                                         max_seq_len=cfg.chunk_size, 
                                         batch_size=cfg.batch_size,
                                         
-                                        chat_template_format=cfg.chat_template_format, 
                                         padding_side=cfg.padding_side, 
                                         custom_chat_template=cfg.custom_chat_template,
                                         attn_implementation=cfg.attn_implementation, ) #custom_token_map
@@ -202,7 +202,6 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
                                         peft_config, 
                                         quant_config=cfg.quant_method, 
                                         attn_implementation=cfg.attn_implementation, 
-                                        chat_template_format=cfg.chat_template_format, 
                                         padding_side=cfg.padding_side, 
                                         custom_chat_template=cfg.custom_chat_template) #custom_token_map
         
@@ -213,7 +212,6 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
         model, tokenizer = get_unsloth(name_or_path, 
                                        peft_config, 
                                        max_seq_length=cfg.chunk_size, 
-                                       chat_template_format = cfg.chat_template_format, 
                                        padding_side=cfg.padding_side, 
                                        custom_chat_template=cfg.custom_chat_template)
         # TODO: look into ~4-7gb higher vRAM usage after changing padding_side=right -> padding_side=left --- https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side
