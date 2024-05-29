@@ -494,8 +494,12 @@ def consecutive_max_tokens(unified_conversation:list[dict[str,str]], all_msg_len
 def convo_batch_max_tokens(unified_conversation:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
     
     # TODO: this will break for append_msg content_prefix
-    syslen = batched_token_count(system_msg, tokenizer).sum() # sum in case is SYN ACK
-    all_msg_lens = batched_token_count(unified_conversation, tokenizer)
+    syslen = batched_token_count([system_msg], tokenizer).sum() # sum in case is SYN ACK
+    if tag_placement == 'content_prefix':
+        # since treating each msg as its own convo, need to reassign all roles as user so mistral format doesn't complain. Changes lengths slighty, but it's an approximation anyway
+        all_msg_lens = batched_token_count([{'role':'user', 'content': u['content']} for u in unified_conversation], tokenizer)
+    else:
+        all_msg_lens = batched_token_count(unified_conversation, tokenizer)
     
     token_limit = (max_length-syslen)
     # TODO: allow overlength for later truncation
@@ -524,8 +528,8 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
 
     # get base tokens before any system is added
     # Do not add system message since it is a flat list of messages as a single mega conversation
-    sr_flat_convo = df_all.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, 'replace_role'), axis=1)
-    
+    sr_flat_convo = df_all.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement), axis=1)
+    print('Grouping messages into conversations of maximal length..')
     train_convos = convo_batch_max_tokens(sr_flat_convo['train'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
     eval_convos = convo_batch_max_tokens(sr_flat_convo['eval'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
     
