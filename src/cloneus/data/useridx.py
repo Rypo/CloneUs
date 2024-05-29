@@ -251,8 +251,8 @@ def update_initials(user_index:list[dict],priority_order:tuple[Literal['fname','
 
 # TODO: Figure out a better place to put this
 
-def format_author_tag(user_display_name:str, author_tag:str, *, insert_raw:bool=False):
+def format_author_tag(user_display_name:str, author_tag:str, *, insert_raw:bool=False, user_index: list[dict] = None):
     if insert_raw:
         return author_tag.format(author=user_display_name, lauthor=user_display_name, fname=user_display_name)
     
-    return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=get_users('fname', 'dname').get(user_display_name,user_display_name))
+    return author_tag.format(author=user_display_name, lauthor=user_display_name.lower(), fname=get_users('fname', 'dname', user_index=user_index).get(user_display_name,user_display_name))

@@ -409,15 +409,15 @@ def format_text_tags(df_proc:pd.DataFrame, author_tag:str, tag_sep:str=None, pos
         postfix: String to append at the end of each formatted text. 
         eval_frac (float|'after_bot'): If float, the fraction of chat groups to use for evaluation. If 'after_bot', use all messages after the bot's first message (default: 0.005).
     '''
-    
+    user_index = get_make_userindex(df_proc)
     df_chats = df_proc.groupby('user_sequence', as_index=False)[
         ['user', 'Date', 'time_gap', 'text','pre_bot']].agg(
         {'user':'first', 'Date':'last', 'time_gap':'first', 'text':list, 'pre_bot':'first'}).copy()
     
     # Join consecutive author messages with new line
     df_chats['text'] = df_chats['text'].str.join('\n')
-
-    df_chats['formatted_author_tag'] = df_chats['user'].apply(useridx.format_author_tag, author_tag=author_tag) + ('' if tag_sep is None else tag_sep)
+    
+    df_chats['formatted_author_tag'] = df_chats['user'].apply(useridx.format_author_tag, author_tag=author_tag, user_index=user_index) + ('' if tag_sep is None else tag_sep)
 
     # BUG until 2023-11-29 was df_proc.text instead of df_all
     df_chats['formatted_text'] = df_chats['formatted_author_tag'] + df_chats['text'] + ('' if postfix is None else postfix)  
