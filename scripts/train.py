@@ -62,9 +62,16 @@ def verify_config(cfg):
             cfg.tag_sep = None 
             cfg.postfix = None 
     elif cfg.tag_placement == 'content_prefix':
-        if any([cfg.postfix is not None]):
+        if cfg.postfix is not None:
             print("NOTE: tag_placement == 'content_prefix' does not use postfix -- postfix will be set to None")
             cfg.postfix = None
+        if cfg.tag_sep is None:
+            print("NOTE: tag_placement == 'content_prefix' uses tag_sep but found None. Setting to a single space ' '. To avoid this behavior, set to an empty string `tag_sep=''` ")
+            cfg.tag_sep = ' '
+    elif cfg.tag_placement == 'tag_only':
+        if any([cfg.author_tag is None, cfg.tag_sep is None, cfg.postfix is None]):
+            raise KeyError("For tag_placement == 'tag_only', each of {author_tag, tag_sep, postfix} must be explicitly set in config.")
+
 
     if cfg.flashattn_lib == 'unsloth': 
         if cfg.quant_method != 'bnb4':
@@ -169,19 +176,10 @@ def main(args):
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(num_custom_tokens is not None and num_custom_tokens > 0)
     cfg.dtype = 'bfloat16' if cfg.bf16 else 'float16'
-    cfg.fprompt = None
+    cfg.prompt.name_mapping = None # filled during dataset creation
+    cfg.fprompt = None # filled during dataset creation
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    # if cfg.prompt.template:
-    #     if not useridx.user_index_exists():
-    #         from cloneus.data import etl
-    #         etl.process_csv(data_file_path) # cold run
-    #     name_mapping = ', '.join(useridx.format_author_tag(author, cfg.author_tag) for author in useridx.get_users('dname'))
-    #     # these are filled in dataset creation now
-    #     cfg.prompt.name_mapping = name_mapping
-    #     cfg.fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
-
-    
     text_only_dataset = cfg.use_sft_trainer
 
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:

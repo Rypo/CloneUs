@@ -332,10 +332,10 @@ class Cloneus(GenConfigUtilities):
         self.base_has_system = tokenization.check_if_system(self.tokenizer) 
         self.base_needs_bos = self.base_tokenizer.chat_template and 'bos_token' not in self.base_tokenizer.chat_template
 
-        print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {} (use: {}), tag_placement: {}'.format(
+        print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {}, has_prompt: {}, tag_placement: {}'.format(
             self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
             self.tokenizer.eos_token_id, self.gen_config.eos_token_id,
-            self.base_has_system, (self.cfg.fprompt and not self.cfg.prompt.append_msg), self.cfg.tag_placement,
+            self.base_has_system, (self.cfg.fprompt is not None), self.cfg.tag_placement,
         ))
         
         self.model.eval()
@@ -1003,12 +1003,12 @@ class CloneusUA(Cloneus):
         if self.cfg.fprompt:
             if self.base_has_system:
                 system_message = [{'role':'system', 'content': self.cfg.fprompt}]
-            elif self.cfg.prompt.append_msg == 'legacy':
+            elif isinstance(self.cfg.prompt.append_msg, bool) and self.cfg.prompt.append_msg: # legacy
                 content0 = self.apply_content_prefix(*author_messages[0], tag_sep=self.cfg.tag_sep)
                 system_message = [{'role':next(rolecycle), 'content': self.cfg.fprompt + content0}]
                 author_messages = author_messages[1:]
                 
-            elif self.cfg.prompt.append_msg:
+            elif isinstance(self.cfg.prompt.append_msg, str):
                 system_message = [
                     {'role':'user', 'content': self.cfg.fprompt}, 
                     {'role':'assistant', 'content': self.cfg.prompt.append_msg}]
@@ -1126,7 +1126,7 @@ class CloneusUntuned(CloneusUA):
             'tag_placement': 'content_prefix',
             
             'prompt':{
-                'append_msg': (not has_system),
+                'append_msg': ("OK" if not has_system else None),
                 'name_mapping': name_mapping,
                 'template': system_prompt_template,
             },
@@ -1156,34 +1156,34 @@ class CloneusUntuned(CloneusUA):
         
         self.base_has_system = tokenization.check_if_system(self.tokenizer) #self.cfg.base_tune_type=='chat' or (self.cfg.base_tune_type=='instruct' and 'system' in str(self.tokenizer.chat_template)) 
         
-        print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {} (use: {}), tag_placement: {}'.format(
+        print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {}, has_prompt: {}, tag_placement: {}'.format(
             self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
             self.tokenizer.eos_token_id, self.gen_config.eos_token_id,
-            self.base_has_system, (self.cfg.fprompt and not self.cfg.prompt.append_msg), self.cfg.tag_placement,
+            self.base_has_system, (self.cfg.fprompt is not None), self.cfg.tag_placement,
         ))
         
         self.model.eval()
 
         return self
     
-    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
-        rolecycle = itertools.cycle(['user','assistant'])
+    # def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
+    #     rolecycle = itertools.cycle(['user','assistant'])
 
-        chat_content = []
+    #     chat_content = []
 
-        if self.base_has_system:
-            chat_content.append({"role": "system", "content": self.cfg.fprompt})
-        else:
-            chat_content.append({"role": "user", "content": self.cfg.fprompt})
+    #     if self.base_has_system:
+    #         chat_content.append({"role": "system", "content": self.cfg.fprompt})
+    #     else:
+    #         chat_content.append({"role": "user", "content": self.cfg.fprompt})
             
-            if self.cfg.prompt.append_msg:
-                chat_content.append({"role": "assistant", "content": "OK"})
+    #         if self.cfg.prompt.append_msg:
+    #             chat_content.append({"role": "assistant", "content": "OK"})
         
-        for auth,msg in author_messages:
-            message = self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
-            chat_content.append({"role": next(rolecycle), "content": message})
+    #     for auth,msg in author_messages:
+    #         message = self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
+    #         chat_content.append({"role": next(rolecycle), "content": message})
         
-        return chat_content
+    #     return chat_content
     
 
     def to_text_input(self, author_messages: list[tuple[str,str]], author_seedtext: tuple[str,str]=None):

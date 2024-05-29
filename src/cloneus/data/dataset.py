@@ -106,7 +106,7 @@ def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_place
     return chat_convo
 
 
-def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],  system_msg:dict[str,str]|list[dict[str,str]]|None=None) -> list[dict[str,str]]: # has_system: bool=None, append_msg:bool=None
+def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],  system_msg:dict[str,str]|list[dict[str,str]]|None=None) -> list[dict[str,str]]:
     # NOTE: formatted_author_tags INCLUDE TAG SEP (if not None)
     # https://github.com/benfred/py-spy
     atag_tcontent = zip(formatted_author_tags, raw_texts)
@@ -160,7 +160,7 @@ def fill_cfg_from_data(formatted_author_tag_col:pd.Series, cfg):
         cfg.prompt.name_mapping = name_mapping
     
     if fprompt is None:
-        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, task=cfg.prompt.task)
+        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, append_msg=cfg.prompt.append_msg)
         cfg.fprompt = fprompt
     
     return cfg
@@ -191,13 +191,14 @@ def prepare_system_msg(cfg, tokenizer):
         if has_system:
             system_message = [{'role':'system', 'content': cfg.fprompt}]
         
-        elif cfg.prompt.append_msg == 'legacy':
+        elif isinstance(append_msg, bool) and append_msg:
             system_message = [{'role':'user', 'content': cfg.fprompt}]
             # legacy handling done by add_sys_message since requires first chat message
-        elif cfg.prompt.append_msg:
+        elif isinstance(append_msg, str):
             system_message = [
                 {'role':'user', 'content': cfg.fprompt}, 
-                {'role':'assistant', 'content': cfg.prompt.append_msg}]
+                {'role':'assistant', 'content': append_msg}
+            ]
 
 
     return system_message, has_system, append_msg
