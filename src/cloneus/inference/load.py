@@ -19,8 +19,6 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
-from unsloth import FastLanguageModel, load_correct_tokenizer
-
 
 def cleanup(func):
     @functools.wraps(func)
@@ -37,6 +35,7 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
     '''AutoTokenizer.from_pretrained but force padding_side=left, pad_tok=eos_tok'''
     # Fixes issues with some tokenizers special token spacing. If trained with unsloth, should have fixed+saved already. 
     if refix_tokenizer:
+        from unsloth import load_correct_tokenizer
         tokenizer = load_correct_tokenizer(pretrained_model_name_or_path, trust_remote_code=True)
     else:
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
@@ -124,6 +123,7 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
 
 
 def load_unsloth(checkpoint_dirpath, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+    from unsloth import FastLanguageModel
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
     warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
     # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
