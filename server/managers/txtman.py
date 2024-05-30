@@ -111,21 +111,18 @@ class CloneusManager():
         prekwargs = {'checkpoint_path':self.clo.path_data.checkpoint_path, 'gen_config':self.clo.gen_config, 
                      'dtype':self.clo.cfg.dtype, 'attn_implementation':self.clo.cfg.attn_implementation}
         if self.clo is not None:
-            self.clo.unload_model()
+            self.clo.unload_model(partial=False)
         #self.status = 'down'
         self._preload(**prekwargs)
 
     def _preload(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None):
         if self.clo is None or self.clo.model is None:
-            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation)
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation, load=False)
 
     @async_wrap_thread
     def load(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None ):
         if self.clo is None:
-            #if gen_config is None:
-            #    gen_config = 'generation_config.json'
-            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation)
-            self.clo.load_model()
+            self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation, load=True)
         else:
             self.clo = self.clo.swap_model(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, )
         

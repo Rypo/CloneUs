@@ -24,7 +24,7 @@ import transformers
 
 from cloneus.data import tokenization, useridx
 from cloneus.plugins import youtube
-from cloneus.inference import genconfig, load
+from cloneus.inference import genconfig, load as iload
 
 
 @dataclass
@@ -316,7 +316,7 @@ class Cloneus(GenConfigUtilities):
 
 
     @staticmethod
-    def from_pretrained(checkpoint_path:str|Path, gen_config:GenerationConfig|Path = None, ytm:youtube.YouTubeManager = None, **kwargs):
+    def from_pretrained(checkpoint_path:str|Path, gen_config:GenerationConfig|Path = None, ytm:youtube.YouTubeManager = None, load:bool = True, **kwargs):
         try:
             path_data = ModelPathComponents.from_checkpoint(Path(checkpoint_path))
         except FileNotFoundError as e:
@@ -333,11 +333,11 @@ class Cloneus(GenConfigUtilities):
         
         config = OmegaConf.load(path_data.config_path)
         
-        if config.tag_placement == 'replace_role': #config.custom_chat_template: #config.base_tune_type == 'chat' or :
+        if config.tag_placement == 'replace_role':
             ClonuesCls = CloneusRole
-        elif config.tag_placement == 'content_prefix': #config.base_tune_type in ['instruct','chat']:
+        elif config.tag_placement == 'content_prefix':
             ClonuesCls = CloneusUA
-        elif config.tag_placement == 'tag_only': #config.base_tune_type == 'foundation':
+        elif config.tag_placement == 'tag_only':
             ClonuesCls = CloneusTag
         else:
             raise NotImplementedError('Unable to determine Cloneus Format Class')
@@ -347,17 +347,23 @@ class Cloneus(GenConfigUtilities):
         
         if ytm is None:
             ytm = youtube.YouTubeManager(enabled=True)
-        return ClonuesCls(path_data=path_data, cfg=config, gen_config=gen_config, ytm=ytm, **kwargs)
+        clo = ClonuesCls(path_data=path_data, cfg=config, gen_config=gen_config, ytm=ytm, **kwargs)
+        if load:
+            return clo.load_model()
+        return clo
     
     @staticmethod
-    def from_model_id(model_id:str, author_names:list[str]=None, system_prompt:str|SystemPromptTemplate = None, **kwargs):
+    def from_model_id(model_id:str, author_names:list[str]=None, system_prompt:str|SystemPromptTemplate = None, load=True, **kwargs):
         cfg = CloneusUntuned.create_default_cfg(model_id, author_names=author_names, system_prompt=system_prompt, **kwargs)
-        return CloneusUntuned(model_id, cfg=cfg)
-
+        clo = CloneusUntuned(model_id, cfg=cfg)
+        if load:
+            return clo.load_model()
+        return clo
         
-    @load.cleanup
+    @iload.cleanup
     def load_model(self):
-        self.model, self.tokenizer = load.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
+        self.unload_model(partial=True) # make sure all states are cleared first. If we want to preserve state, then should have called swap_model
+        self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=None)
         
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path, trust_remote_code=True)
@@ -378,13 +384,20 @@ class Cloneus(GenConfigUtilities):
 
         return self
         
-    @load.cleanup
-    def unload_model(self):
+    @iload.cleanup
+    def unload_model(self, partial:bool=True):
+        '''Destroy model and tokenizers and try to free memory.
+        
+        Args:
+            partial: If True, `cfg` and `path_data` are preserved for a subsequent call to `load_model()`. 
+                Otherwise, the state is unrecoverable and `from_pretrained` must be called again. 
+        '''
         self.model = None
         self.tokenizer = None
         self.base_tokenizer = None
-        self.cfg = None
-        self.path_data = None
+        if not partial:
+            self.cfg = None
+            self.path_data = None
     
     def cast_dtype(self, dtype:str|torch.dtype):
         torch_dtype = dtype_to(dtype, to='torch')
@@ -436,24 +449,24 @@ class Cloneus(GenConfigUtilities):
         return self
 
 
-    @load.cleanup
+    @iload.cleanup
     def swap_model(self, checkpoint_path:(str|Path), gen_config:GenerationConfig|Path=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None) -> None:
         # If the path is the same, assume that either want a dtype change or attn_impl change
         if Path(checkpoint_path) == self.path_data.checkpoint_path:
             if dtype:
                 self.cast_dtype(dtype)
             if attn_implementation:
-                return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm).load_model()
+                return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm, load=True)#.load_model()
                 
         cfg, path_data = self.config_path_data(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
                 
         if self.can_hotswap(cfg, path_data):
             return self._swap_adapter(cfg, path_data, gen_config=gen_config, dtype=dtype)
         
-        #if self.cfg.quant_method != cfg.quant_method:
-        self.unload_model()
+        # If it can't be hotswapped, nuke and pave
+        self.unload_model(partial=False)
         
-        return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm).load_model()
+        return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm, load=True)#.load_model()
             
         
     def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
@@ -1113,6 +1126,7 @@ class CloneusUntuned(CloneusUA):
 
         if system_prompt is None:
             system_prompt = SystemPromptTemplate(has_system_role = has_system)
+        
         if isinstance(system_prompt, SystemPromptTemplate):
             system_prompt = system_prompt.get_template()
         
@@ -1155,9 +1169,9 @@ class CloneusUntuned(CloneusUA):
     
         return cfg
 
-    @load.cleanup
+    @iload.cleanup
     def load_model(self):
-        self.model, self.tokenizer = load.load_any_inference(self.cfg.model_id, quant_method='merged', dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
+        self.model, self.tokenizer = iload.load_any_inference(self.cfg.model_id, quant_method='merged', dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=None)
         
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path, trust_remote_code=True)

@@ -95,7 +95,7 @@ def eval_ckpt(clo:Cloneus, checkpoint_path:Path, genconfig_modes:list[str], prom
 def eval_run(checkpoint_paths:list[Path], prompts: list[str], genconfig_modes:list[str], question_author:str, author_list:list[str]):
     '''Evaluate a single run consisting of multiple checkpoints'''
     
-    clo = Cloneus.from_pretrained(checkpoint_paths[0]).load_model()
+    clo = Cloneus.from_pretrained(checkpoint_paths[0], load=True)
     
     gc_inps_outs = {}
     for ckpth in tqdm(checkpoint_paths): 
@@ -142,7 +142,7 @@ def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', ge
         run_path = runs_path
         print('running 1 checkpoint:',run_path)
         # sample eval from 1 checkpoint. Write to log file inside of the checkpoint dir
-        clo = Cloneus.from_pretrained(run_path)#.load_model() # load taken care of in eval_ckpt
+        clo = Cloneus.from_pretrained(run_path, load=False)#.load_model() # load taken care of in eval_ckpt
         gc_inps_outs = eval_ckpt(clo, checkpoint_path=run_path, genconfig_modes=genconfig_modes, prompts=prompts, question_author=question_author, author_list=author_list)
         write_samples(gc_inps_outs, run_path/outfile)
     else:
@@ -153,8 +153,7 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
     if (cpts:=list(Path(model_path).glob('*checkpoint*'))):
         model_path = cpts[0]
     
-    clo = Cloneus(model_path)
-    clo.load_model()
+    clo = Cloneus.from_pretrained(model_path, load=True)
     
     author_display_names = useridx.get_users('dname')
 
