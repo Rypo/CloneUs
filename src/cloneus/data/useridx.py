@@ -4,10 +4,10 @@ import copy
 import hashlib
 from typing import Literal
 import warnings
-import functools
+import itertools
 from collections import defaultdict
 
-from unidecode import unidecode
+import unidecode
 
 import cloneus.core.paths as cpaths
 
@@ -195,7 +195,7 @@ def assign_initials(names:list[str]) -> dict[str,str]:
     '''
     snames = sorted(set(names), key=str.lower)
     # take the first alpha letter from the decoded name, if none, default is "x"
-    initials = [next(filter(str.isalpha, unidecode(name)), 'x').lower() for name in snames]
+    initials = [next(filter(str.isalpha, unidecode.unidecode(name)), 'x').lower() for name in snames]
     
     # if they are all unique, no digits required.
     if len(set(initials)) == len(snames):
@@ -237,7 +237,7 @@ def create_default_initials(user_index:list[dict], priority_order:tuple[Literal[
     # if none can be represented by only a char, return first tried since it was highest priorty
     return name_ini_maps[0]
 
-def update_initials(user_index:list[dict],priority_order:tuple[Literal['fname','dname','uname'], ...]=('fname','dname','uname'), overwrite_existing:bool=True) -> None:
+def update_initials(user_index:list[dict], priority_order:tuple[Literal['fname','dname','uname'], ...]=('fname','dname','uname'), overwrite_existing:bool=True) -> None:
     '''Updates initials IN PLACE. Will never overwrite cloneus user special initial entry.'''
     if overwrite_existing or not all(get_users('initial', user_index=user_index,  include_bot=False)):
         name_to_ini,namekey = create_default_initials(user_index, priority_order = priority_order)
@@ -248,6 +248,45 @@ def update_initials(user_index:list[dict],priority_order:tuple[Literal['fname','
             user_index_by_name[name]['authorInitial'] = ini
 
 
+def _to_username(name:str):
+    if not name.isprintable():
+        username = ascii(name).strip("'")
+    else:
+        username = unidecode.unidecode(name).replace(' ','_')
+    return username.strip()
+
+def _new_user(display_name:str=None, first_name:str=None, username:str=None):
+    # first name does not need to be set and will never be filled
+    # username -> display_name | first_name -> display_name
+    # ascii(display_name) -> username | ascii(first_name) -> username
+    if display_name is None:
+        if username is not None:
+            display_name = username 
+        else:
+            display_name = first_name
+
+    if username is None:
+        username = _to_username(display_name)
+
+    return {'id': fake_author_id(username), 'firstName': first_name, 'authorInitial':None, # filled after
+            'username':username, 'displayName':display_name, 'isBot':False}
+    
+def new_user_index(display_names:list[str]=None, first_names:list[str]=None, usernames:list[str]=None):
+    '''Create a temporary user index from a list of names. 
+    
+    If multiple name lists passed, they are zipped. Ensure correct ordering between lists.'''
+
+    assert any([display_names is not None, first_names is not None, usernames is not None]), 'Need at least one of `display_names`, `first_names`, `usernames`'
+    
+    names = [n if n is not None else [] for n in [display_names, first_names, usernames]]
+    user_index = [_new_user(d,f,u) for d,f,u in itertools.zip_longest(*names)]
+    
+    update_initials(user_index)
+    
+    if (clobot := get_cloneus_user()) not in user_index:
+        user_index = [clobot, *user_index]
+    
+    return user_index
 
 # TODO: Figure out a better place to put this
 
