@@ -19,7 +19,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
-
+from cloneus.data import tokenization
 def cleanup(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -31,8 +31,8 @@ def cleanup(func):
     return wrapper  
 
 
-def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer=False, *inputs, **kwargs):
-    '''AutoTokenizer.from_pretrained but force padding_side=left, pad_tok=eos_tok'''
+def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer:bool=False, ensure_bos:bool = True, *inputs, **kwargs):
+    '''AutoTokenizer.from_pretrained but force padding_side=left and if needed pad_tok=eos_tok, add bos to chat template'''
     # Fixes issues with some tokenizers special token spacing. If trained with unsloth, should have fixed+saved already. 
     if refix_tokenizer:
         from unsloth import load_correct_tokenizer
@@ -40,10 +40,8 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
     else:
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
 
-    tokenizer.padding_side = 'left'
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    #tokenizer.chat_template = tokenization.bos_chat_template(tokenizer)
+    tokenizer = tokenization.set_tokenizer_inference(tokenizer, ensure_bos=ensure_bos)
+
     return tokenizer
 
         
