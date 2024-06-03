@@ -426,7 +426,7 @@ class OneStageImageGenManager:
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
         
         # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
-        dim_out = self.config.nearest_dims(image.size) if aspect is None else self.config.get_dims(aspect)
+        dim_out = self.config.nearest_dims(image.size, use_hf_sbr=False) if aspect is None else self.config.get_dims(aspect)
         print('regenerate_image input size:', image.size, '->', dim_out)
         image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
         
