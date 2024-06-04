@@ -537,75 +537,100 @@ class Cloneus(GenConfigUtilities):
             return {tuple(t):w for t,w in zip(tokens,weights)}
         
         return tokens
+    
+    @torch.inference_mode()
+    def _proba_next_token(self, chat_history, top_k=5):
+        #author_surrogate = '###_dummy_author_###'
+        #formatted_author_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag, insert_raw=True)
+        base_input = self.to_text_input(chat_history)#+[(author_surrogate, 'ignored')]).split(formatted_author_surrogate)[0]
+        
+        inputs = self.tokenizer(base_input, return_tensors="pt", add_special_tokens=False) # add_special_tokens=False
+        outputs = self.model(**inputs.to(0))
+        
+        logprobs = torch.log_softmax(outputs.logits, dim=-1).detach_()
+        
+        topkn = logprobs[:,-1,:].topk(top_k)
+        return topkn.values.exp().detach(), self.tokenizer.convert_ids_to_tokens(topkn.indices.squeeze(0))
+
+    def _atag_prefix_nsame(self, formatted_atags:list[str]):
+        '''Count the number of shared common author tag prefix tokens tokenized.
+        e.g. for author tags ([USER:abc], USER:xyz]) might be 3 - { "[", "USER", ":" }
+        '''
+        tokd_fatags = [self.tokenizer.tokenize(fatag) for fatag in formatted_atags]
+        atag_lc_tokens = 0
+        
+        min_taglen = min(len(t) for t in tokd_fatags)  # longest possible common subtokens would be shortest tag
+        for i in range(min_taglen):
+            # if all tokens at index i are the same, +1 and continue else done
+            n_unique = len(set([t[i] for t in tokd_fatags]))
+            if n_unique != 1:
+                break
+            
+            atag_lc_tokens += 1
+                
+        return atag_lc_tokens
 
 
     @torch.inference_mode()
-    def next_author_probs(self, author_messages: list[tuple[str,str]], top_k_next_tokens: int, author_list: list[str]=None):
-        '''Returns a list of (authtok, proba) pairs. Note this is only the FIRST part of an author name unless author_list is provided.
-        If author_list is given, try to map one of the author names in the list to the token segment
+    def author_probabilities(self, author_messages: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
+        '''For each author, return the probability they will be the next to respond given the chat context.
         '''
-        # another possible method
-        # - https://huggingface.co/docs/transformers/main_classes/text_generation#transformers.GenerationMixin.compute_transition_scores
-        # In theory, could allow seed text by comparing prob of each author saying seed_text given context. But that's a lot more work. 
-        # Might be an easier way with BeamScorer
-        # fill tag to split on a known fixed value. Allows author_tag to change without breaking.
         
-        # because of tokenization quirks, arbitrary author_tag formatting, and arbitrary author name inputs
-        # author tags can merge with author names in unexpected ways.
-        # as such, we need the model to output and match against whole formatted author tags, but return author names
-        # this is not immediately obvious how to do consistently
-        # maybe apply tag formatting and match against tokenized
-        # but even then, if 2 users JohnnyAppleSeed and JohnnyAppleSeed12, theres no way of distigushing without whole string probabilities
-        # https://huggingface.co/docs/transformers/v4.40.2/en/main_classes/text_generation#transformers.GenerationMixin.generate.prefix_allowed_tokens_fn
+        # Pros over old method:
+        # - It's actually correct (?)
+        # - If 2 authors have same first token, it can differentiate between them
+        # - Don't need to worry about splitting name+author_tag in unexpected ways since whole tag is predicted 
+        # - It will always match one of the authors
+        # - Doesn't depend on generation config settings 
 
-        # NOTE: bottom line: this is wrong (sometimes). We're forcing the model to generate a username 
-        # when it possibly has only ever generated author_tag segment + username segment ...
-        # e.g. kirby -> ["kir", "by"] vs [USER:kirb -> [..., ":k", "ir", "by"]
+        # Cons:
+        # - It will always match one of the authors. So unless a name is passed, it can't be predicted.
+        # - Its batched, so padding weirdness affects probabilties (this could be changed, but it _needs_ to be as fast as possible)
+        # - There is still potential for weird interaction between tag and chat template if preceding token isn't special (looking at you mistral..) 
+        # - Doesn't depend on generation config settings. Can't make the result more interesting by tweaking.
+        
+        # ref: https://discuss.huggingface.co/t/announcement-generation-get-probabilities-for-generated-output/30075/17
+        if authors is None:
+            authors = useridx.get_users('dname')
+        
+        n_author = len(authors)
         author_surrogate = '###_dummy_author_###'
-        input_text = self.to_text_input(author_messages+[(author_surrogate, 'ignored')], author_seedtext=None)
+        base_surrogate = self.to_text_input(author_messages, (author_surrogate, 'ignored'))
+        
+        # we DO want to split out the whole tag, since we are now getting whole tag probablities
+        fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag)
+        base_input = base_surrogate.split(fmt_auth_surrogate)[0] # do **not** strip. Still manipulating strings
+        
+        fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in authors]
+        tag_lens = torch.as_tensor(self.tokenizer(fmt_atags, add_special_tokens=False, return_length=True).length)
+        # print(tag_lens)
+        candidate_batch = [base_input + a for a in fmt_atags]
+        b_inputs = self.tokenizer(candidate_batch, return_tensors="pt", padding=True, add_special_tokens=False)
+        
+        b_outputs = self.model(**b_inputs.to(0))
+        
+        # remember - always proba of the *next* token, not current. So need to back step index by 1.
+        b_logprobs = torch.log_softmax(b_outputs.logits, dim=-1).detach_()[:, :-1, :]
+        b_input_ids = b_inputs.input_ids[:, 1:]#.cpu()
+        
+        p_author = torch.empty((n_author, tag_lens.max().item()))
+        #nindices = []
+        for i in range(n_author):
+            # cur_name_logprobs = b_logprobs[i, -tag_lens[i]-1:-1]
+            cur_name_logprobs = b_logprobs[i, -tag_lens[i]:]
+            cur_name_indices = b_input_ids[i, -tag_lens[i]:, None]
+            p_author[i, :tag_lens[i]] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
+            #nindices.append(cur_name_indices.squeeze())
+        
+        #return p_author,nindices
+
+        # skipping pre-formatting tokens both gives a better estimate and fixes mistral spacing issues
+        n_skip = self._atag_prefix_nsame(fmt_atags)
+        a_tag_probas = p_author[:,n_skip:].sum(-1).exp().tolist()
+        author_probas = zip(authors, a_tag_probas)
+
+        return sorted(author_probas, key=lambda x: x[1], reverse=True)
     
-        # By splitting on dummy author, all prior formatting will be applied exactly, take this and discard the rest
-        # so if author_tag is [USER:{author}] and llama-3 model, we'd get: ((CONTEXT))<|start_header_id|>[USER:
-        input_text = input_text.split(author_surrogate)[0].rstrip(' ') # IFF the formatted author_tag ends with a space ' ' should NOT trail with it
-        #print(input_text)
-        inputs = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)
-
-        author_gen_config = GenerationConfig(
-            do_sample=False,
-            #force_words_ids=[],#[[wtok[:3]] for wtok in self.encode_wordslist(userutils.author_display_names)], 
-            max_new_tokens=3, #min_new_tokens=1, 
-            #do_sample=True, top_k=len(roles.author_display_names),temperature=1, #remove_invalid_values=True,
-            renormalize_logits=True,
-            num_beams=1,
-            eos_token_id=self.gen_config.eos_token_id, 
-            pad_token_id=self.gen_config.pad_token_id
-        )
-        
-        output = self.model.generate(**inputs.to(0), generation_config=author_gen_config, stopping_criteria=self.stop_criteria, 
-                                     output_scores=True, return_dict_in_generate=True)
-        
-        
-        # Sorta redundant with top_k in generate, but handles sorting, masking, slicing without effort. 
-        # using output.scores[0][0] avoid issues with num_beams > 1
-        # when forcing words, the other beam dims are not useful anyway
-        topk_scores,token_ids = output.scores[0][0].topk(top_k_next_tokens, dim=0)
-        authtok_prob_pairs = list(zip(
-            self.tokenizer.batch_decode(token_ids),
-            topk_scores.exp().tolist() # scores = log softmax(logits), so proba exp(scores)
-            #logits.softmax(0).tolist()
-        ))
-        
-        if author_list is not None:
-            if 'lauthor' in self.cfg.author_tag:
-                author_list = [a.lower() for a in author_list] # make sure are lower cased if using lauthor
-            for i, (aseg, prob) in enumerate(authtok_prob_pairs):
-                try:
-                    authtok_prob_pairs[i] = (next(filter(lambda a: a.startswith(aseg.strip()),author_list)), prob)
-                except StopIteration:
-                    print(f'WARNING: could not match "{aseg}" author in `author_list`, using ("{aseg}", {prob:0.6f}) in return')
-
-        return authtok_prob_pairs
-
 
     @torch.inference_mode()
     def _batched_helper(self, msg_batch, true_batch_generate=False):
@@ -671,7 +696,7 @@ class Cloneus(GenConfigUtilities):
         Args:
             author_messages: A list of tuples of unformatted (author name, message) pairs
             seed_authors: The list of authors to generate responses for.
-            reply_seedtext: The seed text to start of each author's reponse with.
+            seed_text: The seed text to start of each author's reponse with.
 
         Returns:
             A tuple containing the input context, list of formatted author+seedtext inputs, output completion texts, input length, and output lengths.
@@ -735,7 +760,7 @@ class Cloneus(GenConfigUtilities):
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=(not self.cfg.has_custom_tokens))
 
         input_text = self.to_text_input(author_messages, reply_author)
-        inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True)#, max_length=1024, truncation=True)
+        inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
         input_len = inputs.pop('length')[0].item()
 
         genkwargs = dict(inputs.to(0), generation_config=self.gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)

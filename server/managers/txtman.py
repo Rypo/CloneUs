@@ -239,9 +239,10 @@ class CloneusManager():
 
     @async_wrap_thread
     def predict_author(self, message_cache:list[discord.Message],  autoreply_mode: str, author_candidates: list[str]=None) -> str:
-        dnames = useridx.get_users('dname')
+        
         llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
-        author_probas = self.clo.next_author_probs(llm_input_messages, top_k_next_tokens=len(dnames), author_list=dnames)
+        auth_cands = useridx.get_users('dname') if not author_candidates else author_candidates
+        author_probas = self.clo.author_probabilities(llm_input_messages, authors=auth_cands)
         
         model_logger.info(f'Autobot Probablities: {author_probas}')
         if author_candidates:
@@ -266,7 +267,7 @@ class CloneusManager():
         
         if not author_choice.isalnum():  
             # failsafe against empty/punctuation brackets
-            author_choice = random.choice(dnames)
+            author_choice = random.choice(auth_cands)
 
         return author_choice
     
