@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from omegaconf import OmegaConf
 
 import cloneus.training.evaluation as meval
-import cloneus.core.paths as cpaths
+from cloneus.types import cpaths
 
 
 def get_cli_args():

@@ -15,7 +15,7 @@ import requests
 from googleapiclient.discovery import build as gbuild, Resource
 from dotenv import load_dotenv
 
-from cloneus.core import paths as cpaths
+from cloneus.types import cpaths
 
 
 YOUTUBE_DATA_DIR = cpaths.DATA_DIR / 'youtube'

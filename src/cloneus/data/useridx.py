@@ -9,7 +9,7 @@ from collections import defaultdict
 
 import unidecode
 
-import cloneus.core.paths as cpaths
+from cloneus.types import cpaths 
 
 USERS_FILEPATH = cpaths.ROOT_DIR/'config/users.json'
 

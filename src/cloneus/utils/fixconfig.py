@@ -8,7 +8,7 @@ import transformers
 from omegaconf import OmegaConf, DictConfig
 
 
-from cloneus.core import paths as cpaths
+from cloneus.types import cpaths
 
 
 
