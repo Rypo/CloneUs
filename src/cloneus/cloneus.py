@@ -25,7 +25,7 @@ import transformers
 from cloneus.data import tokenization, useridx
 from cloneus.plugins import youtube
 from cloneus.inference import genconfig, load as iload
-
+from cloneus.types import BatchGenerationOutput, GenerationOutput
 
 @dataclass
 class ModelPathComponents:
@@ -469,28 +469,28 @@ class Cloneus(GenConfigUtilities):
         return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm, load=True)#.load_model()
             
         
-    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
+    def to_conversation_format(self, chat_history: list[tuple[str,str]]) -> list[dict[str,str]]:
         raise NotImplementedError('Cloneus is designed to be instantiated via Cloneus.from_pretrained')
 
-    def to_text_input(self, author_messages: list[tuple[str,str]], author_seedtext: str|tuple[str,str]=None) -> str:
+    def to_text_input(self, chat_history: list[tuple[str,str]], author_seedtext: str|tuple[str,str]=None) -> str:
         '''Convert author message tuples into a text string, adding seed author text if provided, and applying youtube encoding if enabled'''
-        author_messages = author_messages[:] # shallow copy to avoid mutation
+        chat_history = chat_history[:] # shallow copy to avoid mutation
         if author_seedtext is not None:
-            text = self.to_seeded_text(author_messages, author_seedtext)
+            text = self.to_seeded_text(chat_history, author_seedtext)
         else:
-            text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+            text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
                 
         text = self.ytm.encode(text)
         
     
         return text
     
-    def to_seeded_text(self, author_messages: list[tuple[str,str]], author_seedtext: str|tuple[str,str]):
-        '''Converts to text by applying all normal formatting to author_message + author but strips all formatting after seedtext. 
+    def to_seeded_text(self, chat_history: list[tuple[str,str]], author_seedtext: str|tuple[str,str]):
+        '''Converts to text by applying all normal formatting to chat_history + author but strips all formatting after seedtext. 
         
         This is done so that the model will continue generating from seedtext rather than stopping on a <|eot|> token or postfix.
         '''
-        author_messages = author_messages[:] # shallow copy to avoid mutation
+        chat_history = chat_history[:] # shallow copy to avoid mutation
         if isinstance(author_seedtext, str):
             author_seedtext = (author_seedtext, '')
         
@@ -499,8 +499,8 @@ class Cloneus(GenConfigUtilities):
             seedtext = ''
         
         seedtext_surrogate = '###_dummy_seedtext_###'
-        author_messages += [(author, seedtext_surrogate)]
-        text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+        chat_history += [(author, seedtext_surrogate)]
+        text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
         # split on dummy text to KEEP pre-content formatting but REMOVE post content formatting
         # this effectively removes the tag_sep dependency
         # which is important for models where the role has a special token before the content 
@@ -572,47 +572,54 @@ class Cloneus(GenConfigUtilities):
 
 
     @torch.inference_mode()
-    def author_probabilities(self, author_messages: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
+    def author_probabilities(self, chat_history: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
         '''For each author, return the probability they will be the next to respond given the chat context.
+
+        Args:
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
+            authors: A list of author names to calculate probabilities for. Defaults to all authors in user index if None.
+
+        Returns:
+            A list of tuples containing an author and their probability to be the next to respond.
         '''
-        
+
         # Pros over old method:
         # - It's actually correct (?)
         # - If 2 authors have same first token, it can differentiate between them
-        # - Don't need to worry about splitting name+author_tag in unexpected ways since whole tag is predicted 
+        # - Don't need to worry about splitting name+author_tag in unexpected ways since whole tag is predicted
         # - It will always match one of the authors
-        # - Doesn't depend on generation config settings 
+        # - Doesn't depend on generation config settings
 
         # Cons:
         # - It will always match one of the authors. So unless a name is passed, it can't be predicted.
         # - Its batched, so padding weirdness affects probabilties (this could be changed, but it _needs_ to be as fast as possible)
-        # - There is still potential for weird interaction between tag and chat template if preceding token isn't special (looking at you mistral..) 
+        # - There is still potential for weird interaction between tag and chat template if preceding token isn't special (looking at you mistral..)
         # - Doesn't depend on generation config settings. Can't make the result more interesting by tweaking.
-        
+
         # ref: https://discuss.huggingface.co/t/announcement-generation-get-probabilities-for-generated-output/30075/17
         if authors is None:
             authors = useridx.get_users('dname')
-        
+
         n_author = len(authors)
         author_surrogate = '###_dummy_author_###'
-        base_surrogate = self.to_text_input(author_messages, (author_surrogate, 'ignored'))
-        
+        base_surrogate = self.to_text_input(chat_history, (author_surrogate, 'ignored'))
+
         # we DO want to split out the whole tag, since we are now getting whole tag probablities
         fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag)
         base_input = base_surrogate.split(fmt_auth_surrogate)[0] # do **not** strip. Still manipulating strings
-        
+
         fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in authors]
         tag_lens = torch.as_tensor(self.tokenizer(fmt_atags, add_special_tokens=False, return_length=True).length)
         # print(tag_lens)
         candidate_batch = [base_input + a for a in fmt_atags]
         b_inputs = self.tokenizer(candidate_batch, return_tensors="pt", padding=True, add_special_tokens=False)
-        
+
         b_outputs = self.model(**b_inputs.to(0))
-        
-        # remember - always proba of the *next* token, not current. So need to back step index by 1.
+
+        # Remember - always proba of the *next* token, not current. So need to back step index by 1.
         b_logprobs = torch.log_softmax(b_outputs.logits, dim=-1).detach_()[:, :-1, :]
         b_input_ids = b_inputs.input_ids[:, 1:]#.cpu()
-        
+
         p_author = torch.empty((n_author, tag_lens.max().item()))
         #nindices = []
         for i in range(n_author):
@@ -621,7 +628,7 @@ class Cloneus(GenConfigUtilities):
             cur_name_indices = b_input_ids[i, -tag_lens[i]:, None]
             p_author[i, :tag_lens[i]] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
             #nindices.append(cur_name_indices.squeeze())
-        
+
         #return p_author,nindices
 
         # skipping pre-formatting tokens both gives a better estimate and fixes mistral spacing issues
@@ -664,13 +671,13 @@ class Cloneus(GenConfigUtilities):
         return output_texts,input_len
     
 
-    def _get_batched_inputs(self, author_messages: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str]]:
+    def _get_batched_inputs(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str]]:
         # Need to be a little bit careful about how we combine previous context + author context
         # to_text_input(previous_context) + to_text_input((author,seed)) is not necessarily the same as to_text_input(previous_context+(author,seed))
         # because some chat_templates use index0 or otherwise for special behavior
         # simple but inefficent way is to_text_input(previous_context+(author,seed)) for each author. better way is split and replace
         
-        input_context = self.to_text_input(author_messages, author_seedtext=('###_dummy_author_###','###_dummy_seedtext_###'))
+        input_context = self.to_text_input(chat_history, author_seedtext=('###_dummy_author_###','###_dummy_seedtext_###'))
         
         author_surrogate = useridx.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
         seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
@@ -690,19 +697,20 @@ class Cloneus(GenConfigUtilities):
         return input_context, author_prompts
     
     @torch.inference_mode()
-    def batch_generate(self, author_messages: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str], list[str], int, list[int]]:
-        """Generate responses for a batch of authors, each optionally starting with `reply_seedtext` given the message context history.
+    def batch_generate(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None, return_tuple: bool = False) -> list[str] | BatchGenerationOutput:
+        """Generate responses for a batch of authors, each optionally starting with `seed_text` given the message context history.
 
         Args:
-            author_messages: A list of tuples of unformatted (author name, message) pairs
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
             seed_authors: The list of authors to generate responses for.
-            seed_text: The seed text to start of each author's reponse with.
+            seed_text: The seed text to start off all author's reponses with.
+            return_tuple: If True, return BatchGenerationOutput tuple (input text, list formatted author+seed text, list of output texts, num input tokens, num output tokens for each output)
 
         Returns:
-            A tuple containing the input context, list of formatted author+seedtext inputs, output completion texts, input length, and output lengths.
+            BatchGenerationOutput if `return_tuple`, output text completions for `seed_authors` otherwise.
         """
         
-        input_context,author_prompts = self._get_batched_inputs(author_messages, seed_authors, seed_text=seed_text)
+        input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
 
         true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
         out_texts,input_len = self._batched_helper([input_context+ap for ap in author_prompts], true_batch_generate=true_batched)
@@ -710,21 +718,24 @@ class Cloneus(GenConfigUtilities):
         out_texts = self.cleanup_out_texts(out_texts)
 
         output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
-
-        return input_context, author_prompts, out_texts, input_len, output_lens
+        
+        if return_tuple:
+            return BatchGenerationOutput(input_context, author_prompts, out_texts, input_len, output_lens)
+        return out_texts
    
     @torch.inference_mode()
-    def generate(self, author_messages: list[tuple[str,str]], reply_author: str|tuple[str,str]) -> tuple[str, str, int, int]:
+    def generate(self, chat_history: list[tuple[str,str]], reply_author: str|tuple[str,str], return_tuple: bool = False) -> str | GenerationOutput:
         """Generate a response for `reply_author` given the message context history.
 
         Args:
-            author_messages: A list of tuples of unformatted (author name, message) pairs.
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
             reply_author: The author name to respond as, or a tuple of (author name, seed text) to start the response with.
+            return_tuple: If True, return GenerationOutput tuple (formatted input text, output text, num input tokens, num output tokens)
 
         Returns:
-            A tuple containing the input text with special tokens, output text, input text token length, and output text token length.
+            GenerationOutput if `return_tuple`, output text string otherwise.
         """
-        input_text = self.to_text_input(author_messages, reply_author)
+        input_text = self.to_text_input(chat_history, reply_author)
 
         inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False,)
         input_len = inputs.pop('length')[0].item()
@@ -737,29 +748,31 @@ class Cloneus(GenConfigUtilities):
         # weird NOTE: if custom special tokens, decode skip_special_tokens **must**=FALSE. But encode add_special_tokens = (True | False), doesn't mater will be added regardless
         out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.cfg.has_custom_tokens))
         out_text = self.cleanup_out_texts(out_text)
-
-        return input_text, out_text, input_len, output_len
+        
+        if return_tuple:
+            return GenerationOutput(input_text, out_text, input_len, output_len)
+        return out_text
     
     
     @torch.inference_mode()
-    def stream_generate(self, author_messages: list[tuple[str,str]], reply_author: str|tuple[str,str]):
-        """Generate a streamed response for `reply_author` given the message context history.
+    def stream_generate(self, chat_history: list[tuple[str,str]], reply_author: str|tuple[str,str]):
+        """Streamed version of `.generate()`
 
-        Sets attribute `_last_streamed_values` with inputs and outputs for retrieval with `get_last_streamed()`
+        Sets attribute `_last_streamed_values` with inputs and outputs for retrieval with `.last_streamed()`
         
         Args:
-            author_messages: A list of tuples of unformatted (author name, message) pairs.
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
             reply_author: The author name to respond as, or a tuple of (author name, seed text) to start the response with.
 
         Yields:
-           The next predicted token string.
+           str: The next predicted token string.
         """
         
         # https://huggingface.co/docs/transformers/internal/generation_utils#transformers.TextStreamer
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=(not self.cfg.has_custom_tokens))
 
-        input_text = self.to_text_input(author_messages, reply_author)
+        input_text = self.to_text_input(chat_history, reply_author)
         inputs = self.tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=False)#, max_length=1024, truncation=True)
         input_len = inputs.pop('length')[0].item()
 
@@ -778,13 +791,13 @@ class Cloneus(GenConfigUtilities):
 
     
     @torch.inference_mode()
-    def stream_batch_generate(self, author_messages: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None):
-        """Generate streamed responses for a batch of authors, each optionally starting with `reply_seedtext` given the message context history.
+    def stream_batch_generate(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None):
+        """Streamed version of `.batch_generate()`
 
-        Sets attribute `_last_streamed_batch_values` with inputs and outputs for retrieval with `get_last_streamed(batch=True)`
+        Sets attribute `_last_streamed_batch_values` with inputs and outputs for retrieval with `.last_streamed(batch=True)`
         
         Args:
-            author_messages: A list of tuples of unformatted (author name, message) pairs
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
             seed_authors: The list of authors to generate responses for.
             seed_text: The seed text to start of each author's reponse with.
 
@@ -796,7 +809,7 @@ class Cloneus(GenConfigUtilities):
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
        
-        input_context,author_prompts = self._get_batched_inputs(author_messages, seed_authors, seed_text=seed_text)
+        input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
         
         msg_batch = [input_context+ap for ap in author_prompts]
 
@@ -823,16 +836,32 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_batch_values.update(input_text=input_context, author_prompts=author_prompts, input_len=input_len)
 
 
-    def get_last_streamed(self, batch:bool=False):
+    def last_streamed(self, batch: bool = False, return_tuple: bool = False) -> str | GenerationOutput | list[str] | BatchGenerationOutput:
+        """Retrieve the last streamed generation outputs.
+
+        Args:
+            batch: If True, retrieve outputs from last streamed batch generation, otherwise last generation outputs.
+            return_tuple: If True, return a GenerationOutput or BatchGenerationOutput tuple containing input(s), output(s), and token counts.
+
+        Returns:
+            generation output(s): The last streamed outputs.
+            If `batch` is True returns BatchGenerationOutput if `return_tuple`, list of output text completions otherwise.
+            If `batch` is False returns GenerationOutput tuple if `return_tuple`, output text string otherwise.
+        """
         if batch:
             input_context, author_prompts, model_outputs, input_length, output_lengths = [
                 self._last_streamed_batch_values.get(v) for v in ['input_text', 'author_prompts', 'output_texts', 'input_len', 'output_lens']]
-            return input_context, author_prompts, model_outputs, input_length, output_lengths
-        
+
+            if return_tuple:
+                return BatchGenerationOutput(input_context, author_prompts, model_outputs, input_length, output_lengths)
+            return model_outputs
+
         input_text, model_output, input_length, output_length = [
             self._last_streamed_values.get(v) for v in ['input_text', 'output_text', 'input_len', 'output_len']]
-        return input_text, model_output, input_length, output_length
 
+        if return_tuple:
+            return GenerationOutput(input_text, model_output, input_length, output_length)
+        return model_output
 
     def base_to_conversation_format(self, chat_history: str|list[str], system_prompt:str=None):
         if isinstance(chat_history, str):
@@ -855,25 +884,26 @@ class Cloneus(GenConfigUtilities):
         return input_text
 
     @torch.inference_mode()
-    def base_generate(self, chat_history:str|list[str], system_prompt:str=None) -> tuple[str, str, int, int]:
+    def base_generate(self, messages:str|list[str], system_prompt:str=None, return_tuple: bool = False) -> str | GenerationOutput:
         """Generate a response using the underlying untuned base model.
 
         Note:
             This only works for models with an active peft adapter. 
         
         Args:
-            chat_history: A sequence of alternating user/assistant messages. 
+            messages: An ordered sequence of alternating user/assistant messages. 
             system_prompt: The system prompt message to guide the chat generation.
+            return_tuple: If True, return GenerationOutput tuple (input text, output text, num input tokens, num output tokens)
 
         Returns:
-            A tuple containing the input text, output text, input token length, and output token length.
+            GenerationOutput if `return_tuple`, output text string otherwise.
         """
         # adapters = self.model.active_adapters()
         # self.model.disable_adapters()
         # TODO: Function for base/cloneus hybrid
         # - just user/assistant tags on a trained model. Surprisingly, sort of works to have AI style responsiveness but with custom vernacular
 
-        input_text = self.base_to_conversation_format(chat_history, system_prompt=system_prompt)
+        input_text = self.base_to_conversation_format(messages, system_prompt=system_prompt)
 
         inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)
         input_len = inputs.pop('length')[0].item()
@@ -885,25 +915,26 @@ class Cloneus(GenConfigUtilities):
         output_len = out_tokens.shape[0]
         out_text = self.base_tokenizer.decode(out_tokens, skip_special_tokens=True)
         #self.model.set_adapter(adapters)
-
-        return input_text, out_text, input_len, output_len
+        if return_tuple:
+            return GenerationOutput(input_text, out_text, input_len, output_len)
+        return out_text
     
 
     @torch.inference_mode()
-    def base_stream_generate(self, chat_history:str|list[str], system_prompt:str=None):
-        """Generate a streamed response using the underlying untuned base model.
+    def base_stream_generate(self, messages:str|list[str], system_prompt:str=None):
+        """Streamed version of `.base_generate()`
 
-        Sets attribute `_last_streamed_values` with inputs and outputs for retrieval with `get_last_streamed()`
+        Sets attribute `_last_streamed_values` with inputs and outputs for retrieval with `.last_streamed()`
 
         Note:
             This only works for models with an active peft adapter. 
         
         Args:
-            chat_history: A sequence of alternating user/assistant messages. 
+            messages: An ordered sequence of alternating user/assistant messages. 
             system_prompt: The system prompt message to guide the chat generation.
 
         Yields:
-            The next predicted token string.
+            str: The next predicted token string.
         """
         #adapters = self.model.active_adapters()
         #self.model.disable_adapters()
@@ -912,7 +943,7 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
-        input_text = self.base_to_conversation_format(chat_history, system_prompt=system_prompt)
+        input_text = self.base_to_conversation_format(messages, system_prompt=system_prompt)
         inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)#, max_length=1024, truncation=True)
 
         input_len = inputs.pop('length')[0].item()
@@ -1010,13 +1041,13 @@ class CloneusTag(Cloneus):
         return tokenizer, gen_config, stop_criteria
     
 
-    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
+    def to_conversation_format(self, chat_history: list[tuple[str,str]]) -> list[dict[str,str]]:
         '''For tag only, markup free, format'''
         # why Foundation? : https://crfm.stanford.edu/2021/10/18/reflections.html#:~:text=are%20situated%20in.-,Naming,-The%20name%20%E2%80%9Cfoundation        
         # input_text = ''.join([self.apply_template(a,t, self.cfg.tag_sep, postfix=self.cfg.postfix) for a,t in author_messages])
         chat_content = []
         
-        for author,message in author_messages:
+        for author,message in chat_history:
             role_tag = useridx.format_author_tag(author, self.cfg.author_tag) # for TagFormat, tag_sep is baked in to chat_template via to_jinja_template
             chat_content.append({"role": role_tag, "content": message})
         
@@ -1029,22 +1060,22 @@ class CloneusRole(Cloneus):
     r'''For ChatML models (and possibly other chat formats) trained with a custom chat template. i.e. does not alternate
     user/assistant, instead uses users,names in place of user/assistant. Requires a system message.
     
-    e.g.
+    e.g.::
         <|im_start|>system
-        A conversation between Bob and a well meaning tree<|im_end|>
+         A conversation between Bob and a well meaning tree<|im_end|>
         <|im_start|>Beta (Bob)
-        How's everyone<|im_end|>
+         How's everyone<|im_end|>
         <|im_start|>Groot (Groot)
-        I am Groot<|im_end|>
+         I am Groot<|im_end|>
     '''
-    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:
+    def to_conversation_format(self, chat_history: list[tuple[str,str]]) -> list[dict[str,str]]:
         '''For chatml with custom roles as usernames'''
         chat_content = []
 
         #if self.use_sysprompt:
         chat_content.append({"role": "system", "content": self.cfg.fprompt})
         
-        for author,message in author_messages:
+        for author,message in chat_history:
             role_tag = useridx.format_author_tag(author, self.cfg.author_tag)
             chat_content.append({"role": role_tag, "content": message})
         
@@ -1057,21 +1088,22 @@ class CloneusUA(Cloneus):
     is in the prompt, but apply_chat_template format requires u/a. Typically, this means author_tag will have formatting
     with an explicit USER:user, NAME:name type structure.
     
-    e.g.
+    e.g.::
         [INST] <USER:Alpha, NAME:Alice> hello [/INST]<USER:Beta, NAME:Bob> hi</s>
     
-    e.g.
+    e.g.::
         <|im_start|>user
-        [USER:Beta, NAME:Bob] How's everyone<|im_end|>
+         [USER:Beta, NAME:Bob] How's everyone<|im_end|>
+        
         <|im_start|>assistant
-        [USER:Gamma, NAME:Greg] I am Greg, thanks<|im_end|>
+         [USER:Gamma, NAME:Greg] I am Greg, thanks<|im_end|>
     '''
     def apply_content_prefix(self, author:str, text_content:str, tag_sep:str):
         atag=useridx.format_author_tag(author, self.cfg.author_tag)
         return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
 
 
-    def to_conversation_format(self, author_messages: list[tuple[str,str]]) -> list[dict[str,str]]:        
+    def to_conversation_format(self, chat_history: list[tuple[str,str]]) -> list[dict[str,str]]:        
         chat_content = []
         rolecycle = itertools.cycle(['user','assistant'])
         
@@ -1079,9 +1111,9 @@ class CloneusUA(Cloneus):
             if self.base_has_system:
                 system_message = [{'role':'system', 'content': self.cfg.fprompt}]
             elif isinstance(self.cfg.prompt.append_msg, bool) and self.cfg.prompt.append_msg: # legacy
-                content0 = self.apply_content_prefix(*author_messages[0], tag_sep=self.cfg.tag_sep)
+                content0 = self.apply_content_prefix(*chat_history[0], tag_sep=self.cfg.tag_sep)
                 system_message = [{'role':next(rolecycle), 'content': self.cfg.fprompt + content0}]
-                author_messages = author_messages[1:]
+                chat_history = chat_history[1:]
                 
             elif isinstance(self.cfg.prompt.append_msg, str):
                 system_message = [
@@ -1093,7 +1125,7 @@ class CloneusUA(Cloneus):
             chat_content.extend(system_message)
             
 
-        for auth,msg in author_messages:
+        for auth,msg in chat_history:
             message = self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep)
             chat_content.append({"role": next(rolecycle), "content": message})
         
@@ -1237,12 +1269,12 @@ class CloneusUntuned(CloneusUA):
     #     return chat_content
     
 
-    def to_text_input(self, author_messages: list[tuple[str,str]], author_seedtext: tuple[str,str]=None):
-        author_messages = author_messages[:]
+    def to_text_input(self, chat_history: list[tuple[str,str]], author_seedtext: tuple[str,str]=None):
+        chat_history = chat_history[:]
         if author_seedtext is not None:
-            text = self.to_seeded_text(author_messages, author_seedtext)
+            text = self.to_seeded_text(chat_history, author_seedtext)
         else:
-            text = self.tokenizer.apply_chat_template(self.to_conversation_format(author_messages), tokenize=False, add_generation_prompt=True)
+            text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
         
         # Untuned models will not understand the encoding, so leave youtube as links
         #text = self.ytm.encode(text)

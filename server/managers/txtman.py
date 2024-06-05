@@ -275,7 +275,7 @@ class CloneusManager():
     @async_wrap_thread
     def _base_generate(self, text_inputs:list[str], system_prompt:str = None):
         """Generate a response."""
-        input_text, model_output, input_length, output_len = self.clo.base_generate(text_inputs, system_prompt)
+        input_text, model_output, input_length, output_len = self.clo.base_generate(text_inputs, system_prompt, return_tuple=True)
         return input_text, model_output, input_length, output_len
     
     async def base_generate(self, ctx, text_inputs:list[str], system_prompt:str = None):
@@ -334,7 +334,7 @@ class CloneusManager():
             
             messages[cidx] = await messages[cidx].edit(content=updated_content)
             
-        input_text, model_output, input_length, output_length = self.clo.get_last_streamed(batch=False)
+        input_text, model_output, input_length, output_length = self.clo.last_streamed(batch=False, return_tuple=True)
         discord_outs = [model_output]
         
         #msg = await msg.edit(content=discord_outs[0])
@@ -350,13 +350,13 @@ class CloneusManager():
     @async_wrap_thread
     def generate(self, llm_input_messages: list[tuple], author:str, seed_text:str):
         """Generate a response."""
-        input_text, model_output, input_length, output_len = self.clo.generate(llm_input_messages, (author, seed_text))
+        input_text, model_output, input_length, output_len = self.clo.generate(llm_input_messages, (author, seed_text), return_tuple=True)
         return input_text, model_output, input_length, output_len
         
     @async_wrap_thread
     def batch_generate(self, llm_input_messages: list[tuple], authors: list[str], seed_text: str):
         """Generate a batch of response."""        
-        base_input_text, author_prompts, model_outputs, input_length, output_lengths = self.clo.batch_generate(llm_input_messages, authors, seed_text)
+        base_input_text, author_prompts, model_outputs, input_length, output_lengths = self.clo.batch_generate(llm_input_messages, authors, seed_text, return_tuple=True)
         return base_input_text, author_prompts, model_outputs, input_length, output_lengths
 
     
@@ -521,7 +521,7 @@ class CloneusManager():
             for updated_content in await self.streaming_generate(llm_input_messages, author, seed_text):                
                 msg = await msg.edit(content=author_tag_prefix+updated_content)
                 
-            input_text, model_output, input_length, output_length = self.clo.get_last_streamed(batch=False)
+            input_text, model_output, input_length, output_length = self.clo.last_streamed(batch=False ,return_tuple=True)
             discord_outs = [self.to_discord_output(model_output, author, seed_text)]
             
             msg = await msg.edit(content=discord_outs[0])
@@ -540,7 +540,7 @@ class CloneusManager():
                 messages[auth_idx] = await messages[auth_idx].edit(content=author_tag_prefixes[auth_idx]+updated_content)
 
 
-            base_input_text, author_prompts, model_outputs, input_length, output_lengths = self.clo.get_last_streamed(batch=True)
+            base_input_text, author_prompts, model_outputs, input_length, output_lengths = self.clo.last_streamed(batch=True, return_tuple=True)
             discord_outs = [self.to_discord_output(model_output, author, seed_text) for model_output,author in zip(model_outputs, authors)]
             for msg, discord_out in zip(messages, discord_outs):
                 msg = await msg.edit(content=discord_out)

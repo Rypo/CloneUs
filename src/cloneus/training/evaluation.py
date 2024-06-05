@@ -83,7 +83,7 @@ def eval_ckpt(clo:Cloneus, checkpoint_path:Path, genconfig_modes:list[str], prom
         for prompt in tqdm(prompts, leave=False):
             seed_everything(42)
 
-            input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
+            input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '', return_tuple=True)
             outputs='\n'.join([atag+'⋙'+repr(text) for atag,text in zip(author_prompts,out_texts)])
             
             input_line = textborder('INPUT: '+ repr(input_text), '=', 88, 0)
@@ -174,13 +174,13 @@ def eval_params(model_path, param_grid, prompts:list[str], outfile='test_params.
     outfile = clo.path_data.run_path/outfile
     with open(outfile, 'w') as f:
         for prompt in prompts:
-            input_text, _, _, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
+            input_text, _, _, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '', return_tuple=True)
             f.write(textborder('INPUT: '+ repr(input_text), '=', 88, 0))
             for pset in param_sets:
                 f.write('\n'+ json.dumps(pset))
                 delt=clo.set_genconfig(save_on_change=False, **pset)
                 seed_everything(42)
             
-                input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '')
+                input_text, author_prompts, out_texts, _, _ = clo.batch_generate([(question_author, prompt)], author_list, '', return_tuple=True)
                 outputs='\n'.join([repr(atag+'⋙'+text) for atag,text in zip(author_prompts,out_texts)])
                 f.write('\n'+outputs+'\n')
