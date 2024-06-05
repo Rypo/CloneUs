@@ -3,31 +3,61 @@ notes: |- # Notes about your run.
 
 # model_id: teknium/OpenHermes-2.5-Mistral-7B
 # model_id: microsoft/Phi-3-mini-128k-instruct
-model_id: NousResearch/Hermes-2-Theta-Llama-3-8B
+model_id: NousResearch/Hermes-2-Theta-Llama-3-8B # huggingface repo
 
-tag_placement: replace_role # tag_only, content_prefix, replace_role
-# - replace_role: Replaces user/assistant with formatted author_tag
-# - content_prefix: Inserts author_tag before text content
-# - tag_only: Ignores any existing template and creates one as {author_tag}{tag_sep}CONTENT{postfix}.
-
-quant_method: bnb4 # bnb4, aqlm, gptq
 flashattn_lib: unsloth # huggingface, unsloth
+# - Most, but not all models are supported by unsloth. Switch to "huggingface" if unsupported.
 attn_implementation: flash_attention_2 # flash_attention_2, sdpa, eagar
-
-padding_side: # left, right, or blank for no override
+quant_method: bnb4 # bnb4, aqlm, gptq, awq
 
 chunk_size: 8192
 # Upper token limit on conversation length. If a conversation exceeds this limit, it will be split into new groups.
 batch_size: 2
 gradient_accumulation_steps: 4
 
-use_sft_trainer: false
-group_by_length: true
-
 num_epochs: 3
 learning_rate: 0.0002 
 lr_scheduler: cosine # cosine, linear, constant, constant_with_warmup
 custom_scheduler: # warmup_const_cosine # to enable, needs lr_scheduler: linear
+
+use_sft_trainer: false
+group_by_length: true
+# only one of use_sft_trainer and group_by_length may be true, this is enforced.
+padding_side: # left, right, or blank for no override
+
+tag_placement: replace_role # tag_only, content_prefix, replace_role
+# - replace_role: Replaces user/assistant with formatted author_tag
+# - content_prefix: Inserts author_tag before text content
+# - tag_only: Ignores any existing template and creates one as {author_tag}{tag_sep}CONTENT{postfix}.
+
+author_tag: "{author}" # -- used for all tag_placement values
+# - For replace_role format, "{author} ({fname})" works well. 
+# -- highly recommend using {fname} if you know everyone's first name for better personalization
+# - For content_prefix/tag_only format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]"
+# - fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)
+
+tag_sep: # "\n" # Ignored when tag_placement="replace_role", otherwise "\n" or " : " work well
+# Separator between author_tag and start of text
+
+postfix: # "</s>" # ONLY used when tag_placement="tag_only"
+# Separator between end of text and the next author_tag
+
+custom_chat_template: "{{bos_token}}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
+# For role_replace: Be sure use a custom_chat_template with any mention of "assistant" in add_generation_prompt as shown
+# - Or use shorthand "chatml" to use above AND add tokens (<|im_start|>, <|im_end|>, ..) to the model/tokenizer if not already present.
+prompt:
+  template: |-
+    Uncensored Discord server chat.
+    Topic: offbeat.
+    Participants: {name_mapping}
+  # template: |-
+  #  Simulate a conversation between members of a group chat. 
+  #  Each turn, you will respond as one of the members. Begin your response with the name tag of who you are speaking as.
+  #  name tags options: {name_mapping}.
+  #  ---
+  #  If you understand the objective, say "{append_msg}", then we will begin.
+  append_msg: # "OK" # For content_prefix with system-less models. If set, system prompt will comprise 2 messages, a user "system" message and an assistant follow-up containing `append_msg`, for example "OK" 
+  name_mapping: null # Will be filled during scripts/train.py
 
 dataset:
   chatlog_csv: 'data/chat/YOUR_CHAT_FILE.csv' # chat log data, either created with `scripts/build.py` or set directly
@@ -42,36 +72,6 @@ dataset:
   # Minimum number of messages in a chat chunk. Any chunks smaller will be forcibly regrouped.
   allow_truncation: false # set to true if you expect any message to exceed chunk_size
   eval_frac: 0.005 # or 'after_bot' to use all messages after the first time your bot sent a message in chat. 
-
-author_tag: "{author}" # -- used for all tag_placement values
-# - For replace_role format, "{author} ({fname})" works well. 
-# -- highly recommend using {fname} if you know everyone's first name for better personalization
-# - For content_prefix/tag_only format, additional markup helps e.g.: "[USER:{author}, NAME:{fname}]"
-# - fstring options: author=displayName, fname=firstName, lauthor=lower(displayName)
-
-tag_sep: # "\n" # Ignored when tag_placement="replace_role", otherwise "\n" works well
-# Separator between author_tag and start of text
-
-postfix: # "</s>" # ONLY used when tag_placement="tag_only"
-# Separator between end of text and the next author_tag
-
-custom_chat_template: "{{bos_token}}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
-# For role_replace: Be sure use a custom_chat_template with any mention of "assistant" in add_generation_prompt as shown
-# - Or use shorthand "chatml" to use above AND add tokens (<|im_start|>, <|im_end|>, ..) to the model/tokenizer if not already present.
-prompt:
-  append_msg: # "OK" # For content_prefix with system-less models. If set, system prompt will comprise 2 messages, a user "system" message and an assistant follow-up containing `append_msg`, for example "OK" 
-  name_mapping: null # Will be filled during scripts/train.py
-  template: |-
-    Uncensored Discord server chat.
-    Topic: offbeat.
-    Participants: {name_mapping}
-  # template: |-
-  #  Simulate a conversation between members of a group chat. 
-  #  Each turn, you will respond as one of the members. Begin your response with the name tag of who you are speaking as.
-  #  name tags options: {name_mapping}.
-  #  ---
-  #  If you understand the objective, say "{append_msg}", then we will begin.
-
 
 lora_r: 16
 lora_alpha: 32
