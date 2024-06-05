@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name = 'cloneus',
-    version='0.0.1',
+    version='0.0.2',
     author='Rypo',
     keywords="LLM, multi-user RP finetuning, discord, AI, chatbot",
     package_dir={"": "src"},
