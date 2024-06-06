@@ -656,9 +656,9 @@ class TextGen(commands.Cog, SetConfig):
             prompt: The base simple prompt to add details to
         '''
         # https://github.com/TencentQQGYLab/ELLA?tab=readme-ov-file#1-caption-upscale
-        instr = ('Please generate the long prompt version of the short one according to the given examples. '
-                'Long prompt version should consist of 3 to 5 sentences. Long prompt version must specify the color, shape, texture or spatial relation of the included objects. '
-                'DO NOT generate sentences that describe any atmosphere!!!')
+        instr = ('Generate the long prompt version of the short one according to the given examples. '#'Please generate the long prompt version of the short one according to the given examples. '
+                'Long prompt version should consist of 3 to 5 sentences that enrich the short prompt. Long prompt version must specify the color, shape, texture or spatial relation of the included objects. ')
+                #'DO NOT generate sentences that describe any atmosphere!!!')
         
         samples = [
             {'short':'A calico cat with eyes closed is perched upon a Mercedes.',
