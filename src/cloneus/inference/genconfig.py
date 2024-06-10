@@ -19,6 +19,7 @@ class GenOpts:
     temperature: float = 0.8 # 'default': 1.0,
     top_k: int = 50
     top_p: float = 1.0
+    min_p: float = None
     penalty_alpha: float = None
     low_memory: bool = None
     do_sample: bool = True # 'default': False,
@@ -61,8 +62,6 @@ class GenOptsExtended(GenOpts):
 
     smoothing_factor: float = 0
     smoothing_curve: float = 1
-    
-    min_p: float = 0
 
     frequency_penalty: float | None = 0
     presence_penalty: float | None = 0

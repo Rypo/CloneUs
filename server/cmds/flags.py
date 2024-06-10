@@ -18,6 +18,7 @@ class GenerationFlags(commands.FlagConverter):
     temperature: Range[float, 0, ]              = commands.flag(default=None, description='Controls randomness. > 1 = more random. < 1 = less random (default: 1.0)') # Modulation value for next token probabilities 
     top_k: Range[int, 0, ]                      = commands.flag(default=None, description='Fixed number of highest proba words to sample from (default: 50)')
     top_p: Range[float, 0, 1]                   = commands.flag(default=None, description='Dynamic number of highest proba words to sample from. Take while sum probas<top_p (default: 1.0)')
+    min_p: Range[float, 0, 1]                   = commands.flag(default=None, description='Discard words with proba < (min_p) * max(proba words) (default: 0)') # 0
     
     do_sample: bool                             = commands.flag(default=None, description='Whether to use sampling or decoding. CS=False, MS=True (default: True)')
     penalty_alpha: Range[float, 0,]             = commands.flag(default=None, description='For Contrastive Search (CS). Balance model confidence and degeneration (default: 0.6)')
@@ -69,7 +70,6 @@ class GenerationExtendedFlags(commands.FlagConverter):
     smoothing_factor: Range[float, 0, ]     = commands.flag(default=None, description='Enable Quadratic Sampling. 0<val<1 = even out probas. val>1 most likely more likely (default: 0)') # 0
     smoothing_curve: Range[float, 1, ]      = commands.flag(default=None, description='Quadratic Sampling dropoff curve factor (default: 1)') # 1
     
-    min_p: Range[float, 0, 1]               = commands.flag(default=None, description='Discard words with proba < (min_p) * max(proba words) (default: 0)') # 0
     top_a: Range[float, 0, 1]               = commands.flag(default=None, description='Discard words with proba < (top_a) * max(proba words)^2 (default: 0)') # 0
     tfs: Range[float, 0, 1]                 = commands.flag(default=None, description='Discard long tail proba words (lower than others). Closer to 0 = more discarded (default: 1)') # 1
     

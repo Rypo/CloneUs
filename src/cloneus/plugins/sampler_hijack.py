@@ -124,34 +124,34 @@ class QuadraticSamplingLogitsWarper(LogitsWarper):
         return transformed_logits
 
 
-class MinPLogitsWarper(LogitsWarper):
-    def __init__(self, min_p: float, filter_value: float = -float("Inf"), min_tokens_to_keep: int = 1):
-        if min_p < 0 or min_p > 1.0:
-            raise ValueError(f"`min_p` has to be a float >= 0 and <= 1, but is {min_p}")
-        self.min_p = min_p
-        self.filter_value = filter_value
-        self.min_tokens_to_keep = min_tokens_to_keep
+# class MinPLogitsWarper(LogitsWarper):
+#     def __init__(self, min_p: float, filter_value: float = -float("Inf"), min_tokens_to_keep: int = 1):
+#         if min_p < 0 or min_p > 1.0:
+#             raise ValueError(f"`min_p` has to be a float >= 0 and <= 1, but is {min_p}")
+#         self.min_p = min_p
+#         self.filter_value = filter_value
+#         self.min_tokens_to_keep = min_tokens_to_keep
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        # Convert logits to probabilities
-        probs = torch.softmax(scores, dim=-1)
-        # Get the probability of the top token for each sequence in the batch
-        top_probs, _ = probs.max(dim=-1, keepdim=True)
-        # Calculate the actual min_p threshold by scaling min_p with the top token's probability
-        scaled_min_p = self.min_p * top_probs
-        # Create a mask for tokens that have a probability less than the scaled min_p
-        tokens_to_remove = probs < scaled_min_p
+#     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+#         # Convert logits to probabilities
+#         probs = torch.softmax(scores, dim=-1)
+#         # Get the probability of the top token for each sequence in the batch
+#         top_probs, _ = probs.max(dim=-1, keepdim=True)
+#         # Calculate the actual min_p threshold by scaling min_p with the top token's probability
+#         scaled_min_p = self.min_p * top_probs
+#         # Create a mask for tokens that have a probability less than the scaled min_p
+#         tokens_to_remove = probs < scaled_min_p
 
-        sorted_indices = torch.argsort(scores, descending=True, dim=-1)
-        sorted_indices_to_remove = torch.gather(tokens_to_remove, dim=-1, index=sorted_indices)
+#         sorted_indices = torch.argsort(scores, descending=True, dim=-1)
+#         sorted_indices_to_remove = torch.gather(tokens_to_remove, dim=-1, index=sorted_indices)
 
-        if self.min_tokens_to_keep > 1:
-            # Keep at least min_tokens_to_keep
-            sorted_indices_to_remove[..., : self.min_tokens_to_keep] = False
+#         if self.min_tokens_to_keep > 1:
+#             # Keep at least min_tokens_to_keep
+#             sorted_indices_to_remove[..., : self.min_tokens_to_keep] = False
 
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-        scores = scores.masked_fill(indices_to_remove, self.filter_value)
-        return scores
+#         indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+#         scores = scores.masked_fill(indices_to_remove, self.filter_value)
+#         return scores
 
 
 class TailFreeLogitsWarper(LogitsWarper):
@@ -352,13 +352,13 @@ def get_logits_warper_patch(self, generation_config):
             )
         )
 
-    if generation_config.min_p is not None and 0.0 < generation_config.min_p <= 1.0:
-        warpers_to_add.append(
-            MinPLogitsWarper(
-                min_p=generation_config.min_p,
-                min_tokens_to_keep=min_tokens_to_keep
-            )
-        )
+    # if generation_config.min_p is not None and 0.0 < generation_config.min_p <= 1.0:
+    #     warpers_to_add.append(
+    #         MinPLogitsWarper(
+    #             min_p=generation_config.min_p,
+    #             min_tokens_to_keep=min_tokens_to_keep
+    #         )
+    #     )
 
     if generation_config.dynamic_temperature:
         warpers_to_add.append(
@@ -411,7 +411,7 @@ def get_logits_warper_patch(self, generation_config):
         'DynamicTemperatureLogitsWarper': 'dynamic_temperature',
         'EpsilonLogitsWarper': 'epsilon_cutoff',
         'EtaLogitsWarper': 'eta_cutoff',
-        'MinPLogitsWarper': 'min_p',
+        # 'MinPLogitsWarper': 'min_p',
         'MirostatLogitsWarper': 'mirostat',
         'QuadraticSamplingLogitsWarper': 'quadratic_sampling',
         'TailFreeLogitsWarper': 'tfs',
@@ -463,7 +463,7 @@ def get_logits_processor_patch(self, **kwargs):
 
 def generation_config_init_patch(self, **kwargs):
     self.__init___old(**kwargs)
-    self.min_p = kwargs.pop("min_p", 0.0)
+    # self.min_p = kwargs.pop("min_p", 0.0)
     self.dynamic_temperature = kwargs.pop("dynamic_temperature", False)
     self.dynatemp_low = kwargs.pop("dynatemp_low", 1)
     self.dynatemp_high = kwargs.pop("dynatemp_high", 1)
