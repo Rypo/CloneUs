@@ -220,6 +220,7 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         await ctx.defer()
         await self.clomgr.load(genmap[version.value], gen_config='best_generation_config.json')
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')
+        await self.clomgr.bot.report_state('chat', ready=True)
     
     @setarg.command(name='randomode')
     async def set_randomode(self, ctx: commands.Context, change_rate: int = 5, fast_proba: float = 0.5, announce:bool=True):
