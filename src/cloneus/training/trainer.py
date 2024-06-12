@@ -120,6 +120,7 @@ def get_sft_trainer(model, data, tokenizer, args, peft_config, callbacks=None, m
         peft_config=peft_config,
         dataset_text_field="text",
         packing=True,
+        eval_packing=False,
         #formatting_func=formatfunc,
         max_seq_length=max_packed_seqlength,
         callbacks=callbacks,
