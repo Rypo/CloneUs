@@ -18,6 +18,9 @@ from diffusers import (
     DiffusionPipeline, 
     StableDiffusionXLPipeline, 
     StableDiffusionXLImg2ImgPipeline, 
+    StableDiffusion3Pipeline,
+    StableDiffusion3Img2ImgPipeline,
+    SD3Transformer2DModel,
     DPMSolverMultistepScheduler, 
     DPMSolverSinglestepScheduler,
     UNet2DConditionModel, 
@@ -62,6 +65,7 @@ def print_memstats(label:str):
 
 def torch_compile_flags(restore_defaults=False, verbose=False):
     # https://huggingface.co/docs/diffusers/tutorials/fast_diffusion#use-faster-kernels-with-torchcompile
+    torch.set_float32_matmul_precision("high")
     if verbose:
         print('init _inductor config:')
         print('{c.conv_1x1_as_mm}, {c.coordinate_descent_tuning}, {c.epilogue_fusion}, {c.coordinate_descent_check_all_directions}'.format(c=torch._inductor.config))
@@ -774,8 +778,76 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
             offload=offload,
             scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
         )
+# https://huggingface.co/stabilityai/stable-diffusion-3-medium
+# https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers
+class SD3MediumManager(OneStageImageGenManager):
+    def __init__(self, offload=True):
+        super().__init__(
+            model_name = 'sd3_medium',
+            model_path = 'stabilityai/stable-diffusion-3-medium-diffusers',
+            config = DiffusionConfig(
+                steps = CfgItem(28, bounds=(24,42)),
+                guidance_scale = CfgItem(7.0, bounds=(5,10)), 
+                strength = CfgItem(0.55, bounds=(0.3, 0.9)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+            #scheduler_callback = lambda: DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False)
+        )
     
-# https://huggingface.co/ByteDance/SDXL-Lightning
+    @async_wrap_thread
+    def load_pipeline(self):
+        pipeline_loader = (SD3Transformer2DModel.from_single_file if self.model_path.endswith('.safetensors') 
+                           else StableDiffusion3Pipeline.from_pretrained)
+
+        self.base: StableDiffusion3Pipeline = pipeline_loader(
+            self.model_path, torch_dtype=torch.bfloat16,  use_safetensors=True, #add_watermarker=False,
+        )
+        if self._scheduler_callback is not None:
+            self.base.scheduler = self._scheduler_callback()
+        
+        if self.offload:
+            self.base.enable_model_cpu_offload()
+        else:
+            self.base = self.base.to("cuda")
+        
+        self.compeler = None # Unsupported
+
+        self.basei2i: StableDiffusion3Img2ImgPipeline = StableDiffusion3Img2ImgPipeline.from_pipe(self.base,)
+        
+        if not self.offload:
+            self.basei2i = self.basei2i.to("cuda")
+        
+        
+        self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
+        # self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
+        
+        self.is_ready = True
+    
+    # Unsupported
+    def embed_prompts(self, prompt:str, negative_prompt:str = None):
+        return  dict(prompt=prompt, negative_prompt=negative_prompt)
+    # Unsupported
+    def dc_fastmode(self, enable:bool, img2img=False):
+        return
+    
+    @async_wrap_thread
+    def compile_pipeline(self):
+        # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
+        # - https://huggingface.co/docs/diffusers/optimization/torch2.0#torchcompile
+        # https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3#using-torch-compile-to-speed-up-inference
+        torch_compile_flags()
+        self.base.transformer.to(memory_format=torch.channels_last)
+        self.base.vae.to(memory_format=torch.channels_last)
+        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
+        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
+        
+        for _ in range(3):
+            _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
+        self.is_compiled = True
+    
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
@@ -793,6 +865,10 @@ AVAILABLE_MODELS = {
     'juggernaut_lightning': {
         'manager': JuggernautXLLightningManager,
         'desc': 'Juggernaut XL Lightning (M, fast)'
+    },
+    'sd3_medium': {
+        'manager': SD3MediumManager,
+        'desc': 'SD3 Medium (Lg, slow)'
     },
 }
 

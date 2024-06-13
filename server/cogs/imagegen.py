@@ -117,7 +117,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
     
     def __init__(self, bot: BotUs):
         self.bot = bot
-        self.igen = imgman.JuggernautXLLightningManager(offload=True)
+        self.igen = imgman.SD3MediumManager(offload=True)
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
