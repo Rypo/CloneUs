@@ -182,7 +182,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     
     @commands.command(name='imgup', aliases=['iup','imageup'])
     async def imgup(self, ctx: commands.Context):
-        '''Loads in the image generation model'''
+        '''Loads in the default image generation model'''
         msg = None
         if not self.igen.is_ready:
             msg = await ctx.send('Warming up drawing skills...', silent=True)
@@ -198,7 +198,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
     @commands.command(name='imgdown', aliases=['idown','imagedown'])
     async def imgdown(self, ctx: commands.Context):
-        '''Unloads the image generation model'''
+        '''Unloads the current image generation model'''
         await self.igen.unload_pipeline()
         await self.bot.report_state('chat', ready=False)
         await ctx.send('Drawing disabled.')
@@ -225,8 +225,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     @commands.hybrid_command(name='draw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _draw(self, ctx: commands.Context, prompt:commands.Range[str,1,1000], *, flags: cmd_flags.DrawFlags):
-        """
-        Generate an image from a text prompt description.
+        """Generate an image from a text prompt description.
 
         Args:
             prompt: A description of the image to be generated.
@@ -287,8 +286,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: commands.Range[str,1,1000], *, flags: cmd_flags.RedrawFlags):
-        """
-        Remix an image from a text prompt and image.
+        """Remix an image from a text prompt and image.
 
         Args:
             imgfile: image attachment. Square = Best results. Ideal size= 1024x1024 (Turbo ideal= 512x512).

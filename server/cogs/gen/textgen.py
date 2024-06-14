@@ -234,7 +234,7 @@ class TextGen(commands.Cog, SetConfig):
 
     @commands.hybrid_command(name='showmodels')
     async def show_models(self, ctx: commands.Context, name_filter: str = None):
-        '''Show a list of available models
+        '''Show a list of available chat models
         
         You can pass `.`, `..`, or `...` to see models in the same family as the currently active model.
         Args:
