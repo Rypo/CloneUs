@@ -1,10 +1,5 @@
-import os
-import gc
 import re
 import io
-import math
-import time
-import random
 
 import typing
 import asyncio
@@ -14,8 +9,7 @@ from pathlib import Path
 
 import discord
 from discord import app_commands
-from discord.app_commands.translator import locale_str
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 from diffusers.utils import load_image, make_image_grid
 
@@ -112,7 +106,52 @@ async def read_attach(ctx: commands.Context):
         return
 
 
-class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
+class SetImageConfig:
+    bot: BotUs
+    igen: imgman.OneStageImageGenManager
+
+    def argsettings(self):
+        return [
+            ('Image Seed', self.igen.global_seed,''),
+         ]
+    
+    @commands.hybrid_group(name='iset')#, fallback='arg')#, description='Quick set a value', aliases=[])
+    async def isetarg(self, ctx: commands.Context):
+        '''(GROUP). call `!help set` to see sub-commands.'''
+        if ctx.invoked_subcommand is None:
+            await ctx.send(f"{ctx.subcommand_passed} does not belong to iset")
+    
+    @isetarg.command(name='model', aliases=['artist',])
+    @app_commands.choices(model=cmd_choices.IMAGE_MODELS)
+    async def iset_model(self, ctx: commands.Context, model: app_commands.Choice[str], offload: bool=True):
+        '''Loads in the image generation model
+        
+        Args:
+            model: Image model name
+            offload: If True, model will be moved off GPU when not in use to save vRAM 
+        '''
+        if self.igen.model_name != model.value:
+            await self.igen.unload_pipeline()
+            
+            self.igen = imgman.AVAILABLE_MODELS[model.value]['manager'](offload=offload)
+            return await self.imgup(ctx)
+        elif not self.igen.is_ready:
+            return await self.imgup(ctx)
+        else:
+            await ctx.send(f'{model.name} already up')
+
+    @isetarg.command(name='seed', aliases=['iseed','imgseed', 'imageseed'])
+    async def iset_seed(self, ctx: commands.Context, seed:int = None):
+        '''Set image model seed for deterministic output
+        
+        Args:
+            seed: A number to seed generation for all future outputs  
+        '''
+        self.igen.set_seed(seed=seed)
+        return await ctx.send(f'Global image seed set to {seed}. Welcome to the land of {"non-" if seed is None else ""}determinisim')
+
+
+class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='img'
     '''Suite of tools for generating images.'''
     
     def __init__(self, bot: BotUs):
@@ -131,15 +170,9 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
         
         cmds_logger.info(f'(cog_after_invoke, {self.qualified_name})'
                          '- [{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args))
-    
-    @commands.command(name='iseed', aliases=['imgseed', 'imageseed'])
-    async def iseed(self, ctx: commands.Context, seed:int = None):
-        '''Set image model seed for deterministic output'''
-        self.igen.set_seed(seed=seed)
-        return await ctx.send(f'Global image seed set to {seed}. Welcome to the land of {"non-" if seed is None else ""}determinisim')
-    
-    @commands.command(name='iinfo', aliases=['imginfo', 'imageinfo'])
-    async def iinfo(self, ctx: commands.Context):
+        
+    @commands.command(name='istatus', aliases=['iinfo','imginfo', 'imageinfo'])
+    async def istatus_report(self, ctx: commands.Context):
         '''Display image model info'''
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         msg = model_alias + '\n' + f'Image Seed: {self.igen.global_seed}'
@@ -163,34 +196,14 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
         return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
         
-    
     @commands.command(name='imgdown', aliases=['idown','imagedown'])
     async def imgdown(self, ctx: commands.Context):
         '''Unloads the image generation model'''
         await self.igen.unload_pipeline()
         await self.bot.report_state('chat', ready=False)
         await ctx.send('Drawing disabled.')
-            
-    @commands.hybrid_command(name='artist')
-    @app_commands.choices(model=cmd_choices.IMAGE_MODELS)
-    async def artist(self, ctx: commands.Context, model: app_commands.Choice[str], offload: bool=True):
-        '''Loads in the image generation model
-        
-        Args:
-            model: Image model name
-            offload: If True, model will be moved off GPU when not in use to save vRAM 
-        '''
-        if self.igen.model_name != model.value:
-            await self.igen.unload_pipeline()
-            
-            self.igen = imgman.AVAILABLE_MODELS[model.value]['manager'](offload=offload)
-            return await self.imgup(ctx)
-        elif not self.igen.is_ready:
-            return await self.imgup(ctx)
-        else:
-            await ctx.send(f'{model.name} already up')
-        
-    
+                
+
     @commands.command(name='optimize', aliases=['compile'])
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def optimize(self, ctx: commands.Context):
@@ -198,7 +211,8 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
         if self.igen.is_compiled:
             return await ctx.send('Already going brrrrr')
-        
+        if self.igen.offload:
+            return await ctx.send("Can't go brrrrr when model is offloaded. Call `iset model` with `offload=False`")
         msg = await ctx.send("Sit tight. This'll take 2-4 minutes...")
 
         await ctx.defer()
@@ -210,7 +224,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
     @commands.hybrid_command(name='draw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _draw(self, ctx: commands.Context, prompt:str, *, flags: cmd_flags.DrawFlags):
+    async def _draw(self, ctx: commands.Context, prompt:commands.Range[str,1,1000], *, flags: cmd_flags.DrawFlags):
         """
         Generate an image from a text prompt description.
 
@@ -272,7 +286,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: str, *, flags: cmd_flags.RedrawFlags):
+    async def _redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: commands.Range[str,1,1000], *, flags: cmd_flags.RedrawFlags):
         """
         Remix an image from a text prompt and image.
 
@@ -345,7 +359,7 @@ class ImageGen(commands.Cog): #commands.GroupCog, group_name='img'
 
     @commands.hybrid_command(name='hd')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def hd_upsample(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: str = None, *, flags: cmd_flags.UpsampleFlags, ):
+    async def hd_upsample(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: commands.Range[str,None,1000] = None, *, flags: cmd_flags.UpsampleFlags, ):
         """Make an image HD (big n' smooooth).
         
         Args:
