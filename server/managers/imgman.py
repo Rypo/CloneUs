@@ -594,7 +594,7 @@ class SD3MediumManager(OneStageImageGenManager):
             config = DiffusionConfig(
                 steps = CfgItem(28, bounds=(24,42)),
                 guidance_scale = CfgItem(7.0, bounds=(5,10)), 
-                strength = CfgItem(0.85, bounds=(0.3, 0.95)),
+                strength = CfgItem(0.65, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
                 locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
