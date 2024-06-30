@@ -24,7 +24,8 @@ from diffusers import (
     DPMSolverMultistepScheduler, 
     DPMSolverSinglestepScheduler,
     UNet2DConditionModel, 
-    EulerDiscreteScheduler
+    EulerDiscreteScheduler,
+    EulerAncestralDiscreteScheduler,
 )
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -225,7 +226,7 @@ def calc_esteps(num_inference_steps:int, strength:float, min_effective_steps:int
     return num_inference_steps
 
 class OneStageImageGenManager:
-    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_callback:typing.Callable=None):
+    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_callback:typing.Callable=None, clip_skip:int=None):
         self.is_compiled = False
         self.is_ready = False
         self.dc_enabled = None
@@ -238,6 +239,7 @@ class OneStageImageGenManager:
         # https://huggingface.co/docs/diffusers/v0.26.3/en/api/schedulers/overview#schedulers
         # DPM++ SDE == DPMSolverSinglestepScheduler
         # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
+        self.clip_skip = clip_skip
         self.global_seed = None
     
     def set_seed(self, seed:int|None = None):
@@ -258,7 +260,7 @@ class OneStageImageGenManager:
         )
         if self._scheduler_callback is not None:
             self.base.scheduler = self._scheduler_callback()
-        
+        #self.base.load_lora_weights(cpaths.ROOT_DIR/'extras/loras', weight_name='detail-tweaker-xl.safetensors', adapter_name='add_detail')
         if self.offload:
             self.base.enable_model_cpu_offload()
         else:
@@ -361,7 +363,7 @@ class OneStageImageGenManager:
         if image is None: 
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings).images[0] # , generator=self.generator, num_images_per_prompt=4
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings,).images[0] # cross_attention_kwargs={"scale": 1.0}, generator=self.generator, num_images_per_prompt=4
             #return make_image_grid(imgs, 2, 2)
             t_main = time.perf_counter()
             print_memstats('draw')
@@ -385,7 +387,9 @@ class OneStageImageGenManager:
             print_memstats('upscale')
             release_memory()
             
-            num_inference_steps = calc_esteps(-1, refine_strength, min_effective_steps=refine_steps)            
+            # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
+            # num_inference_steps = calc_esteps(-1, refine_strength, min_effective_steps=refine_steps)
+            num_inference_steps = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)
             image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
             t_re = time.perf_counter()
             print_memstats('refine')
@@ -655,23 +659,80 @@ class SD3MediumManager(OneStageImageGenManager):
             _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
         self.is_compiled = True
     
+class ColorfulXLLightningManager(OneStageImageGenManager):
+    def __init__(self, offload=True):
+        super().__init__( # https://huggingface.co/recoilme/ColorfulXL-Lightning
+            model_name = 'colorfulxl_lightning', # https://civitai.com/models/388913/colorfulxl-lightning
+            model_path = 'recoilme/ColorfulXL-Lightning',  
+            
+            config = DiffusionConfig(
+                steps = CfgItem(9, bounds=(4,10)), # https://imgsys.org/rankings
+                guidance_scale = CfgItem(1.5, bounds=(0,2.0)),
+                strength = CfgItem(0.85, bounds=(0.3, 0.95)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                aspect='square',#'portrait',
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+            ),
+            offload=offload,
+            # scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
+            # scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config)
+            # scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing")
+
+            scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing"),
+            clip_skip=1,
+        )
+
+class RealVizXL4Manager(OneStageImageGenManager):
+    def __init__(self, offload=True):
+        super().__init__( # https://huggingface.co/recoilme/ColorfulXL-Lightning
+            model_name = 'realvisxl_v4', # https://civitai.com/models/388913/colorfulxl-lightning
+            model_path = 'SG161222/RealVisXL_V4.0',  
+            
+            config = DiffusionConfig(
+                steps = CfgItem(25, bounds=(15,40)), # https://imgsys.org/rankings
+                guidance_scale = CfgItem(7.5, bounds=(6,10)),
+                strength = CfgItem(0.85, bounds=(0.3, 0.95)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                aspect='square',#'portrait',
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+            ),
+            offload=offload,
+            #scheduler_callback= lambda: DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
+            # scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
+            # scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config)
+            # scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing")
+            scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config)
+
+            #scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing"),
+            #clip_skip=1,
+        )        
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
         'manager': SDXLTurboManager,
-        'desc': 'Turbo SDXL (Sm, fast)'
+        'desc': 'Turbo SDXL' # (Sm, fast)
     },
     'dreamshaper_turbo': {
         'manager': DreamShaperXLManager,
-        'desc': 'DreamShaper XL2 Turbo (M, fast)'
+        'desc': 'DreamShaper XL2 Turbo' #  (M, fast)
     },
     'juggernaut_lightning': {
         'manager': JuggernautXLLightningManager,
-        'desc': 'Juggernaut XL Lightning (M, fast)'
+        'desc': 'Juggernaut XL Lightning' # (M, fast)
     },
     'sd3_medium': {
         'manager': SD3MediumManager,
-        'desc': 'SD3 Medium (Lg, slow)'
+        'desc': 'SD3 Medium' #  (Lg, slow)
+    },
+    'colorfulxl_lightning': {
+        'manager': ColorfulXLLightningManager,
+        'desc': 'ColorfulXL Lightning' # (M, fast)
+    },
+    'realvisxl_v4': {
+        'manager': RealVizXL4Manager,
+        'desc': 'RealVisXL V4.0' # (M, fast)
     },
 }
 
