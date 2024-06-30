@@ -10,7 +10,7 @@ libs
 runs/**
 wandb
 # extra models
-extras/models/*
+extras/*
 # Discord server
 server/logs
 server/appcmds
