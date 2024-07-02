@@ -122,23 +122,23 @@ class SetImageConfig:
             await ctx.send(f"{ctx.subcommand_passed} does not belong to iset")
     
     @isetarg.command(name='model', aliases=['artist',])
-    @app_commands.choices(model=cmd_choices.IMAGE_MODELS)
-    async def iset_model(self, ctx: commands.Context, model: app_commands.Choice[str], offload: bool=True):
+    @app_commands.choices(version=cmd_choices.IMAGE_MODELS)
+    async def iset_model(self, ctx: commands.Context, version: app_commands.Choice[str], offload: bool=True):
         '''Loads in the image generation model
         
         Args:
-            model: Image model name
+            version: Image model name
             offload: If True, model will be moved off GPU when not in use to save vRAM 
         '''
-        if self.igen.model_name != model.value:
+        if self.igen.model_name != version.value:
             await self.igen.unload_pipeline()
             
-            self.igen = imgman.AVAILABLE_MODELS[model.value]['manager'](offload=offload)
+            self.igen = imgman.AVAILABLE_MODELS[version.value]['manager'](offload=offload)
             return await self.imgup(ctx)
         elif not self.igen.is_ready:
             return await self.imgup(ctx)
         else:
-            await ctx.send(f'{model.name} already up')
+            await ctx.send(f'{version.name} already up')
 
     @isetarg.command(name='seed', aliases=['iseed','imgseed', 'imageseed'])
     async def iset_seed(self, ctx: commands.Context, seed:int = None):
@@ -156,7 +156,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     
     def __init__(self, bot: BotUs):
         self.bot = bot
-        self.igen = imgman.SD3MediumManager(offload=True)
+        # self.igen = imgman.ColorfulXLLightningManager(offload=True)
+        self.igen = imgman.RealVizXL4Manager(offload=True)
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
@@ -285,10 +286,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: commands.Range[str,1,1000], *, flags: cmd_flags.RedrawFlags):
+    async def _redraw(self, ctx: commands.Context, imgurl:str, prompt: commands.Range[str,1,1000], imgfile: discord.Attachment=None, *, flags: cmd_flags.RedrawFlags):
         """Remix an image from a text prompt and image.
 
         Args:
+            imgurl: Url of image. Will be ignored if imgfile is used. 
             imgfile: image attachment. Square = Best results. Ideal size= 1024x1024 (Turbo ideal= 512x512).
             prompt: A description of the image to be generated.
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).
@@ -304,7 +306,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
         """
         
-        return await self.redraw(ctx, imgfile, prompt, 
+        return await self.redraw(ctx, imgurl, prompt, imgfile=imgfile, 
                                  steps = flags.steps, 
                                  strength = flags.strength, 
                                  negative_prompt = flags.no, 
@@ -316,7 +318,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  fast = flags.fast
                                  )
 
-    async def redraw(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: str, *, 
+    async def redraw(self, ctx: commands.Context, imgurl:str, prompt: str, imgfile: discord.Attachment=None,*, 
                      steps: int = None, 
                      strength: float = None, 
                      negative_prompt: str = None, 
@@ -328,7 +330,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                      fast:bool=False):
         
         # this may be passed a url string in drawUI config
-        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgfile)
+        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         image = load_image(image_url).convert('RGB')
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
@@ -357,10 +359,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
     @commands.hybrid_command(name='hd')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def hd_upsample(self, ctx: commands.Context, imgfile: discord.Attachment, prompt: commands.Range[str,None,1000] = None, *, flags: cmd_flags.UpsampleFlags, ):
+    async def hd_upsample(self, ctx: commands.Context, imgurl:str, prompt: commands.Range[str,None,1000] = None, imgfile: discord.Attachment=None, *, flags: cmd_flags.UpsampleFlags, ):
         """Make an image HD (big n' smooooth).
         
         Args:
+            imgurl: Url of image. Will be ignored if imgfile is used. 
             imgfile: image attachment. If bigger than (1216,832)/(1024²)/(1216,832) it's shrunk down first.
             prompt: A description of the image. Not required, but if high hdstep/hdstrength helps A LOT.
             hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=1. Usually < 3.
@@ -369,7 +372,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
         """
 
-        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgfile)
+        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         image = load_image(image_url).convert('RGB')
         if prompt is None:
             prompt = ''

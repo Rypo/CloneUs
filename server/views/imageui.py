@@ -60,7 +60,7 @@ class DrawUIView(discord.ui.View):
         }
         print('MERGED KWARGS:', self.kwargs)
 
-        self.is_redraw = 'imgfile' in self.kwargs
+        self.is_redraw = 'imgurl' in self.kwargs or 'imgfile' in self.kwargs
         
         # default_auto = (self.is_redraw and flags.aspect is None)
         
@@ -186,8 +186,9 @@ class DrawUIView(discord.ui.View):
 
         #kwargs.pop('aspect') # remove since we have dropdown
         kwargs.pop('fast', None) # not worth having redraw scroll, just use whatever is passed on cmd call
+        image_url = kwargs.pop('imgurl', kwargs.pop('imgfile', None))
 
-        image_url = kwargs.pop('imgfile', None)
+        #image_url = kwargs.pop('imgfile', None)
         if isinstance(image_url, discord.Attachment):
             image_url = image_url.url
         
@@ -234,7 +235,7 @@ class DrawUIView(discord.ui.View):
         # print(interaction.message.attachments)
         kwargs = self.kwargs.copy()
         imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
-
+        kwargs['imgurl'] = self.message.attachments[0].url
         kwargs['imgfile'] = self.message.attachments[0]
         kwargs['strength'] = 0 # set to 0 to avoid strong redraw.
         kwargs['refine_steps'] = max(kwargs['refine_steps'], 1)
