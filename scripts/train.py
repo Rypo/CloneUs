@@ -157,7 +157,7 @@ def main(args):
         save_strategy=('epoch' if cfg.num_epochs > 1 and (isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer) else 'steps'), #-- TODO Think about better solution
         group_by_length=(cfg.group_by_length and not cfg.use_sft_trainer),
         #torch_compile=True,
-        report_to="none", #"wandb", -- wandb will hopefully work again after nvidia driver 560* release - https://github.com/gpuopenanalytics/pynvml/issues/53#issuecomment-2139513510
+        report_to="wandb", # https://github.com/gpuopenanalytics/pynvml/issues/53#issuecomment-2139513510 -- wandb handles with exception now: https://github.com/wandb/wandb/pull/7815/commits/0240a990b0d3815af72da583df1670031c6eb946
         save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
         resume_from_checkpoint=resume_ckpt,
     )
