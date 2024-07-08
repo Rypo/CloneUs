@@ -103,12 +103,14 @@ class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
     no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
     guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
     hdsteps: int = commands.flag(default=0, aliases=['refine_steps'])
     hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength']) 
     dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
+    seed: int = commands.flag(default=None, aliases=['random_seed'],) 
 
 
 class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
@@ -118,11 +120,14 @@ class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['str']) 
     no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
     guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
+    
     hdsteps: int = commands.flag(default=0, aliases=['refine_steps'])
     hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength'])
     dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
+    seed: int = commands.flag(default=None, aliases=['random_seed'],) 
 
 class UpsampleFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     # imgfile: discord.Attachment

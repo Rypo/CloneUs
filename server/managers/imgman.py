@@ -236,7 +236,7 @@ class OneStageImageGenManager:
         self.config = config
         self.offload = offload
         self._scheduler_callback = scheduler_callback
-        # https://huggingface.co/docs/diffusers/v0.26.3/en/api/schedulers/overview#schedulers
+        # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
         # DPM++ SDE == DPMSolverSinglestepScheduler
         # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
         self.clip_skip = clip_skip
@@ -260,7 +260,13 @@ class OneStageImageGenManager:
         )
         if self._scheduler_callback is not None:
             self.base.scheduler = self._scheduler_callback()
-        #self.base.load_lora_weights(cpaths.ROOT_DIR/'extras/loras', weight_name='detail-tweaker-xl.safetensors', adapter_name='add_detail')
+        
+        if (cpaths.ROOT_DIR/'extras/loras/detail-tweaker-xl.safetensors').exists():
+            self.base.load_lora_weights(cpaths.ROOT_DIR/'extras/loras', weight_name='detail-tweaker-xl.safetensors', adapter_name='detail_tweaker_xl')
+        else:
+            print('detail-tweaker-xl not found, detail parameter will not function. '
+                  'To use, download from: https://civitai.com/models/122359/detail-tweaker-xl')
+        
         if self.offload:
             self.base.enable_model_cpu_offload()
         else:
@@ -348,14 +354,18 @@ class OneStageImageGenManager:
         
     
     @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None):
-        if self.global_seed is not None:
+    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None, seed=None):
+        if seed is None:
+            seed = self.global_seed
+        if seed is not None:
             #meval.seed_everything(self.global_seed)
-            torch.manual_seed(self.global_seed)
-            torch.cuda.manual_seed(self.global_seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
             
         t0 = time.perf_counter()
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
+        lora_kwargs={'cross_attention_kwargs': {"scale": detail_weight}} if detail_weight is not None else {}
+        
         t_pe = time.perf_counter()
         t_main = t_pe # default in case skip
         mlabel = '_2I'
@@ -363,7 +373,8 @@ class OneStageImageGenManager:
         if image is None: 
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings,).images[0] # cross_attention_kwargs={"scale": 1.0}, generator=self.generator, num_images_per_prompt=4
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, 
+                              **prompt_encodings, **lora_kwargs).images[0] # generator=self.generator, num_images_per_prompt=4
             #return make_image_grid(imgs, 2, 2)
             t_main = time.perf_counter()
             print_memstats('draw')
@@ -374,7 +385,8 @@ class OneStageImageGenManager:
         # Img2Img - not just else because could pass image with str=0 to just up+refine. But should never be image=None + strength
         elif strength:
             num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, 
+                                 **prompt_encodings, **lora_kwargs).images[0]
             t_main = time.perf_counter()
             print_memstats('redraw')
             mlabel = 'I2I'
@@ -390,7 +402,8 @@ class OneStageImageGenManager:
             # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
             # num_inference_steps = calc_esteps(-1, refine_strength, min_effective_steps=refine_steps)
             num_inference_steps = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, **prompt_encodings).images[0]
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, 
+                                 **prompt_encodings, **lora_kwargs).images[0]
             t_re = time.perf_counter()
             print_memstats('refine')
         
@@ -405,9 +418,11 @@ class OneStageImageGenManager:
                        steps:int=None, 
                        negative_prompt:str=None, 
                        guidance_scale:float=None, 
+                       detail_weight:float=0,
                        aspect:typing.Literal['square','portrait','landscape']=None, 
                        refine_steps:int=0, 
                        refine_strength:float=None, 
+                       seed:int = None,
                        **kwargs) -> Image.Image:
         fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength, aspect=aspect)
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
@@ -417,8 +432,11 @@ class OneStageImageGenManager:
         # We don't want to run refine unless refine steps passed
         refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
         image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], 
-                              guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, refine_strength=refine_strength, target_size=target_size, )
-        
+                              guidance_scale=fkwg['guidance_scale'], detail_weight=detail_weight, refine_steps=refine_steps, refine_strength=refine_strength, target_size=target_size, seed=seed)
+        if detail_weight:
+            fkwg.update(detail_weight=detail_weight)
+        if seed is not None:
+            fkwg.update(seed=seed)
         return image, fkwg
 
     @async_wrap_thread
@@ -427,9 +445,11 @@ class OneStageImageGenManager:
                          strength:float=None, 
                          negative_prompt:str=None, 
                          guidance_scale:float=None, 
+                         detail_weight:float=0,
                          aspect:typing.Literal['square','portrait','landscape']=None, 
                          refine_steps:int=0, 
                          refine_strength:float=None, 
+                         seed: int = None,
                          **kwargs) -> Image.Image:
         
         fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength)
@@ -443,11 +463,15 @@ class OneStageImageGenManager:
         strength = cmd_tfms.percent_transform(fkwg['strength'])
         refine_strength = cmd_tfms.percent_transform(fkwg['refine_strength'])
         image = self.pipeline(prompt=prompt, num_inference_steps=fkwg['steps'], strength=strength, negative_prompt=fkwg['negative_prompt'], 
-                              guidance_scale=fkwg['guidance_scale'], refine_steps=refine_steps, refine_strength=refine_strength, image=image) # target_size defaults img_size
+                              guidance_scale=fkwg['guidance_scale'], detail_weight=detail_weight, refine_steps=refine_steps, refine_strength=refine_strength, image=image, seed=seed) # target_size defaults img_size
 
         #self.base.disable_vae_tiling()
         # Don't want to fill with default value, but still want it in filledkwargs
         fkwg.update(aspect=aspect)
+        if detail_weight:
+            fkwg.update(detail_weight=detail_weight)
+        if seed is not None:
+            fkwg.update(seed=seed)
         return image, fkwg
 
 
@@ -550,7 +574,6 @@ class SDXLTurboManager(OneStageImageGenManager):
     def compile_pipeline(self):
         # Currently, not working properly for SDXL Turbo + savings are negligible
         pass
-
 
 
 class DreamShaperXLManager(OneStageImageGenManager):
@@ -685,27 +708,24 @@ class ColorfulXLLightningManager(OneStageImageGenManager):
 
 class RealVizXL4Manager(OneStageImageGenManager):
     def __init__(self, offload=True):
-        super().__init__( # https://huggingface.co/recoilme/ColorfulXL-Lightning
-            model_name = 'realvisxl_v4', # https://civitai.com/models/388913/colorfulxl-lightning
+        super().__init__( # https://huggingface.co/SG161222/RealVisXL_V4.0
+            model_name = 'realvisxl_v4', # https://civitai.com/models/139562?modelVersionId=344487
             model_path = 'SG161222/RealVisXL_V4.0',  
             
             config = DiffusionConfig(
                 steps = CfgItem(25, bounds=(15,40)), # https://imgsys.org/rankings
                 guidance_scale = CfgItem(7.5, bounds=(6,10)),
-                strength = CfgItem(0.85, bounds=(0.3, 0.95)),
+                strength = CfgItem(0.55, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 aspect='square',#'portrait',
                 #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
                 locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ),
             offload=offload,
-            #scheduler_callback= lambda: DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
+            scheduler_callback= lambda: DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True) #, algorithm_type=sde-dpmsolver++
             # scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
-            # scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config)
-            # scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing")
-            scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config)
+            # scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config)
 
-            #scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing"),
             #clip_skip=1,
         )        
 

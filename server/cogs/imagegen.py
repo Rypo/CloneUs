@@ -233,35 +233,42 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             steps: Num iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
 
             no: Negative prompt. What to exclude from image. Usually comma sep list of words. Default=None.
+            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). square w=h = 1:1. portrait w<h = 13:19. Default='square'. 
             
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=0. Usually < 3.
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored if hdsteps=0.
             dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
+            seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
         """
         # flags can't be created by drawUI, so need to separate out draw/redraw functionality
         return await self.draw(ctx, prompt, 
                                steps = flags.steps, 
                                negative_prompt = flags.no, 
                                guidance_scale = flags.guide, 
+                               detail_weight= flags.detail,
                                aspect = flags.aspect, 
                                refine_steps = flags.hdsteps, 
                                refine_strength = flags.hdstrength, 
                                denoise_blend = flags.dblend, 
                                fast = flags.fast,
+                               seed = flags.seed,
                                )
         
     async def draw(self, ctx: commands.Context, prompt:str, *,
                    steps: int = None, 
                    negative_prompt: str = None, 
                    guidance_scale: float = None, 
+                   detail_weight: float = 0,
                    aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                    refine_steps: int = 0,
                    refine_strength: float = None, 
                    denoise_blend: float|None = None, 
-                   fast:bool=False):
+                   fast: bool = False,
+                   seed: int = None,
+                   ):
         
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
@@ -273,8 +280,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
-            image, fwkg = await self.igen.generate_image(prompt, steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect, 
-                                                         refine_steps=refine_steps, refine_strength=refine_strength, denoise_blend=denoise_blend,)
+            image, fwkg = await self.igen.generate_image(prompt, steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, 
+                                                         refine_steps=refine_steps, refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
             #await send_imagebytes(ctx, image, prompt)
             #image_file = imgbytes_file(image, prompt)
             out_imgpath = save_image_prompt(image, prompt)
@@ -293,17 +300,19 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             imgurl: Url of image. Will be ignored if imgfile is used. 
             imgfile: image attachment. Square = Best results. Ideal size= 1024x1024 (Turbo ideal= 512x512).
             prompt: A description of the image to be generated.
-            steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).
-            strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default=55.
-
+            steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
+            strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default varies.
+            
             no: What to exclude from image. Usually comma sep list of words. Default=None.
+            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). If None, will pick nearest to imgfile.
 
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=0. Usually < 3.
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored if hdsteps=0.
             dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
+            seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
         """
         
         return await self.redraw(ctx, imgurl, prompt, imgfile=imgfile, 
@@ -311,11 +320,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  strength = flags.strength, 
                                  negative_prompt = flags.no, 
                                  guidance_scale = flags.guide, 
+                                 detail_weight= flags.detail,
                                  aspect = flags.aspect, 
                                  refine_steps = flags.hdsteps, 
                                  refine_strength = flags.hdstrength,
                                  denoise_blend = flags.dblend, 
-                                 fast = flags.fast
+                                 fast = flags.fast,
+                                 seed = flags.seed
                                  )
 
     async def redraw(self, ctx: commands.Context, imgurl:str, prompt: str, imgfile: discord.Attachment=None,*, 
@@ -323,11 +334,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                      strength: float = None, 
                      negative_prompt: str = None, 
                      guidance_scale: float = None, 
+                     detail_weight: float = 0,
                      aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                      refine_steps: int = 0,
                      refine_strength: float = None,
                      denoise_blend: float = None, 
-                     fast:bool=False):
+                     fast:bool = False,
+                     seed:int = None
+                     ):
         
         # this may be passed a url string in drawUI config
         image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
@@ -345,8 +359,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
             image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, steps=steps, 
                                                            strength=strength, negative_prompt=negative_prompt, 
-                                                           guidance_scale=guidance_scale, aspect=aspect, refine_steps=refine_steps,
-                                                           refine_strength=refine_strength, denoise_blend=denoise_blend,)
+                                                           guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, refine_steps=refine_steps,
+                                                           refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
             
             #image_file = imgbytes_file(image, prompt)
             out_imgpath = save_image_prompt(image, prompt)
