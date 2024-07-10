@@ -552,23 +552,33 @@ class Cloneus(GenConfigUtilities):
         topkn = logprobs[:,-1,:].topk(top_k)
         return topkn.values.exp().detach(), self.tokenizer.convert_ids_to_tokens(topkn.indices.squeeze(0))
 
-    def _atag_prefix_nsame(self, formatted_atags:list[str]):
+    @torch.inference_mode()
+    def _atag_shared_ntokens(self, formatted_atags:list[str]):
         '''Count the number of shared common author tag prefix tokens tokenized.
         e.g. for author tags ([USER:abc], USER:xyz]) might be 3 - { "[", "USER", ":" }
         '''
         tokd_fatags = [self.tokenizer.tokenize(fatag) for fatag in formatted_atags]
-        atag_lc_tokens = 0
+        #atag_lc_tokens = 0
         
         min_taglen = min(len(t) for t in tokd_fatags)  # longest possible common subtokens would be shortest tag
+        lead_ntokens=0
         for i in range(min_taglen):
             # if all tokens at index i are the same, +1 and continue else done
             n_unique = len(set([t[i] for t in tokd_fatags]))
             if n_unique != 1:
                 break
             
-            atag_lc_tokens += 1
-                
-        return atag_lc_tokens
+            lead_ntokens += 1
+        # check trailing tokens
+        trail_ntokens=0
+        for i in range(1,min_taglen+1):
+            # if all tokens at index i are the same, +1 and continue else done
+            n_unique = len(set([t[-i] for t in tokd_fatags]))
+            if n_unique != 1:
+                break
+            
+            trail_ntokens += 1
+        return lead_ntokens,trail_ntokens
 
 
     @torch.inference_mode()
@@ -582,7 +592,7 @@ class Cloneus(GenConfigUtilities):
         Returns:
             A list of tuples containing an author and their probability to be the next to respond.
         '''
-
+        # TODO: This causes a memory leak somehow. FIXME
         # Pros over old method:
         # - It's actually correct (?)
         # - If 2 authors have same first token, it can differentiate between them
@@ -602,38 +612,65 @@ class Cloneus(GenConfigUtilities):
 
         n_author = len(authors)
         author_surrogate = '###_dummy_author_###'
-        base_surrogate = self.to_text_input(chat_history, (author_surrogate, 'ignored'))
+        text_surrogate = '###_dummy_text_###'
+        base_surrogate = self.to_text_input(chat_history, (author_surrogate, text_surrogate)) 
 
         # we DO want to split out the whole tag, since we are now getting whole tag probablities
         fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag)
-        base_input = base_surrogate.split(fmt_auth_surrogate)[0] # do **not** strip. Still manipulating strings
+        #base_input = base_surrogate.split(fmt_auth_surrogate)[0] 
 
         fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in authors]
         tag_lens = torch.as_tensor(self.tokenizer(fmt_atags, add_special_tokens=False, return_length=True).length)
         # print(tag_lens)
-        candidate_batch = [base_input + a for a in fmt_atags]
+        #candidate_batch = [base_input + a for a in fmt_atags]
+        # NOTE: We need EVERYTHING around the author tag, if there is a newline after the tag, it may change the token
+        # ex: Llama-3 -- If author tag is "Username (FName)" and tag sep = \n. Then "Username (FName)\n" will change rparen:  
+        # [ ")", id: 8 ] becomes [ ")Ċ", id: 320 ]
+        # probabilities will be off by ORDERS OF MAGNITITUDE if you use ")" instead of ")Ċ"
+        candidate_batch = [base_surrogate.replace(fmt_auth_surrogate, ftag).split(text_surrogate)[0] for ftag in fmt_atags] # do **not** strip.
         b_inputs = self.tokenizer(candidate_batch, return_tensors="pt", padding=True, add_special_tokens=False)
-
         b_outputs = self.model(**b_inputs.to(0))
 
         # Remember - always proba of the *next* token, not current. So need to back step index by 1.
-        b_logprobs = torch.log_softmax(b_outputs.logits, dim=-1).detach_()[:, :-1, :]
-        b_input_ids = b_inputs.input_ids[:, 1:]#.cpu()
+        b_logprobs = torch.log_softmax(b_outputs.logits, dim=-1).detach()[:, :-1, :].cpu() # (b, seq-1, V)
+        b_input_ids = b_inputs.input_ids[:, 1:].cpu() # (b, seq-1)
 
-        p_author = torch.empty((n_author, tag_lens.max().item()))
+        # skipping pre/post tag formatting tokens both gives a better estimate and fixes mistral spacing issues
+        n_skip, n_trim = self._atag_shared_ntokens(fmt_atags)
+        # -1 is needed or will be off by 1. Think it has to do with shifting indexing
+        h_offset = max(n_skip-1, 0)
+        # p_author = torch.zeros((n_author, tag_lens.max().item()))
+        p_author = torch.full((n_author, tag_lens.max().item()), torch.nan) # torch.empty will throw off probas, zero might be okay 
         #nindices = []
+        seq_len = b_input_ids.size(1)
+
         for i in range(n_author):
-            # cur_name_logprobs = b_logprobs[i, -tag_lens[i]-1:-1]
-            cur_name_logprobs = b_logprobs[i, -tag_lens[i]:]
-            cur_name_indices = b_input_ids[i, -tag_lens[i]:, None]
-            p_author[i, :tag_lens[i]] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
+            
+            taglen = tag_lens[i]
+            start_idx = seq_len-taglen # idx of first author_tag token
+            ustart_idx = start_idx+h_offset # idx of 1st non-shared author_tag token
+            ustop_idx = seq_len-n_trim # idx of last non-shared author_tag token
+
+            cur_name_logprobs = b_logprobs[i, ustart_idx:ustop_idx, :]
+            cur_name_indices = b_input_ids[i, ustart_idx:ustop_idx, None]
+            
+            namelen = cur_name_logprobs.size(0)
+            p_author[i, :namelen] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
+
             #nindices.append(cur_name_indices.squeeze())
-
-        #return p_author,nindices
-
-        # skipping pre-formatting tokens both gives a better estimate and fixes mistral spacing issues
-        n_skip = self._atag_prefix_nsame(fmt_atags)
-        a_tag_probas = p_author[:,n_skip:].sum(-1).exp().tolist()
+        
+        # for i in range(n_author):
+        #     #cur_name_logprobs = b_logprobs[i, -tag_lens[i]-1:-1]
+        #     cur_name_logprobs = b_logprobs[i, -tag_lens[i]:]
+        #     cur_name_indices = b_input_ids[i, -tag_lens[i]:, None]
+        #     p_author[i, :tag_lens[i]] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
+        
+        #return p_author,nindices,candidate_batch
+        #return sorted(zip(authors, p_author.nansum(-1).exp().tolist()), key=lambda x: x[1], reverse=True)
+        
+        
+        #a_tag_probas = p_author[:,n_skip:].nansum(-1).exp().tolist()
+        a_tag_probas = p_author.nansum(-1).exp().tolist()
         author_probas = zip(authors, a_tag_probas)
 
         return sorted(author_probas, key=lambda x: x[1], reverse=True)
