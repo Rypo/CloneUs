@@ -580,7 +580,7 @@ class Cloneus(GenConfigUtilities):
             trail_ntokens += 1
         return lead_ntokens,trail_ntokens
 
-
+    #@iload.cleanup # this prevents vram blow up on repeat calls, but adds ~0.25s per call
     @torch.inference_mode()
     def author_probabilities(self, chat_history: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
         '''For each author, return the probability they will be the next to respond given the chat context.
@@ -592,7 +592,7 @@ class Cloneus(GenConfigUtilities):
         Returns:
             A list of tuples containing an author and their probability to be the next to respond.
         '''
-        # TODO: This causes a memory leak somehow. FIXME
+
         # Pros over old method:
         # - It's actually correct (?)
         # - If 2 authors have same first token, it can differentiate between them
@@ -627,30 +627,33 @@ class Cloneus(GenConfigUtilities):
         # ex: Llama-3 -- If author tag is "Username (FName)" and tag sep = \n. Then "Username (FName)\n" will change rparen:  
         # [ ")", id: 8 ] becomes [ ")Ċ", id: 320 ]
         # probabilities will be off by ORDERS OF MAGNITITUDE if you use ")" instead of ")Ċ"
+
         candidate_batch = [base_surrogate.replace(fmt_auth_surrogate, ftag).split(text_surrogate)[0] for ftag in fmt_atags] # do **not** strip.
         b_inputs = self.tokenizer(candidate_batch, return_tensors="pt", padding=True, add_special_tokens=False)
-        b_outputs = self.model(**b_inputs.to(0))
-
+        # b_out_logits = self.model(**b_inputs.to(0)).logits.to(dtype=self.model.dtype).detach_()
+        
         # Remember - always proba of the *next* token, not current. So need to back step index by 1.
-        b_logprobs = torch.log_softmax(b_outputs.logits, dim=-1).detach()[:, :-1, :].cpu() # (b, seq-1, V)
-        b_input_ids = b_inputs.input_ids[:, 1:].cpu() # (b, seq-1)
 
+        b_logprobs = torch.log_softmax(self.model(**b_inputs.to(0)).logits, 
+                                       dim=-1, dtype=self.model.dtype)[:, :-1, :]#.detach()#.cpu() # (b, seq-1, V)
+        b_input_ids = b_inputs.input_ids[:, 1:]#.to('cpu')# (b, seq-1)
+        
+        #return b_out_logits, b_logprobs, b_input_ids
         # skipping pre/post tag formatting tokens both gives a better estimate and fixes mistral spacing issues
         n_skip, n_trim = self._atag_shared_ntokens(fmt_atags)
         # -1 is needed or will be off by 1. Think it has to do with shifting indexing
         h_offset = max(n_skip-1, 0)
-        # p_author = torch.zeros((n_author, tag_lens.max().item()))
-        p_author = torch.full((n_author, tag_lens.max().item()), torch.nan) # torch.empty will throw off probas, zero might be okay 
+        max_taglen = tag_lens.max().item()
+        # p_author = torch.zeros((n_author, max_taglen))
+        # leave output p matrix full precision, 3-5 decimal match with all fp32 calcs
+        p_author = torch.full((n_author, max_taglen), torch.nan) # torch.empty will throw off probas, zero might be okay 
         #nindices = []
+
         seq_len = b_input_ids.size(1)
-
+        ustart_inds = (seq_len-tag_lens) + h_offset # idx of 1st non-shared author_tag token
+        ustop_idx = seq_len-n_trim # idx of last non-shared author_tag token
         for i in range(n_author):
-            
-            taglen = tag_lens[i]
-            start_idx = seq_len-taglen # idx of first author_tag token
-            ustart_idx = start_idx+h_offset # idx of 1st non-shared author_tag token
-            ustop_idx = seq_len-n_trim # idx of last non-shared author_tag token
-
+            ustart_idx = ustart_inds[i] 
             cur_name_logprobs = b_logprobs[i, ustart_idx:ustop_idx, :]
             cur_name_indices = b_input_ids[i, ustart_idx:ustop_idx, None]
             
@@ -672,7 +675,9 @@ class Cloneus(GenConfigUtilities):
         #a_tag_probas = p_author[:,n_skip:].nansum(-1).exp().tolist()
         a_tag_probas = p_author.nansum(-1).exp().tolist()
         author_probas = zip(authors, a_tag_probas)
-
+        # using del+empty_cache instead of the cleanup wrapper reduces added time/call to 19ms from 250ms
+        del b_logprobs, b_input_ids, p_author
+        torch.cuda.empty_cache()
         return sorted(author_probas, key=lambda x: x[1], reverse=True)
     
 
