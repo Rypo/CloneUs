@@ -203,7 +203,7 @@ class TextGen(commands.Cog, SetConfig):
             tnow = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
             name = f'{self.clomgr.clo.gen_mode}_{tnow}'
         
-        name = re.sub('\w+','_', name[:100].removesuffix('.json'))+'.json'
+        name = re.sub('\W+','_', name[:100].removesuffix('.json'))+'.json'
         
         self.clomgr.clo.save_genconfig(filepath=gc_dir/name)
         
