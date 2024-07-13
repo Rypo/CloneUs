@@ -41,6 +41,12 @@ class GenOpts:
     suppress_tokens: list[int] = None
     begin_suppress_tokens: list[int] = None
     guidance_scale: float = None
+    stop_strings: str| list[str] = None # TODO: use in place of custom stopword logic
+    token_healing: bool = False
+    cache_implementation: str =  None # "quantized"
+    cache_config: transformers.CacheConfig|dict= None # transformers.QuantizedCacheConfig('HQQ', nbits=4, compute_dtype=torch.bfloat16, device='cuda')
+    #dola_layers https://github.com/huggingface/transformers/blob/main/docs/source/en/generation_strategies.md#dola-decoding
+
     
     def to_dict(self):
        return asdict(self)
@@ -101,8 +107,8 @@ def randomize_preset(gen_config:GenerationConfig):
             'typical_p': [0.2, 0.575, 0.95],
             'tfs': [0.5, 0.8, 0.9, 0.95, 0.99],
             'top_a': [0.5, 0.2, 0.1, 0.05, 0.01],
-            'epsilon_cutoff': 1e-4*np.array([1, 3, 5, 7, 9]).round(6),
-            'eta_cutoff': 1e-4*np.array([3, 6, 9, 12, 15, 18]).round(6),
+            'epsilon_cutoff': (1e-4*np.array([1, 3, 5, 7, 9])).round(6),
+            'eta_cutoff': (1e-4*np.array([3, 6, 9, 12, 15, 18])).round(6),
         },
         'flatten_distribution': {
             'temperature': [0.1, 0.5, 0.7, 0.8, 1, 1.2, 1.5, ],#2.0, 5.0],
