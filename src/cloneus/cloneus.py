@@ -579,7 +579,35 @@ class Cloneus(GenConfigUtilities):
             
             trail_ntokens += 1
         return lead_ntokens,trail_ntokens
-
+    
+    def _author_primed_batch(self, chat_history: list[tuple[str,str]], formatted_author_tags: list[str], seed_text: str = None, return_tuple: bool = False):
+        author_surrogate = '###_dummy_author_###'
+        seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
+        base_surrogate = self.to_text_input(chat_history, author_seedtext=(author_surrogate, seedtext_surrogate))
+        
+        fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
+        if seed_text is None:
+            seed_text = ''
+        
+        if not return_tuple:
+            return [base_surrogate
+                    .replace(fmt_auth_surrogate, ftag)
+                    .replace(seedtext_surrogate, seed_text)
+                    .rstrip(' ') for ftag in formatted_author_tags]
+        
+        input_context, fmt_dummy_seedtext = base_surrogate.split(fmt_auth_surrogate)
+        authseed_template = fmt_auth_surrogate+fmt_dummy_seedtext
+                
+        author_prompts = [authseed_template
+                          .replace(fmt_auth_surrogate, ftag)
+                          # trimming off post seed_text content is handled by (to_text_input -> to_seeded_text), it's safe to replace rather than split[0].append
+                          .replace(seedtext_surrogate, seed_text) 
+                          # IFF the formatted author_tag/seedtext ends with a space ' ' should NOT trail with it
+                          .rstrip(' ')  
+                          for ftag in formatted_author_tags]
+        
+        return input_context, author_prompts
+    
     #@iload.cleanup # this prevents vram blow up on repeat calls, but adds ~0.25s per call
     @torch.inference_mode()
     def author_probabilities(self, chat_history: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
@@ -611,12 +639,12 @@ class Cloneus(GenConfigUtilities):
             authors = useridx.get_users('dname')
 
         n_author = len(authors)
-        author_surrogate = '###_dummy_author_###'
-        text_surrogate = '###_dummy_text_###'
-        base_surrogate = self.to_text_input(chat_history, (author_surrogate, text_surrogate)) 
+        #author_surrogate = '###_dummy_author_###'
+        #text_surrogate = '###_dummy_text_###'
+        #base_surrogate = self.to_text_input(chat_history, (author_surrogate, text_surrogate)) 
 
         # we DO want to split out the whole tag, since we are now getting whole tag probablities
-        fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag)
+        #fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag)
         #base_input = base_surrogate.split(fmt_auth_surrogate)[0] 
 
         fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in authors]
@@ -627,13 +655,12 @@ class Cloneus(GenConfigUtilities):
         # ex: Llama-3 -- If author tag is "Username (FName)" and tag sep = \n. Then "Username (FName)\n" will change rparen:  
         # [ ")", id: 8 ] becomes [ ")Ċ", id: 320 ]
         # probabilities will be off by ORDERS OF MAGNITITUDE if you use ")" instead of ")Ċ"
-
-        candidate_batch = [base_surrogate.replace(fmt_auth_surrogate, ftag).split(text_surrogate)[0] for ftag in fmt_atags] # do **not** strip.
+        candidate_batch = self._author_primed_batch(chat_history, fmt_atags, return_tuple=False)
+        #candidate_batch = [base_surrogate.replace(fmt_auth_surrogate, ftag).split(text_surrogate)[0] for ftag in fmt_atags] # do **not** strip.
         b_inputs = self.tokenizer(candidate_batch, return_tensors="pt", padding=True, add_special_tokens=False)
         # b_out_logits = self.model(**b_inputs.to(0)).logits.to(dtype=self.model.dtype).detach_()
         
         # Remember - always proba of the *next* token, not current. So need to back step index by 1.
-
         b_logprobs = torch.log_softmax(self.model(**b_inputs.to(0)).logits, 
                                        dim=-1, dtype=self.model.dtype)[:, :-1, :]#.detach()#.cpu() # (b, seq-1, V)
         b_input_ids = b_inputs.input_ids[:, 1:]#.to('cpu')# (b, seq-1)
@@ -713,30 +740,34 @@ class Cloneus(GenConfigUtilities):
         return output_texts,input_len
     
 
-    def _get_batched_inputs(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str]]:
-        # Need to be a little bit careful about how we combine previous context + author context
-        # to_text_input(previous_context) + to_text_input((author,seed)) is not necessarily the same as to_text_input(previous_context+(author,seed))
-        # because some chat_templates use index0 or otherwise for special behavior
-        # simple but inefficent way is to_text_input(previous_context+(author,seed)) for each author. better way is split and replace
-        
-        input_context = self.to_text_input(chat_history, author_seedtext=('###_dummy_author_###','###_dummy_seedtext_###'))
-        
-        author_surrogate = useridx.format_author_tag('###_dummy_author_###', self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
-        seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
 
-        input_context, fmt_dummy_seedtext = input_context.split(author_surrogate)
-        authseed_template = author_surrogate+fmt_dummy_seedtext
+
+    # def _get_batched_inputs(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str]]:
+    #     # Need to be a little bit careful about how we combine previous context + author context
+    #     # to_text_input(previous_context) + to_text_input((author,seed)) is not necessarily the same as to_text_input(previous_context+(author,seed))
+    #     # because some chat_templates use index0 or otherwise for special behavior
+    #     # simple but inefficent way is to_text_input(previous_context+(author,seed)) for each author. better way is split and replace
+    #     author_surrogate = '###_dummy_author_###'
+    #     seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
+    #     base_surrogate = self.to_text_input(chat_history, author_seedtext=(author_surrogate, seedtext_surrogate))
         
-        if seed_text is None: 
-            seed_text = ''
+    #     fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
         
-        author_prompts = [authseed_template
-                          .replace(author_surrogate, useridx.format_author_tag(u, self.cfg.author_tag))
-                          .replace(seedtext_surrogate, seed_text)
-                          .rstrip(' ') # IFF the formatted author_tag ends with a space ' ' should NOT trail with it 
-                          for u in seed_authors]
+    #     input_context, fmt_dummy_seedtext = base_surrogate.split(fmt_auth_surrogate)
+    #     authseed_template = fmt_auth_surrogate+fmt_dummy_seedtext
         
-        return input_context, author_prompts
+    #     if seed_text is None: 
+    #         seed_text = ''
+        
+    #     author_prompts = [authseed_template
+    #                       .replace(fmt_auth_surrogate, useridx.format_author_tag(u, self.cfg.author_tag))
+    #                       # trimming off post seed_text content is handled by (to_text_input -> to_seeded_text), it's safe to replace rather than split[0].append
+    #                       .replace(seedtext_surrogate, seed_text if seed_text is not None else '') 
+    #                       # IFF the formatted author_tag/seedtext ends with a space ' ' should NOT trail with it
+    #                       .rstrip(' ')  
+    #                       for u in seed_authors]
+        
+    #     return input_context, author_prompts
     
     @torch.inference_mode()
     def batch_generate(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None, return_tuple: bool = False) -> list[str] | BatchGenerationOutput:
@@ -751,8 +782,9 @@ class Cloneus(GenConfigUtilities):
         Returns:
             BatchGenerationOutput if `return_tuple`, output text completions for `seed_authors` otherwise.
         """
-        
-        input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
+        fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in seed_authors]
+        input_context,author_prompts = self._author_primed_batch(chat_history, fmt_atags, seed_text=seed_text, return_tuple=True)
+        #input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
 
         true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
         out_texts,input_len = self._batched_helper([input_context+ap for ap in author_prompts], true_batch_generate=true_batched)
@@ -850,8 +882,9 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_batch_values = {'input_text':'','author_prompts':[], 'output_texts':[], 'input_len': -1, 'output_lens': []}
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
-       
-        input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
+        fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in seed_authors]
+        input_context,author_prompts = self._author_primed_batch(chat_history, fmt_atags, seed_text=seed_text, return_tuple=True)
+        #input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
         
         msg_batch = [input_context+ap for ap in author_prompts]
 
