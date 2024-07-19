@@ -397,7 +397,8 @@ class OneStageImageGenManager:
             image = self.upsampler.upscale(img=image, scale=1.5)
             t_up = time.perf_counter()
             print_memstats('upscale')
-            release_memory()
+            #release_memory()
+            torch.cuda.empty_cache()
             
             # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
             # num_inference_steps = calc_esteps(-1, refine_strength, min_effective_steps=refine_steps)
@@ -408,7 +409,8 @@ class OneStageImageGenManager:
             print_memstats('refine')
         
         t_fi = time.perf_counter()
-        release_memory()
+        #release_memory()
+        torch.cuda.empty_cache()
         
         print(f'total: {t_fi-t0:.2f}s | prompt_embed: {t_pe-t0:.2f}s | {mlabel}: {t_main-t_pe:.2f}s | upscale: {t_up-t_main:.2f}s | refine: {t_re-t_up:.2f}s')
         return image
@@ -728,7 +730,7 @@ class RealVizXL4Manager(OneStageImageGenManager):
 
             #clip_skip=1,
         )        
-
+# https://civitai.com/models/119229/zavychromaxl
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
         'manager': SDXLTurboManager,
@@ -752,7 +754,7 @@ AVAILABLE_MODELS = {
     },
     'realvisxl_v4': {
         'manager': RealVizXL4Manager,
-        'desc': 'RealVisXL V4.0' # (M, fast)
+        'desc': 'RealVisXL V4.0' # (M, avg)
     },
 }
 
