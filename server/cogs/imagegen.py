@@ -162,7 +162,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     async def cog_unload(self):
         await self.bot.wait_until_ready()
         await self.igen.unload_pipeline()
-        self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
+        #self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         stop_global_thread()
     
     async def cog_after_invoke(self, ctx: commands.Context) -> None:

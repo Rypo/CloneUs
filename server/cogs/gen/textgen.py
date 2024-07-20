@@ -72,7 +72,7 @@ class TextGen(commands.Cog, SetConfig):
     async def cog_unload(self):
         await self.bot.wait_until_ready()
         self.pstore.update(youtube_quota = self.youtube_quota)
-        await self.txtdown(self._channel, announce=False)
+        await self.txtdown(self.bot.get_channel(settings.CHANNEL_ID), announce=False)
         print('TextGen - Goodbye')
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         stop_global_thread()
