@@ -241,6 +241,7 @@ class OneStageImageGenManager:
         # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
         self.clip_skip = clip_skip
         self.global_seed = None
+        self.has_adapters = False
     
     def set_seed(self, seed:int|None = None):
         self.global_seed = seed
@@ -249,6 +250,16 @@ class OneStageImageGenManager:
     def generator(self):
         return torch.Generator('cuda').manual_seed(self.global_seed) if self.global_seed is not None else None
 
+    def load_lora(self, adapter_name: typing.Literal['detail_tweaker_xl'] = 'detail_tweaker_xl'):
+        if adapter_name == 'detail_tweaker_xl':
+            if (cpaths.ROOT_DIR/'extras/loras/detail-tweaker-xl.safetensors').exists():
+                self.base.load_lora_weights(cpaths.ROOT_DIR/'extras/loras', weight_name='detail-tweaker-xl.safetensors', adapter_name='detail_tweaker_xl')
+                self.has_adapters = True
+            else:
+                print('detail-tweaker-xl not found, detail parameter will not function. '
+                    'To use, download from: https://civitai.com/models/122359/detail-tweaker-xl')
+        else:
+            raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
 
     @async_wrap_thread
     def load_pipeline(self):
@@ -261,11 +272,7 @@ class OneStageImageGenManager:
         if self._scheduler_callback is not None:
             self.base.scheduler = self._scheduler_callback()
         
-        if (cpaths.ROOT_DIR/'extras/loras/detail-tweaker-xl.safetensors').exists():
-            self.base.load_lora_weights(cpaths.ROOT_DIR/'extras/loras', weight_name='detail-tweaker-xl.safetensors', adapter_name='detail_tweaker_xl')
-        else:
-            print('detail-tweaker-xl not found, detail parameter will not function. '
-                  'To use, download from: https://civitai.com/models/122359/detail-tweaker-xl')
+        self.load_lora(adapter_name='detail_tweaker_xl')
         
         if self.offload:
             self.base.enable_model_cpu_offload()
@@ -364,7 +371,7 @@ class OneStageImageGenManager:
             
         t0 = time.perf_counter()
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
-        lora_kwargs={'cross_attention_kwargs': {"scale": detail_weight}} if detail_weight is not None else {}
+        lora_kwargs={'cross_attention_kwargs': {"scale": detail_weight}} if detail_weight and self.has_adapters else {}
         
         t_pe = time.perf_counter()
         t_main = t_pe # default in case skip
