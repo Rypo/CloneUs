@@ -176,8 +176,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     async def istatus_report(self, ctx: commands.Context):
         '''Display image model info'''
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
-        msg = model_alias + '\n' + f'Image Seed: {self.igen.global_seed}'
+        msg = model_alias + (' ✅' if self.igen.is_ready else ' ❌')
+        if self.igen.global_seed is not None:
+            msg += '\n' + f'Image Seed: {self.igen.global_seed}'
+
         msg += self.igen.config.to_md()
+        if self.igen.is_ready:
+            msg += '\n' + '```json\n' + 'Scheduler ' + self.igen.base.scheduler.to_json_string() + '\n```'
         
         return await ctx.send(msg)
     
