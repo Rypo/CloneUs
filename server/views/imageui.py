@@ -27,7 +27,7 @@ def to_bfile(image:Image.Image, filename: str, description:str, ):
     #if filename is None:
     #    filename = f'image_{hash(image.tobytes())}.png' 
     with io.BytesIO() as imgbin:
-        image.save(imgbin, 'JPEG')
+        image.save(imgbin, 'WebP')#'JPEG')
         imgbin.seek(0)
         
         return discord.File(fp=imgbin, filename=filename, description=description)
