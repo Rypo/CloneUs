@@ -150,6 +150,24 @@ class SetImageConfig:
         self.igen.set_seed(seed=seed)
         return await ctx.send(f'Global image seed set to {seed}. Welcome to the land of {"non-" if seed is None else ""}determinisim')
 
+    async def scheduler_autocomplete(self, interaction: discord.Interaction, current: str,) -> list[app_commands.Choice[str]]:
+        if not self.igen.is_ready:
+            return []
+        compat_schedulers = self.igen.available_schedulers(return_aliases=True)
+        return [app_commands.Choice(name=sched, value=sched) for sched in compat_schedulers if current.lower() in sched.lower()]
+
+    @isetarg.command(name='scheduler')
+    @app_commands.autocomplete(alias=scheduler_autocomplete)
+    async def iset_scheduler(self, ctx: commands.Context, alias: str):
+        '''Change the image generation scheduler
+        
+        Args:
+            alias: The scheduler's nickname
+        '''
+        if not self.igen.is_ready:
+            return await ctx.send(f'Image model not loaded! Call `!imgup` first.')
+        new_sched = self.igen.set_scheduler(alias=alias)
+        return await ctx.send(f'Scheduler set: {alias} ({new_sched})')
 
 class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='img'
     '''Suite of tools for generating images.'''
@@ -206,7 +224,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     async def imgdown(self, ctx: commands.Context):
         '''Unloads the current image generation model'''
         await self.igen.unload_pipeline()
-        await self.bot.report_state('chat', ready=False)
+        await self.bot.report_state('draw', ready=False)
         await ctx.send('Drawing disabled.')
                 
 

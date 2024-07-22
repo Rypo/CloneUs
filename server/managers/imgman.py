@@ -5,6 +5,7 @@ import io
 import math
 import time
 import typing
+import functools
 from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
 
 import discord
@@ -26,6 +27,7 @@ from diffusers import (
     UNet2DConditionModel, 
     EulerDiscreteScheduler,
     EulerAncestralDiscreteScheduler,
+    FlowMatchEulerDiscreteScheduler
 )
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -225,8 +227,26 @@ def calc_esteps(num_inference_steps:int, strength:float, min_effective_steps:int
         num_inference_steps = steps
     return num_inference_steps
 
+def get_scheduler(alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], init_sched_config:dict, **kwargs):
+    # partials to avoid warnings for incompatible schedulers
+    sched_map = {
+        'DPM++ 2M':             functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=False, **kwargs),
+        'DPM++ 2M Karras':      functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=True, **kwargs),
+        'DPM++ 2M SDE':         functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=False, algorithm_type='sde-dpmsolver++', **kwargs),
+        'DPM++ 2M SDE Karras':  functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=True, algorithm_type='sde-dpmsolver++', **kwargs),
+        
+        'DPM++ SDE':            functools.partial(DPMSolverSinglestepScheduler.from_config, use_karras_sigmas=False, algorithm_type='dpmsolver++', **kwargs), 
+        'DPM++ SDE Karras':     functools.partial(DPMSolverSinglestepScheduler.from_config, use_karras_sigmas=True, algorithm_type='dpmsolver++', **kwargs),
+
+        'Euler':                functools.partial(EulerDiscreteScheduler.from_config, **kwargs),
+        'Euler A':              functools.partial(EulerAncestralDiscreteScheduler.from_config, **kwargs),
+        'Euler FM':             functools.partial(FlowMatchEulerDiscreteScheduler.from_config, **kwargs),
+    }
+    scheduler = sched_map[alias](init_sched_config)
+    return scheduler
+
 class OneStageImageGenManager:
-    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_callback:typing.Callable=None, clip_skip:int=None):
+    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_setup:str|tuple[str, dict]=None, clip_skip:int=None):
         self.is_compiled = False
         self.is_ready = False
         self.dc_enabled = None
@@ -235,21 +255,19 @@ class OneStageImageGenManager:
         self.model_path = model_path
         self.config = config
         self.offload = offload
-        self._scheduler_callback = scheduler_callback
+        self.initial_scheduler_config = None
+        self._scheduler_setup = (scheduler_setup, {}) if isinstance(scheduler_setup,str) else scheduler_setup
+        self.scheduler_kwargs = None
         # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
         # DPM++ SDE == DPMSolverSinglestepScheduler
         # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
         self.clip_skip = clip_skip
         self.global_seed = None
         self.has_adapters = False
-    
+        
     def set_seed(self, seed:int|None = None):
         self.global_seed = seed
     
-    @property
-    def generator(self):
-        return torch.Generator('cuda').manual_seed(self.global_seed) if self.global_seed is not None else None
-
     def load_lora(self, adapter_name: typing.Literal['detail_tweaker_xl'] = 'detail_tweaker_xl'):
         if adapter_name == 'detail_tweaker_xl':
             if (cpaths.ROOT_DIR/'extras/loras/detail-tweaker-xl.safetensors').exists():
@@ -269,8 +287,8 @@ class OneStageImageGenManager:
         self.base: StableDiffusionXLPipeline = pipeline_loader(
             self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False,
         )
-        if self._scheduler_callback is not None:
-            self.base.scheduler = self._scheduler_callback()
+
+        self.initial_scheduler_config = self.base.scheduler.config
         
         self.load_lora(adapter_name='detail_tweaker_xl')
         
@@ -294,9 +312,53 @@ class OneStageImageGenManager:
         
         self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
         #self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
+        if self._scheduler_setup is not None:
+            sched_alias, scheduler_kwargs = self._scheduler_setup
+            self.scheduler_kwargs = scheduler_kwargs
+            self.set_scheduler(sched_alias, **self.scheduler_kwargs)
         
         self.is_ready = True
     
+    def available_schedulers(self, return_aliases: bool = True) -> list[str]:
+        if self.base is None:
+            return []
+        
+        compat = self.base.scheduler.compatibles
+        implemented = ['DPMSolverMultistepScheduler', 'DPMSolverSinglestepScheduler', 'EulerDiscreteScheduler', 'EulerAncestralDiscreteScheduler', 'FlowMatchEulerDiscreteScheduler']
+        
+        if not return_aliases:
+            return list(set(implemented) & set([s.__name__ for s in compat]))
+        
+        schedulers = []
+        
+        if DPMSolverMultistepScheduler in compat:
+            schedulers += ['DPM++ 2M', 'DPM++ 2M Karras', 'DPM++ 2M SDE', 'DPM++ 2M SDE Karras']
+        if DPMSolverSinglestepScheduler in compat:
+            schedulers += ['DPM++ SDE', 'DPM++ SDE Karras']
+        if EulerDiscreteScheduler in compat:
+            schedulers += ['Euler']
+        if EulerAncestralDiscreteScheduler in compat:
+            schedulers += ['Euler A'] 
+        if FlowMatchEulerDiscreteScheduler in compat:
+            schedulers += ['Euler FM']
+        return schedulers
+
+    def set_scheduler(self, alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], **kwargs) -> str:
+        # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
+        assert self.base is not None, 'Model not loaded. Call `load_pipeline()` before proceeding.'
+        if alias not in self.available_schedulers(return_aliases=True):
+            raise KeyError(f'Scheduler {alias!r} not found or is incompatiable with active scheduler ({self.base.scheduler.__class__.__name__!r})')
+        
+        # be sure to keep anything initially passed like "timespace trailing" unless explicitly set otherwise
+        if self.scheduler_kwargs:
+            kwargs = {**self.scheduler_kwargs, **kwargs}
+        
+        scheduler = get_scheduler(alias, self.initial_scheduler_config, **kwargs)
+        self.base.scheduler = scheduler
+        self.basei2i.scheduler = scheduler
+
+        return self.base.scheduler.__class__.__name__
+
     def _setup_dc(self):
         # https://github.com/horseee/DeepCache/blob/master/DeepCache/extension/deepcache.py
         self.dc_base = DeepCacheSDHelper(self.base)
@@ -326,6 +388,8 @@ class OneStageImageGenManager:
         self.basei2i = None
         self.compeler = None
         self.upsampler = None
+        self.initial_scheduler_config = None
+        self.scheduler_kwargs = None
         release_memory()
         self.is_ready = False
         if self.is_compiled:
@@ -364,10 +428,10 @@ class OneStageImageGenManager:
     def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None, seed=None):
         if seed is None:
             seed = self.global_seed
-        if seed is not None:
-            #meval.seed_everything(self.global_seed)
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        #meval.seed_everything(self.global_seed)
+        #torch.manual_seed(seed)
+        #torch.cuda.manual_seed(seed)
             
         t0 = time.perf_counter()
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
@@ -380,8 +444,8 @@ class OneStageImageGenManager:
         if image is None: 
             #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
             h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, 
-                              **prompt_encodings, **lora_kwargs).images[0] # generator=self.generator, num_images_per_prompt=4
+            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, clip_skip=self.clip_skip,
+                              **prompt_encodings, **lora_kwargs, generator=gseed).images[0] # num_images_per_prompt=4
             #return make_image_grid(imgs, 2, 2)
             t_main = time.perf_counter()
             print_memstats('draw')
@@ -392,8 +456,8 @@ class OneStageImageGenManager:
         # Img2Img - not just else because could pass image with str=0 to just up+refine. But should never be image=None + strength
         elif strength:
             num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, 
-                                 **prompt_encodings, **lora_kwargs).images[0]
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, clip_skip=self.clip_skip,
+                                 **prompt_encodings, **lora_kwargs, generator=gseed).images[0]
             t_main = time.perf_counter()
             print_memstats('redraw')
             mlabel = 'I2I'
@@ -410,8 +474,8 @@ class OneStageImageGenManager:
             # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
             # num_inference_steps = calc_esteps(-1, refine_strength, min_effective_steps=refine_steps)
             num_inference_steps = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, 
-                                 **prompt_encodings, **lora_kwargs).images[0]
+            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, clip_skip=self.clip_skip,
+                                 **prompt_encodings, **lora_kwargs, generator=gseed).images[0]
             t_re = time.perf_counter()
             print_memstats('refine')
         
@@ -599,7 +663,8 @@ class DreamShaperXLManager(OneStageImageGenManager):
                 locked=['guidance_scale', 'denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
             ),
             offload=offload,
-            scheduler_callback = lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True)
+            #scheduler_callback = lambda sched_config: DPMSolverSinglestepScheduler.from_config(sched_config, use_karras_sigmas=True)
+            scheduler_setup=('DPM++ SDE Karras')
         )
 
 class JuggernautXLLightningManager(OneStageImageGenManager):
@@ -618,7 +683,8 @@ class JuggernautXLLightningManager(OneStageImageGenManager):
                 locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ),
             offload=offload,
-            scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
+            #scheduler_callback= lambda sched_config: DPMSolverSinglestepScheduler.from_config(sched_config, lower_order_final=True, use_karras_sigmas=False)
+            scheduler_setup=('DPM++ SDE', {'lower_order_final':True})
         )
 # https://huggingface.co/stabilityai/stable-diffusion-3-medium
 # https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers
@@ -637,6 +703,7 @@ class SD3MediumManager(OneStageImageGenManager):
             ),
             offload=offload,
             # scheduler_callback = lambda: DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=False)
+            # scheduler_callback = lambda sched_config: FlowMatchEulerDiscreteScheduler.from_config(sched_config)
            
         )
     
@@ -710,8 +777,8 @@ class ColorfulXLLightningManager(OneStageImageGenManager):
             # scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
             # scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config)
             # scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing")
-
-            scheduler_callback= lambda: EulerAncestralDiscreteScheduler.from_config(self.base.scheduler.config, timestep_spacing="trailing"),
+            scheduler_setup = ('Euler A', {'timestep_spacing': "trailing"}),
+            #scheduler_callback= lambda sched_config: EulerAncestralDiscreteScheduler.from_config(sched_config, timestep_spacing="trailing"),
             clip_skip=1,
         )
 
@@ -731,7 +798,8 @@ class RealVizXL4Manager(OneStageImageGenManager):
                 locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
             ),
             offload=offload,
-            scheduler_callback= lambda: DPMSolverMultistepScheduler.from_config(self.base.scheduler.config, use_karras_sigmas=True) #, algorithm_type=sde-dpmsolver++
+            scheduler_setup='DPM++ 2M Karras'
+            #scheduler_callback= lambda sched_config: DPMSolverMultistepScheduler.from_config(sched_config, use_karras_sigmas=True) #, algorithm_type=sde-dpmsolver++
             # scheduler_callback= lambda: DPMSolverSinglestepScheduler.from_config(self.base.scheduler.config, lower_order_final=True, use_karras_sigmas=False)
             # scheduler_callback= lambda: EulerDiscreteScheduler.from_config(self.base.scheduler.config)
 
