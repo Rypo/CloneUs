@@ -228,9 +228,10 @@ class TextGen(commands.Cog, SetConfig):
         if name == 'default':
             self.clomgr.clo.set_genconfig(save_on_change=False, preset='ms')
         else:
-            self.clomgr.clo.load_genconfig(gc_dir/name, self.clomgr.clo.path_data)
+            gc = self.clomgr.clo.load_genconfig(gc_dir/name, self.clomgr.clo.path_data)
+            delt = self.clomgr.update_genconfig(gc.to_dict())#clo.set_genconfig(save_on_change=False, preset='ms')
         
-        await ctx.send(f'Loaded GenConfig: {name!r}')
+        await ctx.send(f'Loaded GenConfig: {name!r}\n{delt}')
 
     @commands.hybrid_command(name='showmodels')
     async def show_models(self, ctx: commands.Context, name_filter: str = None):
