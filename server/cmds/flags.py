@@ -138,6 +138,41 @@ class UpsampleFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
 
 
+class AnimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+    # prompt: str
+    # imgurl: str = None
+    nframes: int = commands.flag(default=16, aliases=['nf'])
+    steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
+    strength_end: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.80,  aliases=['strmax']) 
+    strength_start: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.30,  aliases=['strmin']) 
+    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
+    aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
+    
+    #dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
+    fast: bool = commands.flag(default=False, aliases=['lq'],) 
+    seed: int = commands.flag(default=None, aliases=['random_seed'],) 
+
+
+class ReanimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+    # imgurl: str
+    # prompt: str
+    steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
+    astrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.50,  aliases=['str'])
+    imsize: typing.Literal['small','med','full'] = commands.flag(default='small', aliases=['imscale'])
+    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    
+    detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
+    #aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
+    
+    #hdsteps: int = commands.flag(default=0, aliases=['refine_steps'])
+    #hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength'])
+    #dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
+    fast: bool = commands.flag(default=False, aliases=['lq'],) 
+    aseed: int = commands.flag(default=None, aliases=['animation_seed'],) 
+
 # class RedrawFlags(commands.FlagConverter):
 #     # image_url: str = commands.flag(
 #     #     description="Image URL. Square = Best results. 1024x1024 = ideal (512x512 = Turbo ideal).")

@@ -14,6 +14,8 @@ from discord.ext import commands
 from diffusers.utils import load_image, make_image_grid
 
 from PIL import Image
+import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png
+import pygifsicle # sudo apt install gifsicle
 
 from managers import imgman
 import config.settings as settings
@@ -39,6 +41,16 @@ def prompt_to_filename(prompt, ext='png'):
     tstamp=datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
     fname = tstamp+'_'+(re.sub('[^\w -]+','', prompt).replace(' ','_')[:100])+f'.{ext}'
     return fname
+
+def save_gif_prompt(frames:list[Image.Image], prompt:str, optimize:bool=True):
+    fname = prompt_to_filename(prompt, 'gif')
+    out_imgpath = IMG_DIR/fname
+    iio.imwrite(out_imgpath, frames, extension='.gif', loop=0)
+    if optimize:
+        pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
+    with PROMPT_FILE.open('a') as f:
+        f.write(f'{fname} : {prompt!r}\n')
+    return out_imgpath
 
 def save_image_prompt(image: Image.Image, prompt:str):
     fname = prompt_to_filename(prompt, 'png')
@@ -67,8 +79,32 @@ def imgbytes_file(image:Image.Image, prompt:str):
         
         return discord.File(fp=imgbin, filename='image.png',  description=prompt)
         
+def tenor_fix(url, channel:discord.TextChannel = None):
+    if 'https/media.tenor.com' in url: # https://images-ext-1.discordapp.net/external/sW67YUaWQx_lnwJE5_TP2p3GMBAXbehBhrxzrSFn4tA/https/media.tenor.com/aUz-N2QvBOsAAAPo/the-isle-evrima.mp4
+        outlink = 'https://' + url.split('https/')[-1]
+        return outlink
+    elif url.startswith('https://tenor.com/view/'):# in url: # https://tenor.com/view/the-isle-evrima-kaperoo-quality-assurance-hypno-gif-25376214
+        #channel.history(limit=100, oldest_first=False)
+        #discord.utils.find()
+        #for emb in message.embeds:
+            #pprint.pprint(emb.to_dict()['video']['url'])
+        raise ValueError('Incorrect Tenor URL format: Long form')
+    elif url.startswith('https://tenor.com/') and url.endswith('.gif'): # https://tenor.com/bSDFW.gif'
+        raise ValueError('Incorrect Tenor URL format: Short form')
+    return url
 
-def clean_discord_urls(url, verbose=False):
+def is_animated(image_url):
+    try:
+        img_props = iio.improps(image_url)
+            # transparent png is batch but n_images = 0
+        return img_props.is_batch and img_props.n_images > 1 
+    except Exception as e: # urllib.error.HTTPError: HTTP Error 403: Forbidden
+        print(e)
+        return False
+    # transparent png is batch but n_images = 0
+    #return img_props.is_batch and img_props.n_images > 1 
+
+def clean_discord_urls(url:str, verbose=False):
     if not isinstance(url, str) or 'discordapp' not in url:
         return url
     
@@ -130,7 +166,7 @@ class SetImageConfig:
             version: Image model name
             offload: If True, model will be moved off GPU when not in use to save vRAM 
         '''
-        if self.igen.model_name != version.value:
+        if self.igen.model_name != version.value or self.igen.offload != offload:
             await self.igen.unload_pipeline()
             
             self.igen = imgman.AVAILABLE_MODELS[version.value]['manager'](offload=offload)
@@ -195,6 +231,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         '''Display image model info'''
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         msg = model_alias + (' ✅' if self.igen.is_ready else ' ❌')
+        msg += f'\nOffload: {self.igen.offload}'
         if self.igen.global_seed is not None:
             msg += '\n' + f'Image Seed: {self.igen.global_seed}'
 
@@ -320,9 +357,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         """Remix an image from a text prompt and image.
 
         Args:
+            prompt: A description of what you want to infuse the image with.
             imgurl: Url of image. Will be ignored if imgfile is used. 
             imgfile: image attachment. Square = Best results. Ideal size= 1024x1024 (Turbo ideal= 512x512).
-            prompt: A description of the image to be generated.
+            
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
             strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default varies.
             
@@ -338,7 +376,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
         """
         
-        return await self.redraw(ctx, imgurl, prompt, imgfile=imgfile, 
+        return await self.redraw(ctx, prompt, imgurl, imgfile=imgfile, 
                                  steps = flags.steps, 
                                  strength = flags.strength, 
                                  negative_prompt = flags.no, 
@@ -352,7 +390,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  seed = flags.seed
                                  )
 
-    async def redraw(self, ctx: commands.Context, imgurl:str, prompt: str, imgfile: discord.Attachment=None,*, 
+    async def redraw(self, ctx: commands.Context, prompt: str, imgurl:str, imgfile: discord.Attachment=None,*, 
                      steps: int = None, 
                      strength: float = None, 
                      negative_prompt: str = None, 
@@ -365,10 +403,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                      fast:bool = False,
                      seed:int = None
                      ):
-        
         # this may be passed a url string in drawUI config
         image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
-        image = load_image(image_url).convert('RGB')
+        # test for gif/mp4/animated file
+        if is_animated(image_url):
+            return await self.reanimate(ctx, prompt, image_url, steps=steps, astrength=strength, 
+                                        negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, fast=fast, seed=seed)
+
+        image = load_image(image_url, None)#.convert('RGB')
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
@@ -380,8 +422,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
-            image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, steps=steps, 
-                                                           strength=strength, negative_prompt=negative_prompt, 
+            image, fwkg = await self.igen.regenerate_image(prompt=prompt, image=image, 
+                                                           steps=steps, strength=strength, negative_prompt=negative_prompt, 
                                                            guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, refine_steps=refine_steps,
                                                            refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
             
@@ -410,7 +452,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         """
 
         image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
-        image = load_image(image_url).convert('RGB')
+        image = load_image(image_url, None)#.convert('RGB')
         if prompt is None:
             prompt = ''
         if len(prompt) > 1000:
@@ -429,7 +471,221 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             msg = await send_imagebytes(ctx, image, prompt)
 
         return image, out_imgpath
+
+
+    @commands.hybrid_command(name='animate')
+    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    async def _animate(self, ctx: commands.Context, prompt: str, imgurl:str=None, *, flags: cmd_flags.AnimateFlags):
+        """Create a gif from a text prompt and (optionally) a starting image
+
+        Args:
+            prompt: A description of the gif to be animated.
+            imgurl: Url of image. If set, strengths are linearly scaled from min to max.
+
+            nframes: Number of frames to generate. Default=16.
+            
+            steps: Num of iters to run per frame. Increase = ⬆Quality, ⬆Run Time. Default varies.
+            strength_end: Strength range end. 0 = No Change. 100=Change All. Default=80.
+            strength_start: Strength range start. ignored if `imgurl` is None. Default=30.
+            
+            no: What to exclude from image. Usually comma sep list of words. Default=None.
+            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
+            aspect: Image aspect ratio (shape). If None, will pick nearest to img if provided.
+
+            fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
+            seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
+        """
+        return await self.animate(ctx, prompt, imgurl=imgurl,
+                                  nframes=flags.nframes,
+                                  steps = flags.steps, 
+                                  strength_end = flags.strength_end, 
+                                  strength_start = flags.strength_start, 
+                                  negative_prompt = flags.no, 
+                                  guidance_scale = flags.guide, 
+                                  detail_weight = flags.detail,
+                                  aspect = flags.aspect, 
+                                  #refine_steps = flags.hdsteps, 
+                                  #refine_strength = flags.hdstrength,
+                                  #denoise_blend = flags.dblend, 
+                                  fast = flags.fast,
+                                  seed = flags.seed)
+    
+    async def animate(self, ctx: commands.Context, prompt: str, imgurl:str=None, *, 
+                      nframes: int = 16,
+                      steps: int = None, 
+                      strength_end: float = 0.80, 
+                      strength_start: float = 0.30, 
+                      negative_prompt: str = None, 
+                      guidance_scale: float = None, 
+                      detail_weight: float = 0.,
+                      aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
+                      fast: bool = False,
+                      seed: int = None
+                     ):
         
+        image = None
+        if imgurl is not None:
+            image_url = clean_discord_urls(imgurl)#imgfile)
+            image = load_image(image_url, None)
+        
+        if len(prompt) > 1000:
+            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
+        
+
+        #needs_view = False
+        if not ctx.interaction.response.is_done():
+            await ctx.defer()
+            await asyncio.sleep(1)
+            #needs_view = True
+        
+        image_frames = []
+        #nf = gif_array.shape[0]
+        cf = 0
+        async with self.bot.busy_status(activity='draw'):
+            self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
+            #image_frames, fwkg
+            frame_gen = self.igen.generate_frames(prompt=prompt, image=image, nframes=nframes, steps=steps, 
+                                                      strength_end=strength_end,strength_start=strength_start, negative_prompt=negative_prompt, 
+                                                      guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect,
+                                                      seed=seed)
+            
+            msg  = await ctx.send(f'Cooking... {cf}/{nframes}', silent=True)
+            
+            for image in await frame_gen:
+                image_frames.append(image)
+                cf += 1
+                msg  = await msg.edit(content=f'Cooking... {cf}/{nframes}')
+            #image_file = imgbytes_file(image, prompt)
+            #out_imgpath = save_image_prompt(image, prompt)
+            msg  = await msg.edit(content=f"Seasoning...")
+            # with io.BytesIO() as outbin:
+            #     iio.imwrite(outbin, image_frames, extension=".gif", loop=0)
+            #     outbin.seek(0)
+            #     msg = await msg.edit(content='', attachments=[discord.File(fp=outbin, filename='test.gif', description=prompt)])
+            
+            out_imgpath = save_gif_prompt(image_frames, prompt, optimize=False) # TODO: Send unoptimized GIF
+            try:
+                msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
+            except discord.errors.HTTPException as e:
+                if e.status == 413:
+                    msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
+                    pygifsicle.optimize(out_imgpath)
+                    msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
+                else:
+                    raise e
+            # if needs_view:
+            #     view = imageui.DrawUIView(fwkg, timeout=5*60)
+            #     msg = await view.send(ctx, image, out_imgpath)
+            
+        #out_imgpath = save_image_prompt(image, prompt)
+        return image_frames, out_imgpath
+
+    @commands.hybrid_command(name='reanimate')
+    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    async def _reanimate(self, ctx: commands.Context, prompt: commands.Range[str,1,1000], imgurl:str, *, flags: cmd_flags.ReanimateFlags):
+        """Redraw the frames of an animated image.
+
+        Args:
+            prompt: A description of what you want to infuse the animation with.
+            imgurl: Url of animated image. Can be .gif, .mp4, .webm, and some others.
+            
+            steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
+            astrength: Animation Strength. Frame alteration intensity. 0 = No change. 100=Complete Change. Default=50.
+            imsize: How big gif should be. smaller = fast, full = slow, higher quality. Default=small. 
+            
+            no: What to exclude from image. Usually comma sep list of words. Default=None.
+            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
+            
+            fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
+            
+            aseed: Animation Seed. Improves frame cohesion. Unlike `seed`, always auto-set. Set -1 to disable. 
+        """
+        return await self.reanimate(ctx, prompt, imgurl, 
+                                    steps = flags.steps, 
+                                    astrength = flags.astrength, 
+                                    imsize = flags.imsize, 
+                                    negative_prompt = flags.no, 
+                                    guidance_scale = flags.guide, 
+                                    detail_weight= flags.detail,
+                                    #aspect = flags.aspect, 
+                                    #refine_steps = flags.hdsteps, 
+                                    #refine_strength = flags.hdstrength,
+                                    #denoise_blend = flags.dblend, 
+                                    fast = flags.fast,
+                                    aseed = flags.aseed
+                                 )
+    
+    async def reanimate(self, ctx: commands.Context, prompt: str, imgurl:str, *, 
+                        steps: int = None, 
+                        astrength: float = 0.50, 
+                        imsize: typing.Literal['small','med','full']='small',
+                        negative_prompt: str = None, 
+                        guidance_scale: float = None, 
+                        detail_weight: float = 0.,
+                        fast: bool = False,
+                        aseed: int = None
+                        ):
+        
+        # this may be passed a url string in drawUI config
+        try:
+            image_url = tenor_fix(url=imgurl)
+            #clean_discord_urls(imgurl)#imgfile)
+        except ValueError:
+            return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
+        gif_array = iio.imread(image_url)
+        if gif_array.ndim < 4:
+            return await ctx.send('You passed a non-animated image url. Did you mean to call `/animate`?', ephemeral=True)
+        #image = load_image(image_url).convert('RGB')
+        if len(prompt) > 1000:
+            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
+        
+
+        #needs_view = False
+        if not ctx.interaction.response.is_done():
+            await ctx.defer()
+            await asyncio.sleep(1)
+            #needs_view = True
+        
+        image_frames = []
+        nf = gif_array.shape[0]
+        cf = 0
+        async with self.bot.busy_status(activity='draw'):
+            self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
+            #image_frames, fwkg
+            frame_gen = self.igen.regenerate_frames(frame_array=gif_array, prompt=prompt, imsize=imsize, steps=steps, 
+                                                           astrength=astrength, negative_prompt=negative_prompt, 
+                                                           guidance_scale=guidance_scale, detail_weight=detail_weight, aseed=aseed)
+            
+            msg  = await ctx.send(f'Cooking... {cf}/{nf}', silent=True)
+            for images in await frame_gen:
+                image_frames.extend(images)
+                cf += len(images)
+                msg  = await msg.edit(content=f'Cooking... {cf}/{nf}')
+            #image_file = imgbytes_file(image, prompt)
+            #out_imgpath = save_image_prompt(image, prompt)
+            msg  = await msg.edit(content=f'Seasoning...')
+            out_imgpath = save_gif_prompt(image_frames, prompt, optimize=False)
+
+            try:
+                msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
+            except discord.errors.HTTPException as e:
+                if e.status == 413:
+                    msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
+                    pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
+                    msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
+                else:
+                    raise e
+            # if needs_view:
+            #     view = imageui.DrawUIView(fwkg, timeout=5*60)
+            #     msg = await view.send(ctx, image, out_imgpath)
+            
+        #out_imgpath = save_image_prompt(image, prompt)
+        return image_frames, out_imgpath
+    
+    
+    
 
 async def setup(bot: BotUs):
     igen = ImageGen(bot)
