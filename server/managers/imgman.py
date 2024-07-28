@@ -5,6 +5,7 @@ import io
 import math
 import time
 import typing
+import itertools
 import functools
 from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
 
@@ -55,6 +56,7 @@ event_logger = settings.logging.getLogger('event')
 
 IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
+SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
 
 torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -84,6 +86,15 @@ def torch_compile_flags(restore_defaults=False, verbose=False):
         torch._inductor.config.coordinate_descent_check_all_directions = True
         # torch._inductor.config.force_fuse_int_mm_with_mul = True
         # torch._inductor.config.use_mixed_mm = True
+
+def batched(iterable, n:int):
+    '''https://docs.python.org/3/library/itertools.html#itertools.batched'''
+    # batched('ABCDEFG', 3) → ABC DEF G
+    if n < 1:
+        raise ValueError('n must be at least one')
+    iterator = iter(iterable)
+    while batch := list(itertools.islice(iterator, n)):
+        yield batch
 
 @dataclass
 class CfgItem:
@@ -187,20 +198,29 @@ class DiffusionConfig:
             filled_kwargs[k] = v
         return filled_kwargs
         
-    def nearest_dims(self, img_wh, use_hf_sbr=True):
+    def nearest_dims(self, img_wh:tuple[int,int], dim_choices:list[tuple[int,int]]=None, scale:float=1.0, use_hf_sbr:bool=False):
         # TODO: compare implementation vs transformers select_best_resolution
-    
-        dim_out = self.img_dims
+        if dim_choices is None:
+            dim_choices = self.img_dims
         
-        if isinstance(self.img_dims, list):
-            w_in, h_in = img_wh
-            if use_hf_sbr:
-                resolutions = [(h,w) for w,h in self.img_dims] # May not matter since symmetric, but a precaution
-                dim_out = select_best_resolution((h_in, w_in), possible_resolutions=resolutions)
-                dim_out = (dim_out[1],dim_out[0]) # (h,w) -> (w,h)
-            else:
-                ar_in = w_in/h_in
-                dim_out = min(self.img_dims, key=lambda wh: abs(ar_in - wh[0]/wh[1]))
+        if isinstance(dim_choices, tuple):
+            return dim_choices
+
+        scale_dims = np.array(dim_choices)*scale
+        scale_dims -= (scale_dims % 64) #8) # equiv: ((scale_dims//64)*64
+        dim_choices = list(map(tuple,scale_dims.astype(int)))
+
+        #dim_choices = list(map(tuple,(np.array(dim_choices)*scale).astype(int)))
+        
+        #if isinstance(self.img_dims, list):
+        w_in, h_in = img_wh
+        if use_hf_sbr:
+            resolutions = [(h,w) for w,h in dim_choices] # May not matter since symmetric, but a precaution
+            dim_out = select_best_resolution((h_in, w_in), possible_resolutions=resolutions)
+            dim_out = (dim_out[1],dim_out[0]) # (h,w) -> (w,h)
+        else:
+            ar_in = w_in/h_in
+            dim_out = min(dim_choices, key=lambda wh: abs(ar_in - wh[0]/wh[1]))
         
         return dim_out
     
@@ -287,15 +307,17 @@ class OneStageImageGenManager:
         self.base: StableDiffusionXLPipeline = pipeline_loader(
             self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False,
         )
+        
+        if not self.offload:
+            self.base = self.base.to(0)
 
         self.initial_scheduler_config = self.base.scheduler.config
         
-        self.load_lora(adapter_name='detail_tweaker_xl')
+        if self._scheduler_setup is not None:
+            sched_alias, self.scheduler_kwargs = self._scheduler_setup
+            self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
         
-        if self.offload:
-            self.base.enable_model_cpu_offload()
-        else:
-            self.base = self.base.to("cuda")
+        self.load_lora(adapter_name='detail_tweaker_xl')
         
         self.compeler = Compel(
             tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
@@ -303,19 +325,31 @@ class OneStageImageGenManager:
             returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
             requires_pooled=[False, True]
         )
-
+        
         self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base,)# torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)#.to(0)
+
+        if self.offload:
+            # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
+            self.base.enable_model_cpu_offload()
+            self.basei2i.enable_model_cpu_offload()
+        #else:
+        #    self.base = self.base.to("cuda")
         
-        if not self.offload:
-            self.basei2i = self.basei2i.to("cuda")
+
+
         
+        
+        #if not self.offload:
+        #    self.basei2i = self.basei2i.to("cuda")
+        
+
         
         self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
         #self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
-        if self._scheduler_setup is not None:
-            sched_alias, scheduler_kwargs = self._scheduler_setup
-            self.scheduler_kwargs = scheduler_kwargs
-            self.set_scheduler(sched_alias, **self.scheduler_kwargs)
+        # if self._scheduler_setup is not None:
+        #     sched_alias, scheduler_kwargs = self._scheduler_setup
+        #     self.scheduler_kwargs = scheduler_kwargs
+        #     self.set_scheduler(sched_alias, **self.scheduler_kwargs)
         
         self.is_ready = True
     
@@ -513,15 +547,15 @@ class OneStageImageGenManager:
         return image, fkwg
 
     @async_wrap_thread
-    def regenerate_image(self, image:Image.Image, prompt:str, 
-                         steps:int=None, 
-                         strength:float=None, 
-                         negative_prompt:str=None, 
-                         guidance_scale:float=None, 
-                         detail_weight:float=0,
-                         aspect:typing.Literal['square','portrait','landscape']=None, 
-                         refine_steps:int=0, 
-                         refine_strength:float=None, 
+    def regenerate_image(self, prompt: str, image: Image.Image,  
+                         steps: int = None, 
+                         strength: float = None, 
+                         negative_prompt: str = None, 
+                         guidance_scale: float = None, 
+                         detail_weight: float = 0,
+                         aspect: typing.Literal['square','portrait','landscape'] = None, 
+                         refine_steps: int = 0, 
+                         refine_strength: float = None, 
                          seed: int = None,
                          **kwargs) -> Image.Image:
         
@@ -547,7 +581,153 @@ class OneStageImageGenManager:
             fkwg.update(seed=seed)
         return image, fkwg
 
+    @async_wrap_thread
+    def regenerate_frames(self, prompt: str, frame_array: np.ndarray, 
+                          steps: int = None, 
+                          astrength: float = 0.5, 
+                          imsize: typing.Literal['small','med','full'] = 'small', 
 
+                          negative_prompt: str = None, 
+                          guidance_scale: float = None, 
+                          detail_weight: float = 0, 
+                          aseed: int = None, 
+                          **kwargs):   
+        
+        gseed = None
+        # NOTE: special behavior since having a seed improves results substantially 
+        if aseed is None: 
+            if self.global_seed is not None:
+                aseed = self.global_seed
+            else:
+                aseed = np.random.randint(1e9, 1e10-1)
+        elif aseed < 0:
+            aseed = False
+            
+            
+        lora_kwargs={'cross_attention_kwargs': {"scale": detail_weight}} if detail_weight and self.has_adapters else {}
+
+        fkwg = self.config.get_if_none(steps=steps, strength=astrength, negative_prompt=negative_prompt, guidance_scale=guidance_scale)
+        steps = fkwg['steps']
+        astrength = cmd_tfms.percent_transform(astrength)
+        negative_prompt=fkwg['negative_prompt']
+        guidance_scale=fkwg['guidance_scale']
+
+        
+        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+        
+        nf,h,w,c = frame_array.shape
+        img_wh = (w,h)
+        
+        dims_opts = {
+            'small': [(512,512), (512,768), (768,512)], # 1.5
+            #'small2': [(640,640), (512,768), (768,512)], # 1.5
+            'med': [(768,768), (640,896), (896,640)], # 1.4
+            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
+        }
+        batch_sizes = {'small': 4, 'med': 3, 'full': 2}
+        
+        dim_choices = dims_opts.get(imsize, None) # SDXL_DIMS
+        bsz = batch_sizes.get(imsize, 1) #round(2/scale) # half = b4, full = b2
+
+        dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1, use_hf_sbr=False)
+        #if img_wh[0] < dim_out[0] or img_wh[1] < dim_out[1]:
+            #print(img_wh, '<', dim_out, ':', 'Upsampling..')
+            #resized_images = [self.upsampler.upsample(Image.fromarray(imarr, mode='RGB')).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+            #self.upsampler.upsample()
+        #else:
+            #resized_images = [Image.fromarray(imarr, mode='RGB').resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+        resized_images = [Image.fromarray(imarr, mode='RGB').resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+        print('regenerate_frames input size:', img_wh, '->', dim_out)
+        
+        #out_images = []
+        
+        #img_batches = list(batched(resized_images, bsz))
+        #prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
+        # TODO: prompt_encodings
+        for imbatch in batched(resized_images, bsz):
+            # common seed help SIGNIFICANTLY with cohesion
+            if aseed:
+                # list of generators is very important. Otherwise it does not apply correctly
+                gseed = [torch.Generator(device='cpu').manual_seed(aseed) for _ in range(len(imbatch))]
+            
+            images = self.basei2i(image=imbatch, prompt=[prompt]*len(imbatch), num_inference_steps=steps, strength=astrength, 
+                                  negative_prompt=negative_prompt, guidance_scale=guidance_scale, clip_skip=self.clip_skip, generator=gseed, **lora_kwargs, **kwargs).images
+            
+            yield images
+        release_memory()
+        #return out_images, fkwg
+
+
+    @async_wrap_thread
+    def generate_frames(self, prompt: str, 
+                            image: Image.Image = None, 
+                            nframes: int = 16,
+                            steps: int = None, 
+                            strength_end: float = 0.80, 
+                            strength_start: float = 0.30, 
+                            negative_prompt: str = None, 
+                            guidance_scale: float = None, 
+                            detail_weight: float = 0, 
+                            aspect: typing.Literal['square','portrait','landscape'] = None, 
+                            seed: int = None, 
+                            **kwargs):   
+        #from tqdm.auto import tqdm
+        if seed is None:
+            seed = self.global_seed
+            # NOTE: if you attempt to update the seed on each iteration, you get some interesting behavoir
+            # you effectively turn it into a coloring book generator. I assume this is a product of how diffusion works
+            # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
+            # the minimal representation of the prompt. If you 
+        
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
+        lora_kwargs={'cross_attention_kwargs': {"scale": detail_weight}} if detail_weight and self.has_adapters else {}
+
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
+        negative_prompt=fkwg['negative_prompt']
+        guidance_scale=fkwg['guidance_scale']
+        strength_end = cmd_tfms.percent_transform(strength_end)
+        strength_start = cmd_tfms.percent_transform(strength_start)
+        steps = fkwg['steps']
+        aspect = fkwg['aspect']
+        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+        
+        
+        # subtract 1 for first image
+        nframes = nframes - 1
+
+        
+        if image is None:
+            strengths = [strength_end]*nframes
+            w,h = self.config.get_dims(aspect)
+            image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, clip_skip=self.clip_skip,
+                              **prompt_encodings, **lora_kwargs, generator=gseed).images[0] # num_images_per_prompt=4
+        else:
+            strengths = np.linspace(strength_start, strength_end, num=nframes)  
+            
+            img_wh = image.size
+            dim_choices=SDXL_DIMS # None
+            dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1.0, use_hf_sbr=False)
+            print('regenerate_frames input size:', img_wh, '->', dim_out)
+            image = image.resize(dim_out, resample=Image.Resampling.LANCZOS) 
+        
+        yield image
+
+        #image_frames.append(image)
+        
+        # steps = max(steps, calc_esteps(steps, strength_min, min_effective_steps=1))
+        steps = calc_esteps(steps, strength_start, min_effective_steps=1)
+        
+        
+        for i in range(nframes):
+            # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
+            image = self.basei2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, clip_skip=self.clip_skip,
+                                    **prompt_encodings, **lora_kwargs, generator=gseed).images[0]
+            #image_frames.append(image)
+            yield image
+
+        release_memory()
+        #return out_images, fkwg
 
 class Upsampler:
     def __init__(self, model_name=typing.Literal["4xNMKD-Superscale.pth", "4xUltrasharp-V10.pth"], dtype=torch.bfloat16):
@@ -555,7 +735,7 @@ class Upsampler:
         ext_modeldir = cpaths.ROOT_DIR/'extras/models'
         
         # load a model from disk
-        self.model = ModelLoader().load_from_file(ext_modeldir.joinpath(model_name))
+        self.model = ModelLoader('cuda').load_from_file(ext_modeldir.joinpath(model_name))
         # make sure it's an image to image model
         assert isinstance(self.model, ImageModelDescriptor)
         
