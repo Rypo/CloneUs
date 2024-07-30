@@ -23,6 +23,7 @@ import config.settings as settings
 from cmds import transformers as cmd_tfms, choices as cmd_choices, flags as cmd_flags
 from utils.command import check_up
 from utils.globthread import stop_global_thread
+from utils import image as imgutil
 from views import imageui
 from run import BotUs
 
@@ -33,114 +34,8 @@ event_logger = settings.logging.getLogger('event')
 
 # Resource: https://github.com/CyberTimon/Stable-Diffusion-Discord-Bot/blob/main/bot.py
 
-IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
-PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
-
-
-def prompt_to_filename(prompt, ext='png'):
-    tstamp=datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
-    fname = tstamp+'_'+(re.sub('[^\w -]+','', prompt).replace(' ','_')[:100])+f'.{ext}'
-    return fname
-
-def save_gif_prompt(frames:list[Image.Image], prompt:str, optimize:bool=True):
-    fname = prompt_to_filename(prompt, 'gif')
-    out_imgpath = IMG_DIR/fname
-    iio.imwrite(out_imgpath, frames, extension='.gif', loop=0)
-    if optimize:
-        pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
-    with PROMPT_FILE.open('a') as f:
-        f.write(f'{fname} : {prompt!r}\n')
-    return out_imgpath
-
-def save_image_prompt(image: Image.Image, prompt:str):
-    fname = prompt_to_filename(prompt, 'png')
-    out_imgpath = IMG_DIR/fname
-
-    image.save(out_imgpath)
-    
-    with PROMPT_FILE.open('a') as f:
-        f.write(f'{fname} : {prompt!r}\n')
-
-    return out_imgpath
-
-async def send_imagebytes(ctx:commands.Context, image:Image.Image, prompt:str):
-    with io.BytesIO() as imgbin:
-        image.save(imgbin, 'PNG')
-        imgbin.seek(0)
-        #view = redrawui.DrawUIView(ctx)
-        #msg = await view.send(ctx, discord.File(fp=imgbin, filename='image.png',  description=prompt))
-        msg = await ctx.send(file=discord.File(fp=imgbin, filename='image.png',  description=prompt))#, view=redrawui.DrawUIView()) 
-    return msg
-
-def imgbytes_file(image:Image.Image, prompt:str):
-    with io.BytesIO() as imgbin:
-        image.save(imgbin, 'PNG')
-        imgbin.seek(0)
-        
-        return discord.File(fp=imgbin, filename='image.png',  description=prompt)
-        
-def tenor_fix(url, channel:discord.TextChannel = None):
-    if 'https/media.tenor.com' in url: # https://images-ext-1.discordapp.net/external/sW67YUaWQx_lnwJE5_TP2p3GMBAXbehBhrxzrSFn4tA/https/media.tenor.com/aUz-N2QvBOsAAAPo/the-isle-evrima.mp4
-        outlink = 'https://' + url.split('https/')[-1]
-        return outlink
-    elif url.startswith('https://tenor.com/view/'):# in url: # https://tenor.com/view/the-isle-evrima-kaperoo-quality-assurance-hypno-gif-25376214
-        #channel.history(limit=100, oldest_first=False)
-        #discord.utils.find()
-        #for emb in message.embeds:
-            #pprint.pprint(emb.to_dict()['video']['url'])
-        raise ValueError('Incorrect Tenor URL format: Long form')
-    elif url.startswith('https://tenor.com/') and url.endswith('.gif'): # https://tenor.com/bSDFW.gif'
-        raise ValueError('Incorrect Tenor URL format: Short form')
-    return url
-
-def is_animated(image_url):
-    try:
-        img_props = iio.improps(image_url)
-            # transparent png is batch but n_images = 0
-        return img_props.is_batch and img_props.n_images > 1 
-    except Exception as e: # urllib.error.HTTPError: HTTP Error 403: Forbidden
-        print(e)
-        return False
-    # transparent png is batch but n_images = 0
-    #return img_props.is_batch and img_props.n_images > 1 
-
-def clean_discord_urls(url:str, verbose=False):
-    if not isinstance(url, str) or 'discordapp' not in url:
-        return url
-    
-    clean_url = url.split('format=')[0].rstrip('&=?')
-    if verbose:
-        print(f'old discord url: {url}\nnew discord url: {clean_url}')
-    return clean_url
-
-def extract_image_url(message: discord.Message, verbose=False):
-    """read image url from message"""
-    url = None
-    if message.embeds:
-        url = message.embeds[0].url
-        if verbose: print('embeds_url:', url)
-        
-    elif message.attachments:
-        url = message.attachments[0].url
-        #img_filename = message.attachments[0].filename
-        if verbose: print('attach_url:', url)
-        
-
-    return clean_discord_urls(url)
-        
-
-async def read_attach(ctx: commands.Context):
-    try:
-        attach = ctx.message.attachments[0]
-        print(attach.url)
-        print(f'Image dims (WxH): ({attach.width}, {attach.height})')
-        
-        image = Image.open(io.BytesIO(await attach.read())).convert('RGB')
-        return image
-    except IndexError as e:
-        await ctx.send('No image attachment given!')
-        return
-
+# IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
+# PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
 
 class SetImageConfig:
     bot: BotUs
@@ -344,7 +239,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                          refine_steps=refine_steps, refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
             #await send_imagebytes(ctx, image, prompt)
             #image_file = imgbytes_file(image, prompt)
-            out_imgpath = save_image_prompt(image, prompt)
+            out_imgpath = imgutil.save_image_prompt(image, prompt)
             if not has_view:
                 view = imageui.DrawUIView(fwkg, timeout=5*60)
                 msg = await view.send(ctx, image, out_imgpath)
@@ -404,13 +299,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                      seed:int = None
                      ):
         # this may be passed a url string in drawUI config
-        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
+        image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         # test for gif/mp4/animated file
-        if is_animated(image_url):
+        if imgutil.is_animated(image_url):
             return await self.reanimate(ctx, prompt, image_url, steps=steps, astrength=strength, 
                                         negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, fast=fast, seed=seed)
 
-        image = load_image(image_url, None)#.convert('RGB')
+        image = imgutil.load_images(image_url)#.convert('RGB')
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
@@ -428,7 +323,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                            refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
             
             #image_file = imgbytes_file(image, prompt)
-            out_imgpath = save_image_prompt(image, prompt)
+            out_imgpath = imgutil.save_image_prompt(image, prompt)
             if needs_view:
                 view = imageui.DrawUIView(fwkg, timeout=5*60)
                 msg = await view.send(ctx, image, out_imgpath)
@@ -451,7 +346,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
         """
 
-        image_url = clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
+        image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         image = load_image(image_url, None)#.convert('RGB')
         if prompt is None:
             prompt = ''
@@ -467,8 +362,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                            negative_prompt=flags.no, guidance_scale=flags.guide,
                                                            strength=0, steps=None, )
             
-            out_imgpath = save_image_prompt(image, prompt)
-            msg = await send_imagebytes(ctx, image, prompt)
+            out_imgpath = imgutil.save_image_prompt(image, prompt)
+            msg = await imgutil.send_imagebytes(ctx, image, prompt)
 
         return image, out_imgpath
 
@@ -526,24 +421,25 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         image = None
         if imgurl is not None:
-            image_url = clean_discord_urls(imgurl)#imgfile)
-            image = load_image(image_url, None)
+            image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
+            image = load_image(image_url)
         
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
 
-        #needs_view = False
+        needs_view = False
         if not ctx.interaction.response.is_done():
             await ctx.defer()
             await asyncio.sleep(1)
-            #needs_view = True
+            needs_view = True
         
         image_frames = []
         #nf = gif_array.shape[0]
         cf = 0
         async with self.bot.busy_status(activity='draw'):
-            self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
+            
+            self.igen.dc_fastmode(enable=fast, img2img=True)
             #image_frames, fwkg
             frame_gen = self.igen.generate_frames(prompt=prompt, image=image, nframes=nframes, steps=steps, 
                                                       strength_end=strength_end,strength_start=strength_start, negative_prompt=negative_prompt, 
@@ -564,19 +460,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #     outbin.seek(0)
             #     msg = await msg.edit(content='', attachments=[discord.File(fp=outbin, filename='test.gif', description=prompt)])
             
-            out_imgpath = save_gif_prompt(image_frames, prompt, optimize=False) # TODO: Send unoptimized GIF
-            try:
-                msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
-            except discord.errors.HTTPException as e:
-                if e.status == 413:
-                    msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
-                    pygifsicle.optimize(out_imgpath)
-                    msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
-                else:
-                    raise e
-            # if needs_view:
-            #     view = imageui.DrawUIView(fwkg, timeout=5*60)
-            #     msg = await view.send(ctx, image, out_imgpath)
+            out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
+           
+            if needs_view:
+                view = imageui.GifUIView(image_frames, timeout=5*60)
+                msg = await view.send(msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
         return image_frames, out_imgpath
@@ -629,24 +517,27 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                         ):
         
         # this may be passed a url string in drawUI config
+        
         try:
-            image_url = tenor_fix(url=imgurl)
+            image_url = imgutil.tenor_fix(url=imgurl)
             #clean_discord_urls(imgurl)#imgfile)
         except ValueError:
             return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
-        gif_array = iio.imread(image_url)
+        
+        gif_array = imgutil.load_images(image_url, result_type='np') #iio.imread(image_url)
+        
         if gif_array.ndim < 4:
             return await ctx.send('You passed a non-animated image url. Did you mean to call `/animate`?', ephemeral=True)
-        #image = load_image(image_url).convert('RGB')
+        
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
 
-        #needs_view = False
+        needs_view = False
         if not ctx.interaction.response.is_done():
             await ctx.defer()
             await asyncio.sleep(1)
-            #needs_view = True
+            needs_view = True
         
         image_frames = []
         nf = gif_array.shape[0]
@@ -666,20 +557,12 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_file = imgbytes_file(image, prompt)
             #out_imgpath = save_image_prompt(image, prompt)
             msg  = await msg.edit(content=f'Seasoning...')
-            out_imgpath = save_gif_prompt(image_frames, prompt, optimize=False)
+            out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
 
-            try:
-                msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
-            except discord.errors.HTTPException as e:
-                if e.status == 413:
-                    msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
-                    pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
-                    msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)])
-                else:
-                    raise e
-            # if needs_view:
-            #     view = imageui.DrawUIView(fwkg, timeout=5*60)
-            #     msg = await view.send(ctx, image, out_imgpath)
+
+            if needs_view:
+                view = imageui.GifUIView(image_frames, timeout=5*60)
+                msg = await view.send(msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
         return image_frames, out_imgpath
