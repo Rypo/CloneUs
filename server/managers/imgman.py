@@ -45,7 +45,7 @@ from cloneus import cpaths
 import config.settings as settings
 from cmds import flags as cmd_flags, transformers as cmd_tfms
 from utils.globthread import async_wrap_thread, stop_global_thread
-from views import imageui
+from utils.image import batched
 
 bot_logger = settings.logging.getLogger('bot')
 model_logger = settings.logging.getLogger('model')
@@ -87,14 +87,14 @@ def torch_compile_flags(restore_defaults=False, verbose=False):
         # torch._inductor.config.force_fuse_int_mm_with_mul = True
         # torch._inductor.config.use_mixed_mm = True
 
-def batched(iterable, n:int):
-    '''https://docs.python.org/3/library/itertools.html#itertools.batched'''
-    # batched('ABCDEFG', 3) → ABC DEF G
-    if n < 1:
-        raise ValueError('n must be at least one')
-    iterator = iter(iterable)
-    while batch := list(itertools.islice(iterator, n)):
-        yield batch
+# def batched(iterable, n:int):
+#     '''https://docs.python.org/3/library/itertools.html#itertools.batched'''
+#     # batched('ABCDEFG', 3) → ABC DEF G
+#     if n < 1:
+#         raise ValueError('n must be at least one')
+#     iterator = iter(iterable)
+#     while batch := list(itertools.islice(iterator, n)):
+#         yield batch
 
 @dataclass
 class CfgItem:
@@ -334,22 +334,12 @@ class OneStageImageGenManager:
             self.basei2i.enable_model_cpu_offload()
         #else:
         #    self.base = self.base.to("cuda")
-        
 
-
-        
-        
         #if not self.offload:
         #    self.basei2i = self.basei2i.to("cuda")
-        
 
-        
         self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
         #self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
-        # if self._scheduler_setup is not None:
-        #     sched_alias, scheduler_kwargs = self._scheduler_setup
-        #     self.scheduler_kwargs = scheduler_kwargs
-        #     self.set_scheduler(sched_alias, **self.scheduler_kwargs)
         
         self.is_ready = True
     
@@ -444,15 +434,31 @@ class OneStageImageGenManager:
         self.is_compiled = True
     
     @torch.inference_mode()
-    def embed_prompts(self, prompt:str, negative_prompt:str = None):
+    def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1):
         
         if set(prompt) & set('()-+'):
             conditioning, pooled = self.compeler(prompt)
+            
+            if batch_size>1:
+                conditioning = conditioning.repeat_interleave(batch_size, dim=0)
+                pooled = pooled.repeat_interleave(batch_size, dim=0)
+            
             prompt_encodings = dict(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
+            
             if negative_prompt is not None:
                 neg_conditioning, neg_pooled = self.compeler(negative_prompt)
+                
+                if batch_size>1:
+                    neg_conditioning = neg_conditioning.repeat_interleave(batch_size, dim=0)
+                    neg_pooled = neg_pooled.repeat_interleave(batch_size, dim=0)
+                
                 prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
         else:
+            if batch_size>1:
+                prompt = [prompt]*batch_size
+                if negative_prompt is not None:
+                    negative_prompt = [negative_prompt]*batch_size
+                
             prompt_encodings = dict(prompt=prompt, negative_prompt=negative_prompt)
             
         return prompt_encodings
@@ -642,16 +648,23 @@ class OneStageImageGenManager:
         #out_images = []
         
         #img_batches = list(batched(resized_images, bsz))
-        #prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
         # TODO: prompt_encodings
+        batched_prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz)
+        
         for imbatch in batched(resized_images, bsz):
+            batch_len = len(imbatch)
             # common seed help SIGNIFICANTLY with cohesion
             if aseed:
                 # list of generators is very important. Otherwise it does not apply correctly
-                gseed = [torch.Generator(device='cpu').manual_seed(aseed) for _ in range(len(imbatch))]
+                gseed = [torch.Generator(device='cuda').manual_seed(aseed) for _ in range(batch_len)]
             
-            images = self.basei2i(image=imbatch, prompt=[prompt]*len(imbatch), num_inference_steps=steps, strength=astrength, 
-                                  negative_prompt=negative_prompt, guidance_scale=guidance_scale, clip_skip=self.clip_skip, generator=gseed, **lora_kwargs, **kwargs).images
+            if batch_len != bsz:
+                # it can only be less
+                batched_prompts_encodings = {k: v[:batch_len] for k,v in batched_prompts_encodings.items() if v is not None}
+
+            
+            images = self.basei2i(image=imbatch, num_inference_steps=steps, strength=astrength, guidance_scale=guidance_scale, clip_skip=self.clip_skip, 
+                                  generator=gseed, **batched_prompts_encodings, **lora_kwargs, **kwargs).images
             
             yield images
         release_memory()
@@ -703,7 +716,10 @@ class OneStageImageGenManager:
             image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, clip_skip=self.clip_skip,
                               **prompt_encodings, **lora_kwargs, generator=gseed).images[0] # num_images_per_prompt=4
         else:
-            strengths = np.linspace(strength_start, strength_end, num=nframes)  
+            #strengths = np.linspace(strength_start, strength_end, num=nframes)
+            strengths = np.around(steps*np.linspace(strength_start, strength_end, num=nframes))/steps
+            # round up strengths since they will be floored in get_timesteps via int()
+            # and it makes step distributions more even, 3x 3step, 3x-4step, ... etc
             
             img_wh = image.size
             dim_choices=SDXL_DIMS # None
