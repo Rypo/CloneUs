@@ -3,9 +3,11 @@ import io
 import time
 import json
 import yaml
+import tempfile
 import random
 import traceback
 import typing
+from pathlib import Path
 
 import discord
 from discord.enums import TextStyle
@@ -14,24 +16,8 @@ from discord.utils import MISSING
 
 from PIL import Image
 
+from utils import image as imgutil
 
-def to_bytes_file(image:Image.Image, prompt: str):
-    filename = f'image_{hash(image.tobytes())}.png' 
-    with io.BytesIO() as imgbin:
-        image.save(imgbin, 'PNG')
-        imgbin.seek(0)
-        
-        return discord.File(fp=imgbin, filename=filename, description=prompt)
-
-def to_bfile(image:Image.Image, filename: str, description:str, ):
-    #if filename is None:
-    #    filename = f'image_{hash(image.tobytes())}.png' 
-    with io.BytesIO() as imgbin:
-        image.save(imgbin, 'WebP')#'JPEG')
-        imgbin.seek(0)
-        
-        return discord.File(fp=imgbin, filename=filename, description=description)
-    
 class DrawUIView(discord.ui.View):
     def __init__(self, kwargs:dict, *, timeout=None):
         super().__init__(timeout=timeout)
@@ -129,7 +115,7 @@ class DrawUIView(discord.ui.View):
         self.n_images += 1
         self.cur_imgnum  = self.n_images
         
-        bfile = to_bytes_file(image, self.kwargs['prompt'])
+        bfile = imgutil.to_bytes_file(image, self.kwargs['prompt'])
         cur_attach = await self.update_view(bfile)
         #self.files.append(bfile)
         self.attachments.append(cur_attach)
@@ -152,7 +138,7 @@ class DrawUIView(discord.ui.View):
         
         expired_attach = self.attachments[index]
         #cur_file = discord.File(self.local_paths[index], filename=expired_attach.filename, description=expired_attach.description)
-        cur_file = to_bfile(self.images[index], filename=expired_attach.filename, description=expired_attach.description)
+        cur_file = imgutil.to_bfile(self.images[index], filename=expired_attach.filename, description=expired_attach.description)
         
         cur_attach = await self.update_view(cur_file)
         self.attachments[index] = cur_attach #.insert(self.cur_imgnum, cur_attach)
@@ -280,7 +266,7 @@ class DrawUIView(discord.ui.View):
         image, fpath = await self.call_ctx.invoke(imgen.redraw, *self.call_ctx.args, **kwargs)
         
         #await interaction.followup.send(file=to_bytes_file(image_file, kwargs['prompt']))
-        ifile = to_bytes_file(image, kwargs['prompt'])
+        ifile = imgutil.to_bytes_file(image, kwargs['prompt'])
         
         # if self.upsample_thread is None:
         #    self.upsample_thread = await self.call_ctx.channel.create_thread(name='Upsampled Images', message=self.message)
@@ -308,42 +294,178 @@ class DrawUIView(discord.ui.View):
     
     @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=True, emoji='↗️', row=0) # row=4 # 💢 ⛶  label='🗗︎', 
     async def explode_button(self, interaction:discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        print('Exploded Image View')
-        # 10 is max image attachments in a message
-        image_attachs = zip(self.images,self.attachments)
-        if self.n_images > 10:
-            msg = await interaction.followup.send('Only 10 images can be displayed at once. Showing last 10.', ephemeral=True, wait=True)
-            image_attachs = zip(self.images[-10:],self.attachments[-10:])
-            await msg.delete(delay=2.0)
-        files = [to_bfile(img, att.filename, att.description) for img,att in image_attachs]#attach.to_file() for attach in self.attachments]
-        # self.message = await self.message.edit(content='',attachments=files, view=self)
-        self.message = await self.message.edit(content='',attachments=files, view=GridUIView(self))
+        button.disabled = True
+        button.emoji = '⏳'
+        await interaction.response.edit_message(view=self)
+        # button.disabled = False # already handled in button_update
+        button.emoji = '↗️'        
         
-        #self.message = await self.message.edit(content='', attachments=self.attachments, view=self)
-        #self.message = await self.message.edit(content='',attachments=files, view=self)
-        return
-        
-class GridUIView(discord.ui.View):
-    def __init__(self, draw_view:DrawUIView, *, timeout=None):
-        timeout = timeout if timeout is not None else draw_view.timeout
+        if self.n_images <= 10:
+            files = [imgutil.to_bfile(img, att.filename, att.description) for img,att in zip(self.images,self.attachments)]#attach.to_file() for attach in self.attachments]
+            self.message = await self.message.edit(content='',attachments=files, view=ImageGridView(self))
+        else:
+            filenames, descriptions = list(zip(*[(at.filename, at.description) for at in self.attachments]))
+            await PagedImageGridView(self, images=self.images, filenames=filenames, descriptions=descriptions).refresh()
+
+
+class GifUIView(discord.ui.View):
+    def __init__(self,  images:list[Image.Image], *, timeout=180):
         super().__init__(timeout=timeout)
-        self.draw_view = draw_view
+        self.images = images
+        self.filenames: list[str]
+        self.message: discord.Message
+        self.out_gifpath: Path
+        self.prompt: str
     
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
-        self.clear_items()
-        await self.draw_view.message.edit(view=self)
+        self.clear_items().stop()
+    
+    async def send(self, message: discord.Message, out_gifpath:Path, prompt: str):
+        self.message = message
+        self.out_gifpath = Path(out_gifpath)
+        self.prompt = prompt
+        self.filenames = [self.out_gifpath.with_stem(self.out_gifpath.stem + f'_{i}').with_suffix('.webp').name for i in range(len(self.images))]
+        
+        self.message = await imgutil.try_send_gif(self.message, out_gifpath, prompt, view=self)
+        #self.message.edit(content='', attachments=[discord.File(fp=out_gifpath, filename=out_gifpath.name, description=prompt)], view=self)
+        return self.message
+    
+    async def refresh(self, out_gifpath:Path=None, prompt:str=None):
+        if out_gifpath is None:
+            out_gifpath = self.out_gifpath
+        
+        if prompt is None:
+            prompt = self.prompt
+        
+        self.message = await imgutil.try_send_gif(self.message, out_gifpath, prompt, view=self)
+        return self.message
+
+
+    @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='↗️', row=0) # row=4 # 💢 ⛶  label='🗗︎', 
+    async def explode_button(self, interaction:discord.Interaction, button: discord.ui.Button):
+        button.disabled = True
+        button.emoji = '⏳'
+        await interaction.response.edit_message(view=self)
+        button.disabled = False
+        button.emoji = '↗️'
+
+        await PagedImageGridView(self, images=self.images, filenames=self.filenames, descriptions=None).refresh()
+
+
+class ImageGridView(discord.ui.View):
+    def __init__(self, prev_view:DrawUIView, *, timeout=None):
+        timeout = timeout if timeout is not None else prev_view.timeout
+        super().__init__(timeout=timeout)
+        self.prev_view = prev_view
+    
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        self.clear_items().stop()
+        #await self.draw_view.message.edit(view=self)
     
     @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='↙️', row=0) # row=4 # 💢 \u200b ↩️ ↵ label='↩', 
     async def collapse_button(self, interaction:discord.Interaction, button: discord.ui.Button):
-        print('Collapsed Explode View')
         await interaction.response.defer()
-        return await self.draw_view.refresh()
+        return await self.prev_view.refresh()
         #self.message = await self.message.edit(content='',attachments=files, view=self.draw_view)
 
 
+class PagedImageGridView(discord.ui.View):
+    def __init__(self, previous_view:discord.ui.View, images:list[Image.Image], filenames: list[str], descriptions: list[str] = None, *, max_grid_images:int=10, timeout=None):
+        super().__init__(timeout=(timeout if timeout is not None else previous_view.timeout))
+        self.previous_view = previous_view
+        self.max_grid_images = max_grid_images
+
+        self.message = self.previous_view.message
+        
+        if descriptions is None:
+            descriptions = [None]*len(images)
+        
+        self.image_attrs_batches = list(imgutil.batched(zip(images,filenames,descriptions), max_grid_images))
+        
+        self.n_batches = len(self.image_attrs_batches)
+        self.cur_batchnum = 1
+        self.display_timer = None
+
+        
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        self.clear_items().stop()
+        #await self.previous_view.message.edit(view=self)
+        #del self.image_fname_batches
+        #self.stop()
+    
+    def update_buttons(self):
+        #print('before mod:', self.cur_imgnum)
+        if self.cur_batchnum < 1:
+            self.cur_batchnum = self.n_batches
+        elif self.cur_batchnum > self.n_batches:
+            self.cur_batchnum = 1
+        
+        #self.collapse_button.disabled = False
+
+        self.prev_button.disabled = self.n_batches < 2 # (self.cur_imgnum <= 1)
+        self.next_button.disabled = self.n_batches < 2 # (self.cur_imgnum >= self.n_images)
+        
+        self.counter_button.label = f'({self.cur_batchnum} / {self.n_batches})'
+        
+    async def update_view(self, img_files: list[discord.File] = None):
+        self.update_buttons()
+        #print(f'index: {self.cur_imgnum}, items: {self.n_images}')
+        if img_files is None:
+            self.message = await self.message.edit(view=self)
+        else:
+            self.message = await self.message.edit(attachments=img_files, view=self)
+    
+    async def refresh(self):
+        self.update_buttons()
+        index = self.cur_batchnum-1
+        
+        img_batch = self.image_attrs_batches[index]
+        #bn = index*self.max_grid_images
+        # files = [to_bfile(img, self.out_gifpath.with_suffix(f'.{bn+i}.png').name, self.prompt) for i,img in enumerate(img_batch,1)]
+        return await self.update_view([imgutil.to_bfile(img, fname, desc) for img,fname,desc in img_batch])
+        #return await self.refresh(files)
+        
+    @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='↙️', row=1) # row=4 # 💢 \u200b ↩️ ↵ label='↩', 
+    async def collapse_button(self, interaction:discord.Interaction, button: discord.ui.Button):
+        button.disabled = True
+        button.emoji = '⏳'
+        await interaction.response.edit_message(view=self)
+        #await interaction.response.defer()
+        await self.previous_view.refresh()
+        await self.on_timeout()
+        #await interaction.delete_original_response()
+        #self.message = await self.previous_view.refresh()
+        #return
+        #try_send_gif(self.message, self.out_gifpath, self.previous_view.prompt, view=self.previous_view)
+         #await self.message.edit(view=self.previous_view)
+        #return await self.previous_view.refresh()
+    
+    @discord.ui.button(label='(0 / 0)', style=discord.ButtonStyle.grey, disabled=True,  row=1) # ▶️ 🔄 ♻️ emoji='🔄',
+    async def counter_button(self, interaction:discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label='\u200b', style=discord.ButtonStyle.primary, disabled=True, emoji='⬅️', row=1)
+    async def prev_button(self, interaction:discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        #self.prev_button.disabled = True
+        self.cur_batchnum -= 1
+        await self.refresh()
+        
+    
+    @discord.ui.button(label='\u200b', style=discord.ButtonStyle.primary, disabled=True, emoji='➡️', row=1)
+    async def next_button(self, interaction:discord.Interaction, button: discord.ui.Button):
+        #await self.pause_buttons(interaction)
+        #await interaction.response.edit_message(view=self)
+        await interaction.response.defer()
+        self.cur_batchnum += 1
+        await self.refresh()
+        
 class ConfigModal(discord.ui.Modal, title='Tweaker Menu'):
     prompt = discord.ui.TextInput(label='Prompt', style=TextStyle.paragraph, required=True, min_length=1, max_length=1000)
     negative_prompt = discord.ui.TextInput(label='Negative Prompt', style=TextStyle.short, required=False, max_length=300)
