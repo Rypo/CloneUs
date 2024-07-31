@@ -30,6 +30,7 @@ from diffusers import (
     EulerAncestralDiscreteScheduler,
     FlowMatchEulerDiscreteScheduler
 )
+from diffusers.schedulers import AysSchedules
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from diffusers.utils import load_image, make_image_grid
@@ -57,7 +58,7 @@ event_logger = settings.logging.getLogger('event')
 IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
 SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
-
+# other: [(1280, 768),(768, 1280),]
 torch.backends.cuda.matmul.allow_tf32 = True
 
 def release_memory():
@@ -206,8 +207,10 @@ class DiffusionConfig:
         if isinstance(dim_choices, tuple):
             return dim_choices
 
-        scale_dims = np.array(dim_choices)*scale
-        scale_dims -= (scale_dims % 64) #8) # equiv: ((scale_dims//64)*64
+        scale_dims = np.array(dim_choices)
+        if scale != 1:
+            scale_dims *= scale
+            scale_dims -= (scale_dims % 64) #8) # equiv: ((scale_dims//64)*64
         dim_choices = list(map(tuple,scale_dims.astype(int)))
 
         #dim_choices = list(map(tuple,(np.array(dim_choices)*scale).astype(int)))
@@ -246,6 +249,17 @@ def calc_esteps(num_inference_steps:int, strength:float, min_effective_steps:int
         print(f'steps ({num_inference_steps}) too low, forcing to {steps}')
         num_inference_steps = steps
     return num_inference_steps
+
+def discretize_strengths(steps:int, nframes:int, start:float=0.3, end:float=0.8, linear:bool=True, step_truncate:bool=False, return_steps:bool=False, ):
+    strdist = np.linspace(start, end, num=nframes) if linear else np.geomspace(start, end, num=nframes)
+    noisy_steps = steps*strdist
+    round_steps = np.floor(noisy_steps) if step_truncate else noisy_steps.round()
+    round_steps = round_steps.clip(1, steps) #.floor() for diffusers style 
+    if return_steps:
+        return round_steps.astype(int)
+    strengths = round_steps/steps
+    return strengths
+
 
 def get_scheduler(alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], init_sched_config:dict, **kwargs):
     # partials to avoid warnings for incompatible schedulers
@@ -435,29 +449,18 @@ class OneStageImageGenManager:
     
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1):
-        
         if set(prompt) & set('()-+'):
-            conditioning, pooled = self.compeler(prompt)
-            
-            if batch_size>1:
-                conditioning = conditioning.repeat_interleave(batch_size, dim=0)
-                pooled = pooled.repeat_interleave(batch_size, dim=0)
-            
+            conditioning, pooled = self.compeler([prompt]*batch_size)
+
             prompt_encodings = dict(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
             
             if negative_prompt is not None:
-                neg_conditioning, neg_pooled = self.compeler(negative_prompt)
-                
-                if batch_size>1:
-                    neg_conditioning = neg_conditioning.repeat_interleave(batch_size, dim=0)
-                    neg_pooled = neg_pooled.repeat_interleave(batch_size, dim=0)
-                
+                neg_conditioning, neg_pooled = self.compeler([negative_prompt]*batch_size)
                 prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
         else:
-            if batch_size>1:
-                prompt = [prompt]*batch_size
-                if negative_prompt is not None:
-                    negative_prompt = [negative_prompt]*batch_size
+            prompt = [prompt]*batch_size
+            if negative_prompt is not None:
+                negative_prompt = [negative_prompt]*batch_size
                 
             prompt_encodings = dict(prompt=prompt, negative_prompt=negative_prompt)
             
@@ -713,13 +716,15 @@ class OneStageImageGenManager:
         if image is None:
             strengths = [strength_end]*nframes
             w,h = self.config.get_dims(aspect)
+            # timesteps=AysSchedules["StableDiffusionXLTimesteps"]
             image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, clip_skip=self.clip_skip,
                               **prompt_encodings, **lora_kwargs, generator=gseed).images[0] # num_images_per_prompt=4
         else:
             #strengths = np.linspace(strength_start, strength_end, num=nframes)
-            strengths = np.around(steps*np.linspace(strength_start, strength_end, num=nframes))/steps
+            # strengths = np.around(steps*np.linspace(strength_start, strength_end, num=nframes))/steps
+            strengths = discretize_strengths(steps, nframes, start=strength_start, end=strength_end)
             # round up strengths since they will be floored in get_timesteps via int()
-            # and it makes step distributions more even, 3x 3step, 3x-4step, ... etc
+            # and it makes step distribution more uniform for lightning models
             
             img_wh = image.size
             dim_choices=SDXL_DIMS # None
@@ -729,10 +734,8 @@ class OneStageImageGenManager:
         
         yield image
 
-        #image_frames.append(image)
         
-        # steps = max(steps, calc_esteps(steps, strength_min, min_effective_steps=1))
-        steps = calc_esteps(steps, strength_start, min_effective_steps=1)
+        steps = calc_esteps(steps, min(strengths), min_effective_steps=1)
         
         
         for i in range(nframes):
