@@ -16,6 +16,7 @@ server/logs
 server/appcmds
 server/res
 server/cogs/_*
+server/output/*
 # state store
 server/config/persistent_storage.yaml
 
