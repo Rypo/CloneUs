@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
 import discord
 from discord.ext import commands
 
+from tqdm.auto import tqdm
 import numpy as np
 import torch
 from diffusers import (
@@ -313,7 +314,7 @@ class OneStageImageGenManager:
         else:
             raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
 
-    @async_wrap_thread
+    @async_wrap_thread()
     def load_pipeline(self):
         pipeline_loader = (StableDiffusionXLPipeline.from_single_file if self.model_path.endswith('.safetensors') 
                            else AutoPipelineForText2Image.from_pretrained)
@@ -352,8 +353,8 @@ class OneStageImageGenManager:
         #if not self.offload:
         #    self.basei2i = self.basei2i.to("cuda")
 
-        self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
-        #self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
+        self.upsampler = Upsampler('4xUltrasharp-V10.pth', "BGR", dtype=torch.bfloat16)
+        #self.upsampler = Upsampler('4xNMKD-Superscale.pth', "RGB", dtype=torch.bfloat16)
         
         self.is_ready = True
     
@@ -508,7 +509,7 @@ class OneStageImageGenManager:
         t_up = t_re = t_main  # default in case skip
         # Upscale + Refine - must be up->refine. refine->up does not improve quality
         if refine_steps > 0 and refine_strength: 
-            image = self.upsampler.upscale(img=image, scale=1.5)
+            image = self.upsampler.upscale(image, scale=1.5)
             t_up = time.perf_counter()
             print_memstats('upscale')
             #release_memory()
@@ -621,7 +622,7 @@ class OneStageImageGenManager:
         negative_prompt=fkwg['negative_prompt']
         guidance_scale=fkwg['guidance_scale']
 
-        
+        astrength = max(astrength*steps, 1)/steps # clip strength so at least 1 step occurs
         print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
         
         nf,h,w,c = frame_array.shape
@@ -634,35 +635,38 @@ class OneStageImageGenManager:
             'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
         }
         batch_sizes = {'small': 4, 'med': 3, 'full': 2}
-        
+        upsample_bsz = 8
+        upsample_px_thresh = 256 # upsample first if less than 1/4th the recommended total pixels 
+
         dim_choices = dims_opts.get(imsize, None) # SDXL_DIMS
         bsz = batch_sizes.get(imsize, 1) #round(2/scale) # half = b4, full = b2
-
+        
         dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1, use_hf_sbr=False)
-        #if img_wh[0] < dim_out[0] or img_wh[1] < dim_out[1]:
-            #print(img_wh, '<', dim_out, ':', 'Upsampling..')
-            #resized_images = [self.upsampler.upsample(Image.fromarray(imarr, mode='RGB')).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
-            #self.upsampler.upsample()
-        #else:
-            #resized_images = [Image.fromarray(imarr, mode='RGB').resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
-        resized_images = [Image.fromarray(imarr, mode='RGB').resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+        
+        # if img_wh[0] < dim_out[0] or img_wh[1] < dim_out[1]:
+        if img_wh[0]*img_wh[1] <= upsample_px_thresh**2: 
+            print(f'Upsampling... ({img_wh[0]}*{img_wh[1]}) < {upsample_px_thresh}² < {dim_out}')
+            # resized_images = [self.upsampler.upsample(Image.fromarray(imarr, mode='RGB')).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+            
+            batched_frames = list(batched(frame_array, upsample_bsz))
+            resized_images = [img.resize(dim_out, resample=Image.Resampling.LANCZOS) for imbatch in tqdm(batched_frames) for img in self.upsampler.upsample(imbatch)]
+            print_memstats('batched upsample')
+        else:
+            resized_images = [Image.fromarray(imarr, mode='RGB').resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+        #resized_images = [Image.fromarray(imarr, mode='RGB').resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
         print('regenerate_frames input size:', img_wh, '->', dim_out)
         
-        #out_images = []
-        
-        #img_batches = list(batched(resized_images, bsz))
-        # TODO: prompt_encodings
         batched_prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz)
         
         for imbatch in batched(resized_images, bsz):
             batch_len = len(imbatch)
-            # common seed help SIGNIFICANTLY with cohesion
+            # shared common seed helps SIGNIFICANTLY with cohesion
             if aseed:
                 # list of generators is very important. Otherwise it does not apply correctly
                 gseed = [torch.Generator(device='cuda').manual_seed(aseed) for _ in range(batch_len)]
             
             if batch_len != bsz:
-                # it can only be less
+                # it can only be less due to how batched is implemented
                 batched_prompts_encodings = {k: v[:batch_len] for k,v in batched_prompts_encodings.items() if v is not None}
 
             
@@ -747,10 +751,16 @@ class OneStageImageGenManager:
 
         release_memory()
         #return out_images, fkwg
-
-class Upsampler:
-    def __init__(self, model_name=typing.Literal["4xNMKD-Superscale.pth", "4xUltrasharp-V10.pth"], dtype=torch.bfloat16):
+            
+    
+class Upsampler:#(ImageFormatter):
+    def __init__(self, model_name:typing.Literal["4xNMKD-Superscale.pth", "4xUltrasharp-V10.pth","4xRealWebPhoto_v4_dat2.safetensors"], input_mode:typing.Literal['BGR','RGB'], dtype=torch.bfloat16):
         # https://civitai.com/articles/904/settings-recommendations-for-novices-a-guide-for-understanding-the-settings-of-txt2img
+        # https://github.com/joeyballentine/ESRGAN-Bot/blob/master/testbot.py#L73
+        self.input_mode = input_mode
+        # NOTE: for some models (e.g. 4xNMKD-Superscale) rgb/bgr does seem to make a difference
+        # others are barely perceptible
+        # From limited testing: 4xNMKD: RGB ⋙ BGR, 4xRealWeb: RGB ≥ BGR, 4xUltra: BGR ≥ RGB, 
         ext_modeldir = cpaths.ROOT_DIR/'extras/models'
         
         # load a model from disk
@@ -758,70 +768,67 @@ class Upsampler:
         # make sure it's an image to image model
         assert isinstance(self.model, ImageModelDescriptor)
         
-        #self.model = cpu_offload(self.model.eval().to(dtype=dtype))
-        self.model.eval().to('cuda', dtype=dtype)
-        #cpu_offload(self.model.model)
+        self.model = self.model.eval().to('cuda', dtype=dtype)
     
-    def pil_image_to_torch_bgr(self, img: Image.Image) -> torch.Tensor:
-        # https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/bef51aed032c0aaa5cfd80445bc4cf0d85b408b5/modules/upscaler_utils.py#L14C1-L19C33
-        img = np.array(img.convert("RGB"))
-        img = img[:, :, ::-1]  # flip RGB to BGR
-        img = np.transpose(img, (2, 0, 1))  # HWC to CHW
-        img = np.ascontiguousarray(img) / 255  # Rescale to [0, 1]
-        return torch.from_numpy(img)
-    
-    def torch_bgr_to_pil_image(self, tensor: torch.Tensor) -> Image.Image:
-        # https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/bef51aed032c0aaa5cfd80445bc4cf0d85b408b5/modules/upscaler_utils.py#L22C1-L35C39
-        if tensor.ndim == 4:
-            # If we're given a tensor with a batch dimension, squeeze it out
-            # (but only if it's a batch of size 1).
-            if tensor.shape[0] != 1:
-                raise ValueError(f"{tensor.shape} does not describe a BCHW tensor")
-            tensor = tensor.squeeze(0)
-        assert tensor.ndim == 3, f"{tensor.shape} does not describe a CHW tensor"
-        # TODO: is `tensor.float().cpu()...numpy()` the most efficient idiom?
-        arr = tensor.float().cpu().clamp_(0, 1).numpy()  # clamp
-        arr = 255.0 * np.moveaxis(arr, 0, 2)  # CHW to HWC, rescale
-        arr = arr.round().astype(np.uint8)
-        arr = arr[:, :, ::-1]  # flip BGR to RGB
-        return Image.fromarray(arr, "RGB")
+    def nppil_to_torch(self, images: np.ndarray|Image.Image|list[Image.Image]) -> torch.FloatTensor:
+        if not isinstance(images, np.ndarray):
+            if not isinstance(images, list):
+                images = [images]
+            
+            images = np.stack([np.array(img) for img in images]) # .convert("RGB")
+            
+        if images.ndim == 3:
+            images = images[None]
+        if self.input_mode == 'BGR':
+            images = images[:, :, :, ::-1]  # flip RGB to BGR
+        images = np.transpose(images, (0, 3, 1, 2))  # BHWC to BCHW
+        images = np.ascontiguousarray(images, dtype=np.float32) / 255.  # Rescale to [0, 1]
+        return torch.from_numpy(images)
+
+    def torch_to_pil(self, tensor: torch.Tensor) -> list[Image.Image]:
+        arr = tensor.float().cpu().clamp_(0, 1).numpy()
+        arr = (arr * 255).round().astype("uint8")
+        arr = arr.transpose(0, 2, 3, 1) # BCHW to BHWC
+        if self.input_mode == 'BGR':
+            arr = arr[:, :, :, ::-1] # BGR -> RGB
+
+        return [Image.fromarray(a, "RGB") for a in arr]
         
-    
     @torch.inference_mode()
     def process(self, img: torch.FloatTensor) -> torch.Tensor:
-        # https://github.com/joeyballentine/ESRGAN-Bot/blob/master/testbot.py#L73
-        img = img.to(self.model.device, dtype=self.model.dtype)    
-        output = self.model(img).detach_()#.squeeze(0).float().cpu().clamp_(0, 1).numpy()
+        img = img.to(self.model.device, dtype=self.model.dtype)
+        with torch.autocast(self.model.device.type, self.model.dtype):
+            output = self.model(img).detach_()
         
         return output
     
+        
     @torch.inference_mode()
-    def upsample(self, image: Image.Image) -> Image.Image:
-        img_tens = self.pil_image_to_torch_bgr(image).unsqueeze(0)
-        output = self.process(img_tens)
-        img_ups = self.torch_bgr_to_pil_image(output)
-        return img_ups
+    def upsample(self, images: np.ndarray|Image.Image|list[Image.Image]) -> list[Image.Image]:
+        output = self.process(self.nppil_to_torch(images))
+        return self.torch_to_pil(output)
     
     @torch.inference_mode()
-    def upscale(self, img: Image.Image, scale:float=1.5):
-        dest_w = int((img.width * scale) // 8 * 8)
-        dest_h = int((img.height * scale) // 8 * 8)
+    def upscale(self, images: np.ndarray|Image.Image|list[Image.Image], scale:float=None) -> list[Image.Image]:
+        images = self.nppil_to_torch(images)
+        if scale is None:
+            scale = self.model.scale
+        b,c,h,w = images.shape
+        dest_w = int((w * scale) // 8 * 8)
+        dest_h = int((h * scale) // 8 * 8)
 
         for _ in range(3):
-            if img.width >= dest_w and img.height >= dest_h:
+            b,c,h,w = images.shape
+            if w >= dest_w and h >= dest_h:
                 break
+            
+            images = self.process(images)
 
-            shape = (img.width, img.height)
+        images = self.torch_to_pil(images)
+        if images[0].width != dest_w or images[0].height != dest_h:
+            images = [img.resize((dest_w, dest_h), resample=Image.Resampling.LANCZOS) for img in images]
 
-            img = self.upsample(img)
-
-            if shape == (img.width, img.height):
-                break
-
-        if img.width != dest_w or img.height != dest_h:
-            img = img.resize((int(dest_w), int(dest_h)), resample=Image.Resampling.LANCZOS)
-
-        return img
+        return images
     
 class SDXLTurboManager(OneStageImageGenManager):
     def __init__(self, offload=False):
@@ -930,8 +937,8 @@ class SD3MediumManager(OneStageImageGenManager):
             self.basei2i = self.basei2i.to("cuda")
         
         
-        self.upsampler = Upsampler('4xUltrasharp-V10.pth', dtype=torch.bfloat16)
-        # self.upsampler = Upsampler('4xNMKD-Superscale.pth', dtype=torch.bfloat16)
+        self.upsampler = Upsampler('4xUltrasharp-V10.pth', "BGR", dtype=torch.bfloat16)
+        # self.upsampler = Upsampler('4xNMKD-Superscale.pth', "RGB", dtype=torch.bfloat16)
         
         self.is_ready = True
     
