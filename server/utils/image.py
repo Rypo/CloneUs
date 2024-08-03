@@ -1,10 +1,11 @@
 import re
 import io
-
 import random
 import typing
 import asyncio
 import datetime
+import tempfile
+import itertools
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -25,6 +26,8 @@ import config.settings as settings
 
 IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
+THUMB_DIR = IMG_DIR.parent/'thumbnails'
+THUMB_DIR.mkdir(exist_ok=True)
 
 USER_AGENTS = [ # https://github.com/microlinkhq/top-user-agents/blob/master/src/desktop.json
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -54,7 +57,7 @@ USER_AGENTS = [ # https://github.com/microlinkhq/top-user-agents/blob/master/src
 def batched(iterable, n:int):
     '''https://docs.python.org/3/library/itertools.html#itertools.batched'''
     # batched('ABCDEFG', 3) → ABC DEF G
-    import itertools
+    
     if n < 1:
         raise ValueError('n must be at least one')
     iterator = iter(iterable)
@@ -62,12 +65,12 @@ def batched(iterable, n:int):
         yield batch
 
 
-def prompt_to_filename(prompt, ext='png'):
+def prompt_to_filename(prompt:str, suffix:str='png'):
     tstamp=datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
-    fname = tstamp+'_'+(re.sub('[^\w -]+','', prompt).replace(' ','_')[:100])+f'.{ext}'
+    fname = tstamp+'_'+(re.sub('[^\w -]+','', prompt).replace(' ','_')[:100])+f'.{suffix}'
     return fname
 
-def save_gif_prompt(frames:list[Image.Image], prompt:str, optimize:bool=True):
+def save_gif_prompt(frames:list[Image.Image], prompt:str, optimize:bool=False):
     fname = prompt_to_filename(prompt, 'gif')
     out_imgpath = IMG_DIR/fname
     iio.imwrite(out_imgpath, frames, extension='.gif', loop=0)
@@ -88,55 +91,82 @@ def save_image_prompt(image: Image.Image, prompt:str):
 
     return out_imgpath
 
-async def send_imagebytes(ctx:commands.Context, image:Image.Image, prompt:str):
-    with io.BytesIO() as imgbin:
-        image.save(imgbin, 'PNG')
-        imgbin.seek(0)
-        #view = redrawui.DrawUIView(ctx)
-        #msg = await view.send(ctx, discord.File(fp=imgbin, filename='image.png',  description=prompt))
-        msg = await ctx.send(file=discord.File(fp=imgbin, filename='image.png',  description=prompt))#, view=redrawui.DrawUIView()) 
-    return msg
+def to_thumbnails(images:list[Image.Image], max_size:tuple[int,int]=(256,256), out_filestems: list[str]=None) -> list[Image.Image]|list[Path]:
+    out_imgs = [image.copy() for image in images]
+    out_paths = []
+    
+    
+    for i,img in enumerate(out_imgs):
+        img.thumbnail(max_size, Image.Resampling.BOX) # [img.reduce(4)]
+        if out_filestems:
+            out_path = THUMB_DIR/f'{out_filestems[i]}_{i}.jpg'
+            img.save(out_path, "JPEG", optimize=True)
+            out_paths.append(out_path)
+    
+    if out_filestems:
+        return out_paths
+    
+    return out_imgs
 
-def imgbytes_file(image:Image.Image, prompt:str):
-    with io.BytesIO() as imgbin:
-        image.save(imgbin, 'PNG')
-        imgbin.seek(0)
+
+def to_bytes_file(image:Image.Image, prompt: str, ext:typing.Literal['PNG','WebP','JPEG']='PNG', **kwargs):
+    sfx = 'jpg' if ext == 'JPEG' else ext.lower()
         
-        return discord.File(fp=imgbin, filename='image.png',  description=prompt)
-
-def to_bytes_file(image:Image.Image, prompt: str):
-    filename = f'image_{hash(image.tobytes())}.png' 
+    #filename = f'image_{hash(image.tobytes())}.{sfx}' 
+    filename = prompt_to_filename(prompt, suffix=sfx)
     with io.BytesIO() as imgbin:
-        image.save(imgbin, 'PNG')
+        image.save(imgbin, format=ext, **kwargs)
         imgbin.seek(0)
         
         return discord.File(fp=imgbin, filename=filename, description=prompt)
 
-def to_bfile(image:Image.Image, filename: str=None, description:str=None, ):
-    #if filename is None:
-    #    filename = f'image_{hash(image.tobytes())}.png'
-    if filename is None:
-        filename = tempfile.NamedTemporaryFile(suffix=".WebP").name
+def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: typing.Literal['PNG','WebP','JPEG'] = 'WebP', **kwargs):
+    sfx = f'.{ext.lower()}'
+    
+    filename = filestem+sfx if filestem is not None else tempfile.NamedTemporaryFile(suffix=sfx).name
+        
     with io.BytesIO() as imgbin:
-        image.save(imgbin, 'WebP')#'JPEG')
+        image.save(imgbin, format=ext, **kwargs)
         imgbin.seek(0)
         
         return discord.File(fp=imgbin, filename=filename, description=description)
 
 
-async def try_send_gif(msg:discord.Message, out_imgpath: Path, prompt: str, view: discord.ui.View = None):
-    try:
-        msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)], view=view)
-    except discord.errors.HTTPException as e:
-        if e.status == 413:
-            msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
-            pygifsicle.optimize(out_imgpath)
-            msg = await msg.edit(content='', attachments=[discord.File(fp=out_imgpath, filename=out_imgpath.name,  description=prompt)], view=view)
-        else:
-            raise e
+def impath_to_file(img_path:Path|str, description:str=None):
+    img_path = Path(img_path)
+    return discord.File(fp=img_path, filename=img_path.name, description=description)
+
+def to_discord_file(image:Image.Image|str|Path, filestem:str=None, description:str=None, ext:typing.Literal['PNG','WebP','JPEG']=None, **kwargs):
+    if isinstance(image, Image.Image):
+        assert filestem or ext, 'must specify at least one of `filestem` or `ext` when using Image objects'
+        return to_bfile(image=image, filestem=filestem, description=description, ext=ext, **kwargs)
+    
+    return impath_to_file(img_path=image, description=description)
+
+
+async def try_send_gif(msg:discord.Message, gif_filepath: Path, prompt: str, view: discord.ui.View = None):
+    size_limit = msg.guild.filesize_limit if msg.guild is not None else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES # 25*(1024**2)#2.5e7 # 25MB for non nitro
+    gif_bytes = Path(gif_filepath).stat().st_size
+    print(f'GIF SIZE: {gif_bytes/1e6:0.3f} MB')
+    
+    if gif_bytes <= size_limit:
+        msg = await msg.edit(content='', attachments=[discord.File(fp=gif_filepath, filename=gif_filepath.name,  description=prompt)], view=view)
+    else:
+        msg = await msg.edit(content=f"Hwoo boy, that's a lotta pixels. Attempting compression...")
+        pygifsicle.optimize(gif_filepath)
+        try:
+            msg = await msg.edit(content='', attachments=[discord.File(fp=gif_filepath, filename=gif_filepath.name,  description=prompt)], view=view)
+        except discord.errors.HTTPException as e:
+            if e.status == 413:
+                # msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
+                msg  = await msg.edit(content=f"Still too big, maybe tone it down a bit next time.")
+            else:
+                raise e
     return msg
 
 def tenor_fix(url: str):
+    if not isinstance(url, str) or 'tenor' not in url:
+        return url
     if 'https/media.tenor.com' in url: # https://images-ext-1.discordapp.net/external/sW67YUaWQx_lnwJE5_TP2p3GMBAXbehBhrxzrSFn4tA/https/media.tenor.com/aUz-N2QvBOsAAAPo/the-isle-evrima.mp4
         outlink = 'https://' + url.split('https/')[-1]
         return outlink
@@ -146,16 +176,21 @@ def tenor_fix(url: str):
         #for emb in message.embeds:
             #pprint.pprint(emb.to_dict()['video']['url'])
         raise ValueError('Incorrect Tenor URL format: Long form')
+    
     elif url.startswith('https://tenor.com/') and url.endswith('.gif'): # https://tenor.com/bSDFW.gif'
         raise ValueError('Incorrect Tenor URL format: Short form')
+    
     return url
 
 
 def clean_discord_urls(url:str, verbose=False):
     if not isinstance(url, str) or 'discordapp' not in url:
         return url
+    # GIF: https://media.discordapp.net/attachments/.../XYZ.gif?ex=...&is=...&=&width=837&height=837
+    # JPG: https://media.discordapp.net/attachments/.../.../XYZ.jpg?ex=...&is=...&hm=...&=&format=webp&width=396&height=836
+    clean_url = url.split('&=&')[0] # gifs don't have a "format=", but both gifs and images have "&=&"
+    clean_url = clean_url.split('format=')[0].rstrip('&=?')
     
-    clean_url = url.split('format=')[0].rstrip('&=?')
     if verbose:
         print(f'old discord url: {url}\nnew discord url: {clean_url}')
     return clean_url
@@ -188,10 +223,17 @@ async def read_attach(ctx: commands.Context):
         await ctx.send('No image attachment given!')
         return
 
+def img_bytestream(image_url:str, random_ua:bool=True):
+    headers = {"User-Agent": random.choice(USER_AGENTS)} if random_ua else None
+    rsp = requests.get(image_url, stream=True, headers=headers)
+    rsp.raise_for_status()
+    return rsp.raw
+
+
 def is_animated(image_url:str):
     try:
         image_url = tenor_fix(image_url)
-        img_props = iio.improps(image_url)
+        img_props = iio.improps(img_bytestream(image_url).read())
             # transparent png is batch but n_images = 0
         return img_props.is_batch and img_props.n_images > 1 
     except HTTPError as e: # urllib.error.HTTPError: HTTP Error 403: Forbidden
@@ -211,9 +253,7 @@ def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = Non
         image = iio.imread(image_uri)
     except HTTPError as e:
         print(e)
-        rsp = requests.get(image_uri, stream=True, headers={"User-Agent": random.choice(USER_AGENTS)})
-        rsp.raise_for_status()
-        image = iio.imread(rsp.raw.read())
+        image = iio.imread(img_bytestream(image_uri).read())
     
     if image.ndim < 4 or image.shape[0] < 2:
         # hwc or alpha-hwc
