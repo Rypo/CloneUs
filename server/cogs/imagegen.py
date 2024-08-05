@@ -120,7 +120,15 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         cmds_logger.info(f'(cog_after_invoke, {self.qualified_name})'
                          '- [{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args))
-        
+
+    async def view_check_defer(self, ctx: commands.Context):
+        needs_view = False
+        if not ctx.interaction.response.is_done():
+            await ctx.defer()
+            await asyncio.sleep(1)
+            needs_view = True
+        return needs_view
+
     @commands.command(name='istatus', aliases=['iinfo','imginfo', 'imageinfo'])
     async def istatus_report(self, ctx: commands.Context):
         '''Display image model info'''
@@ -347,7 +355,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         """
 
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
-        image = load_image(image_url, None)#.convert('RGB')
+        image = imgutil.load_images(image_url)#load_image(image_url, None)#.convert('RGB')
         if prompt is None:
             prompt = ''
         if len(prompt) > 1000:
@@ -363,13 +371,15 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                            strength=0, steps=None, )
             
             out_imgpath = imgutil.save_image_prompt(image, prompt)
-            msg = await imgutil.send_imagebytes(ctx, image, prompt)
+            
+            msg = await ctx.send(file=imgutil.to_bytes_file(image, prompt=prompt, ext='PNG'))
 
         return image, out_imgpath
 
 
     @commands.hybrid_command(name='animate')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    # @commands.max_concurrency(1, wait=True)
     async def _animate(self, ctx: commands.Context, prompt: str, imgurl:str=None, *, flags: cmd_flags.AnimateFlags):
         """Create a gif from a text prompt and (optionally) a starting image
 
@@ -418,7 +428,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                       fast: bool = False,
                       seed: int = None
                      ):
-        
+        needs_view = await self.view_check_defer(ctx)
         image = None
         if imgurl is not None:
             image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
@@ -427,19 +437,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
-
-        needs_view = False
-        if not ctx.interaction.response.is_done():
-            await ctx.defer()
-            await asyncio.sleep(1)
-            needs_view = True
         
         image_frames = []
         #nf = gif_array.shape[0]
         cf = 0
         async with self.bot.busy_status(activity='draw'):
-            
             self.igen.dc_fastmode(enable=fast, img2img=True)
+
             #image_frames, fwkg
             frame_gen = self.igen.generate_frames(prompt=prompt, image=image, nframes=nframes, steps=steps, 
                                                       strength_end=strength_end,strength_start=strength_start, negative_prompt=negative_prompt, 
@@ -449,9 +453,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             msg  = await ctx.send(f'Cooking... {cf}/{nframes}', silent=True)
             
             for image in await frame_gen:
+            # for image in frame_gen:
                 image_frames.append(image)
                 cf += 1
                 msg  = await msg.edit(content=f'Cooking... {cf}/{nframes}')
+                
             #image_file = imgbytes_file(image, prompt)
             #out_imgpath = save_image_prompt(image, prompt)
             msg  = await msg.edit(content=f"Seasoning...")
@@ -463,7 +469,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
            
             if needs_view:
-                view = imageui.GifUIView(image_frames, timeout=5*60)
+                view = imageui.GifUIView(image_frames, timeout=5*60)#5*60)#)
                 msg = await view.send(msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
@@ -517,45 +523,39 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                         ):
         
         # this may be passed a url string in drawUI config
-        
+        image_url = imgutil.clean_discord_urls(imgurl)
         try:
-            image_url = imgutil.tenor_fix(url=imgurl)
-            #clean_discord_urls(imgurl)#imgfile)
+            image_url = imgutil.tenor_fix(url=image_url)
         except ValueError:
             return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
+        
         
         gif_array = imgutil.load_images(image_url, result_type='np') #iio.imread(image_url)
         
         if gif_array.ndim < 4:
             return await ctx.send('You passed a non-animated image url. Did you mean to call `/animate`?', ephemeral=True)
         
+        needs_view = await self.view_check_defer(ctx) # This needs to be AFTER the checks or message will not be ephemeral because of ctx.defer()
+        
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
-        
-
-        needs_view = False
-        if not ctx.interaction.response.is_done():
-            await ctx.defer()
-            await asyncio.sleep(1)
-            needs_view = True
-        
+                
         image_frames = []
         nf = gif_array.shape[0]
         cf = 0
         async with self.bot.busy_status(activity='draw'):
-            self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
+            self.igen.dc_fastmode(enable=fast, img2img=True)
             #image_frames, fwkg
             frame_gen = self.igen.regenerate_frames(frame_array=gif_array, prompt=prompt, imsize=imsize, steps=steps, 
                                                            astrength=astrength, negative_prompt=negative_prompt, 
                                                            guidance_scale=guidance_scale, detail_weight=detail_weight, aseed=aseed)
             
-            msg  = await ctx.send(f'Cooking... {cf}/{nf}', silent=True)
+            msg = await ctx.send(f'Cooking... {cf}/{nf}', silent=True)
             for images in await frame_gen:
                 image_frames.extend(images)
                 cf += len(images)
                 msg  = await msg.edit(content=f'Cooking... {cf}/{nf}')
-            #image_file = imgbytes_file(image, prompt)
-            #out_imgpath = save_image_prompt(image, prompt)
+            
             msg  = await msg.edit(content=f'Seasoning...')
             out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
 
