@@ -15,7 +15,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from diffusers.utils import load_image, make_image_grid
+import numpy as np
 
+import aiohttp
 import requests
 from PIL import Image, UnidentifiedImageError
 import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png
@@ -74,10 +76,13 @@ def save_gif_prompt(frames:list[Image.Image], prompt:str, optimize:bool=False):
     fname = prompt_to_filename(prompt, 'gif')
     out_imgpath = IMG_DIR/fname
     iio.imwrite(out_imgpath, frames, extension='.gif', loop=0)
+    
     if optimize:
         pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
+    
     with PROMPT_FILE.open('a') as f:
         f.write(f'{fname} : {prompt!r}\n')
+    
     return out_imgpath
 
 def save_image_prompt(image: Image.Image, prompt:str):
@@ -143,26 +148,34 @@ def to_discord_file(image:Image.Image|str|Path, filestem:str=None, description:s
     
     return impath_to_file(img_path=image, description=description)
 
+def gif_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, **kwargs):
+    filename = filestem+'.gif' if filestem is not None else tempfile.NamedTemporaryFile(suffix='.gif').name
+    
+    with io.BytesIO() as outbin:
+        iio.imwrite(outbin, image_frames, extension=".gif", loop=kwargs.pop('loop', 0), **kwargs)
+        outbin.seek(0)
+        return discord.File(fp=outbin, filename=filename, description=description)
 
 async def try_send_gif(msg:discord.Message, gif_filepath: Path, prompt: str, view: discord.ui.View = None):
     size_limit = msg.guild.filesize_limit if msg.guild is not None else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES # 25*(1024**2)#2.5e7 # 25MB for non nitro
     gif_bytes = Path(gif_filepath).stat().st_size
     print(f'GIF SIZE: {gif_bytes/1e6:0.3f} MB')
-    
+    optimized_images = None
     if gif_bytes <= size_limit:
         msg = await msg.edit(content='', attachments=[discord.File(fp=gif_filepath, filename=gif_filepath.name,  description=prompt)], view=view)
     else:
         msg = await msg.edit(content=f"Hwoo boy, that's a lotta pixels. Attempting compression...")
         pygifsicle.optimize(gif_filepath)
+        optimized_images = iio.imread(gif_filepath)
         try:
             msg = await msg.edit(content='', attachments=[discord.File(fp=gif_filepath, filename=gif_filepath.name,  description=prompt)], view=view)
         except discord.errors.HTTPException as e:
             if e.status == 413:
                 # msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
-                msg  = await msg.edit(content=f"Still too big, maybe tone it down a bit next time.")
+                msg  = await msg.edit(content=f"Still too big, maybe tone it down a bit next time.", view=view)
             else:
                 raise e
-    return msg
+    return msg, optimized_images
 
 def tenor_fix(url: str):
     if not isinstance(url, str) or 'tenor' not in url:
@@ -229,18 +242,57 @@ def img_bytestream(image_url:str, random_ua:bool=True):
     rsp.raise_for_status()
     return rsp.raw
 
+async def async_img_bytestream(image_url, random_ua:bool=True):
+    headers = {"User-Agent": random.choice(USER_AGENTS)} if random_ua else None
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(image_url) as resp:
+            resp.raise_for_status()
+            
+            return await resp.read()
 
-def is_animated(image_url:str):
+
+async def is_animated(image_url:str) -> bool:
     try:
         image_url = tenor_fix(image_url)
-        img_props = iio.improps(img_bytestream(image_url).read())
+        img_props = iio.improps(await async_img_bytestream(image_url))
             # transparent png is batch but n_images = 0
         return img_props.is_batch and img_props.n_images > 1 
     except HTTPError as e: # urllib.error.HTTPError: HTTP Error 403: Forbidden
         print(e)
         return False
-    # transparent png is batch but n_images = 0
-    #return img_props.is_batch and img_props.n_images > 1 
+
+def convert_imgarr(image:np.ndarray, result_type:typing.Literal['PIL','np']|None = None) -> np.ndarray|Image.Image:
+    if image.ndim < 4 or image.shape[0] < 2:
+        # hwc or alpha-hwc
+        if result_type != 'np': # None or PIL
+            image = Image.fromarray(image, mode="RGB")
+    elif result_type == 'PIL':
+        # gif
+        image = [Image.fromarray(frame, mode="RGB") for frame in image]
+
+    return image
+
+async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None = None):
+    '''Asynchronously fetch an image, UA spoof if necessary
+
+    default return type if None:
+        animated image: numpy array
+        non-animated image: PIL.Image
+    '''
+    simage_uri = str(image_uri)
+    if simage_uri.startswith("http://") or simage_uri.startswith("https://"):
+        imbytes = await async_img_bytestream(image_uri)
+        image = iio.imread(imbytes)
+    else:
+        try:
+            image = iio.imread(image_uri)
+        except HTTPError as e:
+            print(e)
+            image = iio.imread(img_bytestream(image_uri).read())
+    
+    image = convert_imgarr(image, result_type)
+
+    return image
 
 def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = None):
     '''Fetch an image, UA spoof if necessary
@@ -255,12 +307,6 @@ def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = Non
         print(e)
         image = iio.imread(img_bytestream(image_uri).read())
     
-    if image.ndim < 4 or image.shape[0] < 2:
-        # hwc or alpha-hwc
-        if result_type != 'np': # None or PIL
-            image = Image.fromarray(image, mode="RGB")
-    elif result_type == 'PIL':
-        # gif
-        image = [Image.fromarray(frame, mode="RGB") for frame in image]
+    image = convert_imgarr(image, result_type)
 
     return image

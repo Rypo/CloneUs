@@ -312,12 +312,14 @@ class DrawUIView(discord.ui.View):
 
 
 class GifUIView(discord.ui.View):
-    def __init__(self,  images:list[Image.Image], *, timeout=180):
+    def __init__(self,  images:list[Image.Image], *, timeout:float=None):
         super().__init__(timeout=timeout)
         self.images = images
         self.message: discord.Message
         self.gif_filepath: Path
         self.prompt: str
+
+        self.optimized_images = None
     
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -332,13 +334,17 @@ class GifUIView(discord.ui.View):
         self.prompt = prompt
         #self.filenames = [self.out_gifpath.with_stem(self.out_gifpath.stem + f'_{i}').with_suffix('.webp').name for i in range(len(self.images))]
         
-        self.message = await imgutil.try_send_gif(self.message, out_gifpath, prompt, view=self)
+        self.message, self.optimized_images = await imgutil.try_send_gif(self.message, out_gifpath, prompt, view=self)
         #self.message.edit(content='', attachments=[discord.File(fp=out_gifpath, filename=out_gifpath.name, description=prompt)], view=self)
         return self.message
     
     async def refresh(self):
         # asyncio.to_thread(
-        self.message = await imgutil.try_send_gif(msg=self.message, gif_filepath=self.gif_filepath, prompt=self.prompt, view=self)
+        image_frames = self.optimized_images if self.optimized_images else self.images
+        img_file = await asyncio.to_thread(imgutil.gif_to_bfile, image_frames=image_frames, filestem=self.gif_filepath.stem, description=self.prompt)
+        self.message = await self.message.edit(content='', attachments=[img_file], view=self)
+        
+        #self.message = await imgutil.try_send_gif(msg=self.message, gif_filepath=self.gif_filepath, prompt=self.prompt, view=self)
         
         return self.message
 
@@ -434,6 +440,7 @@ class PagedImageGridView(discord.ui.View):
         
 
     async def on_timeout(self) -> None:
+        # https://discordpy.readthedocs.io/en/stable/faq.html#how-can-i-disable-all-items-on-timeout
         self.freeze()
         self.clear_items().stop()
         self.message = await self.message.edit(view=self)

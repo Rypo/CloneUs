@@ -155,7 +155,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         await self.bot.report_state('draw', ready=True)
 
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
-        complete_msg = f'{model_alias} all fired up'
+        complete_msg = f'{model_alias} (offload={self.igen.offload}) all fired up'
         complete_msg += self.igen.config.to_md()
 
         return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
@@ -309,11 +309,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # this may be passed a url string in drawUI config
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         # test for gif/mp4/animated file
-        if imgutil.is_animated(image_url):
+        if await imgutil.is_animated(image_url):
             return await self.reanimate(ctx, prompt, image_url, steps=steps, astrength=strength, 
                                         negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, fast=fast, seed=seed)
 
-        image = imgutil.load_images(image_url)#.convert('RGB')
+        image = await imgutil.aload_image(image_url)#.convert('RGB')
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
@@ -355,7 +355,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         """
 
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
-        image = imgutil.load_images(image_url)#load_image(image_url, None)#.convert('RGB')
+        image = await imgutil.aload_image(image_url)#load_image(image_url, None)#.convert('RGB')
         if prompt is None:
             prompt = ''
         if len(prompt) > 1000:
@@ -370,9 +370,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                            negative_prompt=flags.no, guidance_scale=flags.guide,
                                                            strength=0, steps=None, )
             
-            out_imgpath = imgutil.save_image_prompt(image, prompt)
-            
             msg = await ctx.send(file=imgutil.to_bytes_file(image, prompt=prompt, ext='PNG'))
+            out_imgpath = imgutil.save_image_prompt(image, prompt)
 
         return image, out_imgpath
 
@@ -432,7 +431,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         image = None
         if imgurl is not None:
             image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
-            image = load_image(image_url)
+            image = await imgutil.aload_image(image_url, result_type=None)#load_image(image_url)
         
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
@@ -461,15 +460,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_file = imgbytes_file(image, prompt)
             #out_imgpath = save_image_prompt(image, prompt)
             msg  = await msg.edit(content=f"Seasoning...")
-            # with io.BytesIO() as outbin:
-            #     iio.imwrite(outbin, image_frames, extension=".gif", loop=0)
-            #     outbin.seek(0)
-            #     msg = await msg.edit(content='', attachments=[discord.File(fp=outbin, filename='test.gif', description=prompt)])
             
             out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
            
             if needs_view:
-                view = imageui.GifUIView(image_frames, timeout=5*60)#5*60)#)
+                view = imageui.GifUIView(image_frames, timeout=5*60)
                 msg = await view.send(msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
@@ -530,7 +525,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
         
         
-        gif_array = imgutil.load_images(image_url, result_type='np') #iio.imread(image_url)
+        gif_array = await imgutil.aload_image(image_url, result_type='np') #iio.imread(image_url)
         
         if gif_array.ndim < 4:
             return await ctx.send('You passed a non-animated image url. Did you mean to call `/animate`?', ephemeral=True)
