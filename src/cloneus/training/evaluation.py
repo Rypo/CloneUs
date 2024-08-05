@@ -108,19 +108,25 @@ def eval_run(checkpoint_paths:list[Path], prompts: list[str], genconfig_modes:li
     return gc_inps_outs
     
 
-def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', genconfig_modes:list[str]=None, question_author:str = None, response_authors:list[str]|typing.Literal['rest','all']='rest'):
+def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', genconfig_modes:list[str]=None, question_author:str = None, response_authors:list[str]|typing.Literal['rest','all','orand','arand']='rest'):
     if genconfig_modes is None:
         genconfig_modes = ['cs','ms']
     
     author_display_names = useridx.get_users('dname')
+    other_authors = [a for a in author_display_names if a!=question_author]
+    
 
     if question_author is None:
         question_author = author_display_names[0]
     
     if isinstance(response_authors, list):
         author_list = response_authors
+    elif response_authors == 'orand':
+        author_list = random.choices(other_authors, k=1)
+    elif response_authors == 'arand':
+        author_list = random.choices(author_display_names, k=1)
     elif response_authors == 'rest':
-        author_list = [a for a in author_display_names if a!=question_author]
+        author_list = other_authors
     elif response_authors == 'all':
         author_list = author_display_names
     
