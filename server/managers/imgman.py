@@ -7,6 +7,7 @@ import time
 import typing
 import itertools
 import functools
+from pathlib import Path
 from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
 
 import discord
@@ -29,13 +30,17 @@ from diffusers import (
     UNet2DConditionModel, 
     EulerDiscreteScheduler,
     EulerAncestralDiscreteScheduler,
-    FlowMatchEulerDiscreteScheduler
+    FlowMatchEulerDiscreteScheduler,
+    FluxPipeline, 
+    FluxTransformer2DModel
 )
 from diffusers.schedulers import AysSchedules
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from diffusers.utils import load_image, make_image_grid
 from transformers.image_processing_utils import select_best_resolution
+from transformers import T5EncoderModel, BitsAndBytesConfig, QuantoConfig, AutoModelForTextEncoding
+from optimum import quanto
 from accelerate import cpu_offload
 from DeepCache import DeepCacheSDHelper
 from PIL import Image
@@ -47,7 +52,7 @@ from cloneus import cpaths
 import config.settings as settings
 from cmds import flags as cmd_flags, transformers as cmd_tfms
 from utils.globthread import async_wrap_thread, stop_global_thread
-from utils.image import batched
+from utils.image import batched, timed
 
 bot_logger = settings.logging.getLogger('bot')
 model_logger = settings.logging.getLogger('model')
@@ -263,6 +268,7 @@ def discretize_strengths(steps:int, nframes:int, start:float=0.3, end:float=0.8,
 
 
 def get_scheduler(alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], init_sched_config:dict, **kwargs):
+    # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
     # partials to avoid warnings for incompatible schedulers
     sched_map = {
         'DPM++ 2M':             functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=False, **kwargs),
@@ -293,9 +299,7 @@ class OneStageImageGenManager:
         self.initial_scheduler_config = None
         self._scheduler_setup = (scheduler_setup, {}) if isinstance(scheduler_setup,str) else scheduler_setup
         self.scheduler_kwargs = None
-        # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
-        # DPM++ SDE == DPMSolverSinglestepScheduler
-        # DPM++ SDE Karras == DPMSolverSinglestepScheduler(use_karras_sigmas=True)
+        
         self.clip_skip = clip_skip
         self.global_seed = None
         self.has_adapters = False
@@ -303,17 +307,22 @@ class OneStageImageGenManager:
     def set_seed(self, seed:int|None = None):
         self.global_seed = seed
     
-    def load_lora(self, adapter_name: typing.Literal['detail_tweaker_xl'] = 'detail_tweaker_xl'):
-        if adapter_name == 'detail_tweaker_xl':
-            if (cpaths.ROOT_DIR/'extras/loras/detail-tweaker-xl.safetensors').exists():
-                self.base.load_lora_weights(cpaths.ROOT_DIR/'extras/loras', weight_name='detail-tweaker-xl.safetensors', adapter_name='detail_tweaker_xl')
-                self.has_adapters = True
-            else:
+    def load_lora(self, weight_name:str = 'detail-tweaker-xl.safetensors', lora_dirpath:Path=None):
+        if lora_dirpath is None:
+            lora_dirpath = cpaths.ROOT_DIR/'extras/loras'
+        
+        adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
+        
+        try:
+            self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
+            self.has_adapters = True
+        except IOError as e:
+            if weight_name == 'detail-tweaker-xl.safetensors':
                 print('detail-tweaker-xl not found, detail parameter will not function. '
                     'To use, download from: https://civitai.com/models/122359/detail-tweaker-xl')
-        else:
-            raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
-
+            else:
+                raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
+            
     @async_wrap_thread()
     def load_pipeline(self):
         pipeline_loader = (StableDiffusionXLPipeline.from_single_file if self.model_path.endswith('.safetensors') 
@@ -629,12 +638,12 @@ class OneStageImageGenManager:
         img_wh = (w,h)
         
         dims_opts = {
-            'small': [(512,512), (512,768), (768,512)], # 1.5
-            #'small2': [(640,640), (512,768), (768,512)], # 1.5
+            'tiny': [(512,512), (512,640), (640,512)], # 1.25
+            'small': [(640,640), (512,768), (768,512)], # 1.5
             'med': [(768,768), (640,896), (896,640)], # 1.4
             'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
         }
-        batch_sizes = {'small': 4, 'med': 3, 'full': 2}
+        batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2}
         upsample_bsz = 8
         upsample_px_thresh = 256 # upsample first if less than 1/4th the recommended total pixels 
 
@@ -757,6 +766,8 @@ class Upsampler:#(ImageFormatter):
     def __init__(self, model_name:typing.Literal["4xNMKD-Superscale.pth", "4xUltrasharp-V10.pth","4xRealWebPhoto_v4_dat2.safetensors"], input_mode:typing.Literal['BGR','RGB'], dtype=torch.bfloat16):
         # https://civitai.com/articles/904/settings-recommendations-for-novices-a-guide-for-understanding-the-settings-of-txt2img
         # https://github.com/joeyballentine/ESRGAN-Bot/blob/master/testbot.py#L73
+
+        # https://huggingface.co/uwg/upscaler/blob/main/ESRGAN/8x_NMKD-Superscale_150000_G.pth
         self.input_mode = input_mode
         # NOTE: for some models (e.g. 4xNMKD-Superscale) rgb/bgr does seem to make a difference
         # others are barely perceptible
@@ -921,8 +932,10 @@ class SD3MediumManager(OneStageImageGenManager):
         self.base: StableDiffusion3Pipeline = pipeline_loader(
             self.model_path, torch_dtype=torch.bfloat16,  use_safetensors=True, #add_watermarker=False,
         )
-        if self._scheduler_callback is not None:
-            self.base.scheduler = self._scheduler_callback()
+        self.initial_scheduler_config = self.base.scheduler.config
+        if self._scheduler_setup is not None:
+            sched_alias, self.scheduler_kwargs = self._scheduler_setup
+            self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
         
         if self.offload:
             self.base.enable_model_cpu_offload()
@@ -1012,6 +1025,293 @@ class RealVizXL4Manager(OneStageImageGenManager):
             #clip_skip=1,
         )        
 # https://civitai.com/models/119229/zavychromaxl
+
+class QuantizedFluxTransformer2DModel(quanto.QuantizedDiffusersModel):
+    base_class = FluxTransformer2DModel
+    
+class QuantizedModelForTextEncoding(quanto.QuantizedTransformersModel):
+    auto_class = AutoModelForTextEncoding
+    
+
+class FluxBase(OneStageImageGenManager):
+    text_enc_model_id = "black-forest-labs/FLUX.1-schnell"
+    quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/'
+    
+    @async_wrap_thread
+    def load_pipeline(self):
+
+        self.base: FluxPipeline = self._load_helper(qtype=self.qtype, offload=self.offload, text_encoder2_quant=self.te_2)
+        
+
+        self.initial_scheduler_config = self.base.scheduler.config
+        
+        if self._scheduler_setup is not None:
+            sched_alias, self.scheduler_kwargs = self._scheduler_setup
+            self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
+        
+        #self.load_lora(adapter_name='detail_tweaker_xl')
+        
+        self.compeler = None
+        #self.basei2i = self.base#AutoPipelineForImage2Image.from_pipe(self.base,)# torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)#.to(0)
+
+        self.upsampler = None #Upsampler('4xUltrasharp-V10.pth', "BGR", dtype=torch.bfloat16)
+        #self.upsampler = Upsampler('4xNMKD-Superscale.pth', "RGB", dtype=torch.bfloat16)
+        
+        self.is_ready = True
+        release_memory()
+
+    def _load_helper(self, qtype:typing.Literal['qint4','qint8','qfloat8'], text_encoder2_quant:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8']=None, offload:bool=False,):
+        '''Try to load quantized from disk otherwise, quantize on the fly
+        
+        Args:
+            qtype: quantization type for transformer
+            offload: enable model cpu off (incompatible with bnb)
+            
+            text_encoder2_quant: quantization type for T5 encoder. If None, use `qtype`. If bf16, no quantization.
+        '''
+        if text_encoder2_quant is None:
+            text_encoder2_quant = qtype
+
+        use_bnb = text_encoder2_quant.startswith('bnb')
+        if use_bnb and offload:
+            raise ValueError('Cannot use offloading with bitsandbytes quantized text encoder')
+
+        if qtype=='qint4' and text_encoder2_quant == 'bf16':
+            print('WARNING: qtype=qint4 is incompatiable with bfloat16 dtype. Text Encoder will be upcast to full fp32 precision. Expect high vRAM usage.')
+        
+        return self._load_quantized_nbit(qtype, text_encoder2_quant=text_encoder2_quant, offload=offload,)
+        
+    def _bnb_text_encoder(self, bnb_bits:typing.Literal['bnb4','bnb8'], torch_dtype:torch.dtype = torch.bfloat16):
+        '''
+        bnb pros: no quant time cost (~40s), slightly better results, slightly faster
+        bnb cons: much more vram (4bit = 18.6 idle, 20.3 peak | 8bit = 20.0 idle, 21.8 peak) vs 17.6 idle. CANT OFFLOAD.
+        Note:
+            load_in_4bit=True with no args uses same vRAM and has similar if not better results than:
+            load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
+        '''
+
+        if bnb_bits == 'bnb4':
+            quant_config = BitsAndBytesConfig(load_in_4bit=True)
+        elif bnb_bits == 'bnb8':
+            quant_config = BitsAndBytesConfig(load_in_8bit=True)
+        else:
+            raise NotImplementedError('only 4 or 8 bit is supported')
+        with timed('BnB Load - text_encoder_2'):    
+            text_encoder = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", quantization_config=quant_config, torch_dtype=torch_dtype)
+        return text_encoder
+    
+    def load_or_quantize(self, module:typing.Literal["transformer","text_encoder_2"], qtype:typing.Literal['qint4','qint8','qfloat8'], quant_basedir:Path, device:torch.device):
+        if qtype == 'qint4':
+            torch_dtype = torch.float32
+            transformer_exclude = ["proj_out", "x_embedder", "norm_out", "context_embedder"]
+        else:
+            torch_dtype = torch.bfloat16
+            transformer_exclude = None
+
+        transformer_dir = quant_basedir/qtype/self.variant/'transformer/'
+        textenc2_dir = quant_basedir/qtype/'text_encoder_2/'
+
+        if module=='text_encoder_2':
+            if textenc2_dir.exists():
+                with timed('Load - text_encoder_2'):
+                    text_encoder_2 = QuantizedModelForTextEncoding.from_pretrained(textenc2_dir)#.to(device)
+                    # .to(device) is required even if device=None, otherwise will get
+                    # "TypeError: 'QuantizedModelForTextEncoding' object is not callable" since QuantizedTransformersModel doesn't implement __call__
+            else:
+                with timed('Quantize - text_encoder_2'):
+                    text_encoder_2 = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype)
+                    quanto.quantize(text_encoder_2, weights=qtype, exclude=None)
+                    quanto.freeze(text_encoder_2)
+            
+            return text_encoder_2.to(device)
+        
+        if module=='transformer':
+            if transformer_dir.exists():
+                with timed('Load - transformer'):
+                    transformer = QuantizedFluxTransformer2DModel.from_pretrained(transformer_dir)#.to(device) # .to(device) is required to shed the wrapper
+            else:
+                with timed('Quantize - transformer'):
+                    transformer:FluxTransformer2DModel = FluxTransformer2DModel.from_pretrained(self.model_path, subfolder="transformer", torch_dtype=torch_dtype)
+                    quanto.quantize(transformer, weights=qtype, exclude=transformer_exclude)
+                    quanto.freeze(transformer)
+            
+            return transformer.to(device)
+        
+        raise NotImplementedError(f'unknown module {module!r}')
+
+
+
+    def _load_quantized_nbit(self, qtype:typing.Literal['qint4','qint8','qfloat8'], text_encoder2_quant:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'], offload:bool=False,):
+        device = None if offload else 'cuda'
+        torch_dtype = torch.bfloat16 
+        
+        if qtype == 'qint4' or text_encoder2_quant == 'qint4':
+            torch_dtype = torch.float32 # if using qint4, need to upcast.
+            
+        
+        use_bnb = text_encoder2_quant.startswith('bnb')
+        
+        #quant_dir = self.quant_basedir/qtype
+        #transformer_dir = quant_dir/self.variant/'transformer/'
+        #textenc2_dir = quant_dir/'text_encoder_2/'
+
+        #with timed('load - transformer'):
+        transformer = self.load_or_quantize('transformer', qtype=qtype, quant_basedir=self.quant_basedir, device=device)
+            #transformer = QuantizedFluxTransformer2DModel.from_pretrained(transformer_dir).to(device) # .to(device) is required to shed the wrapper
+        
+
+        text_encoder = None
+        if text_encoder2_quant.startswith('q'):
+            text_encoder = self.load_or_quantize('text_encoder_2', qtype=text_encoder2_quant, quant_basedir=self.quant_basedir, device=device)
+            #with timed('load - text_encoder'):
+            #    text_encoder = QuantizedModelForTextEncoding.from_pretrained(textenc2_dir).to(device)
+                
+        elif text_encoder2_quant=='bf16':
+            text_encoder = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype)
+
+                
+        with timed('pipe load'):
+            pipe: FluxPipeline = FluxPipeline.from_pretrained(self.model_path, transformer=None, text_encoder_2=None, torch_dtype=torch_dtype)
+        
+        
+        # Do not call pipe.to(device) more than once.
+        # It will break qint4
+        
+        pipe.transformer = transformer
+
+        if text_encoder is not None:
+            pipe.text_encoder_2 = text_encoder
+        
+        if torch_dtype == torch.bfloat16:
+            # can safely cast all elements of pipe to bf16 
+            pipe.to(dtype=torch.bfloat16)
+        
+
+        if offload:
+            pipe.enable_model_cpu_offload()
+        else:
+          with timed('pipe to device'):
+              pipe.to(device)
+        
+        # This MUST come after all calls to `.to()`. bnb will yell at you if you try to move it anywhere
+        if use_bnb:
+            pipe.text_encoder_2 = self._bnb_text_encoder(text_encoder2_quant, torch_dtype=torch_dtype)
+            #text_encoder
+
+        print('PIPE:', pipe.dtype, pipe.device)
+        print('TRANSFORMER:', pipe.transformer.dtype, pipe.transformer.device)
+        print('TEXT ENC 2:', pipe.text_encoder_2.dtype, pipe.text_encoder_2.device)
+        
+        
+        return pipe
+        
+
+    
+
+
+    # @torch.inference_mode()
+    @torch.no_grad()
+    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None, seed=None):
+        if image is not None:
+            return image
+        if seed is None:
+            seed = self.global_seed
+        gseed = torch.Generator(device='cuda').manual_seed(seed) if seed is not None else None
+            
+        t0 = time.perf_counter()
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
+        lora_kwargs={}#{'cross_attention_kwargs': {"scale": detail_weight}} if detail_weight and self.has_adapters else {}
+        
+        t_pe = time.perf_counter()
+        t_main = t_pe # default in case skip
+        mlabel = '_2I'
+        # Txt2Img
+
+        h,w = target_size
+        image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, max_sequence_length=self.max_seq_len, #clip_skip=self.clip_skip,
+                            **prompt_encodings, **lora_kwargs, generator=gseed).images[0] # num_images_per_prompt=4
+        #return make_image_grid(imgs, 2, 2)
+        t_main = time.perf_counter()
+        print_memstats('draw')
+        
+        mlabel = 'T2I'
+        release_memory()
+        t_fi = time.perf_counter()
+        print(f'total: {t_fi-t0:.2f}s | prompt_embed: {t_pe-t0:.2f}s | {mlabel}: {t_main-t_pe:.2f}s')# | upscale: {t_up-t_main:.2f}s | refine: {t_re-t_up:.2f}s')
+        return image
+    
+    # Unsupported
+    def embed_prompts(self, prompt:str, negative_prompt:str = None):
+        return  dict(prompt=prompt) #, negative_prompt=negative_prompt) # neg not supported (offically)
+    # Unsupported
+    def dc_fastmode(self, enable:bool, img2img=False):
+        return
+    
+    @async_wrap_thread
+    def compile_pipeline(self):
+        # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
+        # - https://huggingface.co/docs/diffusers/optimization/torch2.0#torchcompile
+        # https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3#using-torch-compile-to-speed-up-inference
+        torch_compile_flags()
+        self.base.transformer.to(memory_format=torch.channels_last)
+        self.base.vae.to(memory_format=torch.channels_last)
+        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
+        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
+        
+        for _ in range(3):
+            _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
+        self.is_compiled = True
+
+class FluxSchnellManager(FluxBase):
+    def __init__(self, offload=True):
+        super().__init__(
+            model_name = 'flux_schnell',
+            model_path = 'black-forest-labs/FLUX.1-schnell',
+            config = DiffusionConfig(
+                steps = CfgItem(4, bounds=(1,4)),
+                guidance_scale = CfgItem(0.0, locked=True), 
+                strength = CfgItem(0.65, bounds=(0.3, 0.95)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+           
+        )
+        self.variant = 'schnell' if 'schnell' in self.model_name else 'dev'
+        self.qtype = 'qfloat8' # ['qint4', 'qint8', 'qfloat8']
+        #self.te_2 = 'bf16' if offload else 'bnb4'  # ['bnb4', 'bnb8', 'bf16', None, 'qint4', 'qint8', 'qfloat8']
+        self.te_2 = None
+        self.quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/'
+        self.max_seq_len = 256
+        
+    
+
+class FluxDevManager(FluxBase):
+    def __init__(self, offload=True):
+        super().__init__(
+            model_name = 'flux_dev',
+            model_path = 'black-forest-labs/FLUX.1-dev',
+            config = DiffusionConfig(
+                steps = CfgItem(50, bounds=(25,60)),
+                guidance_scale = CfgItem(3.5, bounds=(1,10)), 
+                strength = CfgItem(0.65, bounds=(0.3, 0.95)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+        )
+        self.variant = 'schnell' if 'schnell' in self.model_name else 'dev'
+        self.qtype = 'qint4' # ['qint4', 'qint8', 'qfloat8']
+        #self.te_2 = 'bf16' if offload else 'bnb4'  # ['bnb4', 'bnb8', 'bf16', None]
+        self.te_2 = 'qfloat8'#None
+        self.quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/'
+        self.max_seq_len = 512
+        # self.text_enc_model_id = "black-forest-labs/FLUX.1-schnell"
+
+
+
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
         'manager': SDXLTurboManager,
@@ -1036,6 +1336,14 @@ AVAILABLE_MODELS = {
     'realvisxl_v4': {
         'manager': RealVizXL4Manager,
         'desc': 'RealVisXL V4.0' # (M, avg)
+    },
+    'flux_schnell': {
+        'manager': FluxSchnellManager,
+        'desc': 'Flux Schnell' # (Lg, avg)
+    },
+    'flux_dev': {
+        'manager': FluxDevManager,
+        'desc': 'Flux Dev' # (Lg, slow)
     },
 }
 

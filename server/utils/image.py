@@ -1,5 +1,6 @@
 import re
 import io
+import time
 import random
 import typing
 import asyncio
@@ -8,7 +9,7 @@ import tempfile
 import itertools
 from pathlib import Path
 from urllib.error import HTTPError
-
+from contextlib import contextmanager
 
 import discord
 from discord import app_commands
@@ -66,6 +67,16 @@ def batched(iterable, n:int):
     while batch := list(itertools.islice(iterator, n)):
         yield batch
 
+@contextmanager
+def timed(label:str=''):
+    # Code to acquire resource, e.g.:
+    print(f'BEGIN: {label}')
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        te = time.perf_counter()
+        print(f'{label} : {te-t0:0.2f}s')
 
 def prompt_to_filename(prompt:str, suffix:str='png'):
     tstamp=datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
