@@ -341,7 +341,7 @@ class OneStageImageGenManager:
             sched_alias, self.scheduler_kwargs = self._scheduler_setup
             self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
         
-        self.load_lora(adapter_name='detail_tweaker_xl')
+        self.load_lora(weight_name='detail-tweaker-xl.safetensors')
         
         self.compeler = Compel(
             tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
