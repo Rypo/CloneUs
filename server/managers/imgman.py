@@ -356,11 +356,6 @@ class OneStageImageGenManager:
             # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
             self.base.enable_model_cpu_offload()
             self.basei2i.enable_model_cpu_offload()
-        #else:
-        #    self.base = self.base.to("cuda")
-
-        #if not self.offload:
-        #    self.basei2i = self.basei2i.to("cuda")
 
         self.upsampler = Upsampler('4xUltrasharp-V10.pth', "BGR", dtype=torch.bfloat16)
         #self.upsampler = Upsampler('4xNMKD-Superscale.pth', "RGB", dtype=torch.bfloat16)
@@ -666,7 +661,9 @@ class OneStageImageGenManager:
         print('regenerate_frames input size:', img_wh, '->', dim_out)
         
         batched_prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz)
-        
+        self.basei2i.enable_vae_slicing()
+        # TODO: Test -- https://huggingface.co/docs/diffusers/v0.30.0/en/optimization/memory#sliced-vae
+        # TODO: https://huggingface.co/docs/diffusers/v0.30.0/en/optimization/tgate?pipelines=Stable+Diffusion+XL
         for imbatch in batched(resized_images, bsz):
             batch_len = len(imbatch)
             # shared common seed helps SIGNIFICANTLY with cohesion
@@ -685,7 +682,7 @@ class OneStageImageGenManager:
             yield images
         release_memory()
         #return out_images, fkwg
-
+        self.basei2i.disable_vae_slicing()
 
     @async_wrap_thread
     def generate_frames(self, prompt: str, 
@@ -1034,15 +1031,14 @@ class QuantizedModelForTextEncoding(quanto.QuantizedTransformersModel):
     
 
 class FluxBase(OneStageImageGenManager):
-    text_enc_model_id = "black-forest-labs/FLUX.1-schnell"
+    text_enc_model_id = "black-forest-labs/FLUX.1-schnell" # use same shared text_encoder_2, avoid 2x-download
     quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/'
-    
+    variant: typing.Literal['scnhell','dev']
+
     @async_wrap_thread
     def load_pipeline(self):
-
-        self.base: FluxPipeline = self._load_helper(qtype=self.qtype, offload=self.offload, text_encoder2_quant=self.te_2)
+        self.base: FluxPipeline = self._load_helper(qtype=self.qtype, offload=self.offload, te2_quant=self.te2_quant)
         
-
         self.initial_scheduler_config = self.base.scheduler.config
         
         if self._scheduler_setup is not None:
@@ -1060,143 +1056,57 @@ class FluxBase(OneStageImageGenManager):
         self.is_ready = True
         release_memory()
 
-    def _load_helper(self, qtype:typing.Literal['qint4','qint8','qfloat8'], text_encoder2_quant:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8']=None, offload:bool=False,):
+    def _load_helper(self, qtype:typing.Literal['qint4','qint8','qfloat8'], te2_quant:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'], offload:bool=False,):
         '''Try to load quantized from disk otherwise, quantize on the fly
         
         Args:
             qtype: quantization type for transformer
+            te2_quant: quantization type for T5 encoder. If None, use `qtype`. If bf16, no quantization.
             offload: enable model cpu off (incompatible with bnb)
             
-            text_encoder2_quant: quantization type for T5 encoder. If None, use `qtype`. If bf16, no quantization.
         '''
-        if text_encoder2_quant is None:
-            text_encoder2_quant = qtype
+        if te2_quant is None:
+            te2_quant = qtype
 
-        use_bnb = text_encoder2_quant.startswith('bnb')
-        if use_bnb and offload:
+        if te2_quant.startswith('bnb') and offload:
             raise ValueError('Cannot use offloading with bitsandbytes quantized text encoder')
-
-        if qtype=='qint4' and text_encoder2_quant == 'bf16':
-            print('WARNING: qtype=qint4 is incompatiable with bfloat16 dtype. Text Encoder will be upcast to full fp32 precision. Expect high vRAM usage.')
         
-        return self._load_quantized_nbit(qtype, text_encoder2_quant=text_encoder2_quant, offload=offload,)
-        
-    def _bnb_text_encoder(self, bnb_bits:typing.Literal['bnb4','bnb8'], torch_dtype:torch.dtype = torch.bfloat16):
-        '''
-        bnb pros: no quant time cost (~40s), slightly better results, slightly faster
-        bnb cons: much more vram (4bit = 18.6 idle, 20.3 peak | 8bit = 20.0 idle, 21.8 peak) vs 17.6 idle. CANT OFFLOAD.
-        Note:
-            load_in_4bit=True with no args uses same vRAM and has similar if not better results than:
-            load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
-        '''
-
-        if bnb_bits == 'bnb4':
-            quant_config = BitsAndBytesConfig(load_in_4bit=True)
-        elif bnb_bits == 'bnb8':
-            quant_config = BitsAndBytesConfig(load_in_8bit=True)
-        else:
-            raise NotImplementedError('only 4 or 8 bit is supported')
-        with timed('BnB Load - text_encoder_2'):    
-            text_encoder = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", quantization_config=quant_config, torch_dtype=torch_dtype)
-        return text_encoder
-    
-    def load_or_quantize(self, module:typing.Literal["transformer","text_encoder_2"], qtype:typing.Literal['qint4','qint8','qfloat8'], quant_basedir:Path, device:torch.device):
-        if qtype == 'qint4':
-            torch_dtype = torch.float32
-            transformer_exclude = ["proj_out", "x_embedder", "norm_out", "context_embedder"]
-        else:
-            torch_dtype = torch.bfloat16
-            transformer_exclude = None
-
-        transformer_dir = quant_basedir/qtype/self.variant/'transformer/'
-        textenc2_dir = quant_basedir/qtype/'text_encoder_2/'
-
-        if module=='text_encoder_2':
-            if textenc2_dir.exists():
-                with timed('Load - text_encoder_2'):
-                    text_encoder_2 = QuantizedModelForTextEncoding.from_pretrained(textenc2_dir)#.to(device)
-                    # .to(device) is required even if device=None, otherwise will get
-                    # "TypeError: 'QuantizedModelForTextEncoding' object is not callable" since QuantizedTransformersModel doesn't implement __call__
-            else:
-                with timed('Quantize - text_encoder_2'):
-                    text_encoder_2 = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype)
-                    quanto.quantize(text_encoder_2, weights=qtype, exclude=None)
-                    quanto.freeze(text_encoder_2)
-            
-            return text_encoder_2.to(device)
-        
-        if module=='transformer':
-            if transformer_dir.exists():
-                with timed('Load - transformer'):
-                    transformer = QuantizedFluxTransformer2DModel.from_pretrained(transformer_dir)#.to(device) # .to(device) is required to shed the wrapper
-            else:
-                with timed('Quantize - transformer'):
-                    transformer:FluxTransformer2DModel = FluxTransformer2DModel.from_pretrained(self.model_path, subfolder="transformer", torch_dtype=torch_dtype)
-                    quanto.quantize(transformer, weights=qtype, exclude=transformer_exclude)
-                    quanto.freeze(transformer)
-            
-            return transformer.to(device)
-        
-        raise NotImplementedError(f'unknown module {module!r}')
-
-
-
-    def _load_quantized_nbit(self, qtype:typing.Literal['qint4','qint8','qfloat8'], text_encoder2_quant:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'], offload:bool=False,):
-        device = None if offload else 'cuda'
+        device = None if offload else 0 #'cuda'
         torch_dtype = torch.bfloat16 
-        
-        if qtype == 'qint4' or text_encoder2_quant == 'qint4':
-            torch_dtype = torch.float32 # if using qint4, need to upcast.
+        bnb_quant_config = None
+
+        #if qtype == 'qint4' or te2_quant == 'qint4':
+        #    torch_dtype = torch.float32 # if using qint4, need to upcast.
+            
+        pipe: FluxPipeline = FluxPipeline.from_pretrained(self.model_path, transformer=None, text_encoder_2=None, torch_dtype=torch_dtype).to(device)
+
+        pipe.transformer = self.load_or_quantize('transformer', qtype=qtype, quant_basedir=self.quant_basedir, device=device)
             
         
-        use_bnb = text_encoder2_quant.startswith('bnb')
-        
-        #quant_dir = self.quant_basedir/qtype
-        #transformer_dir = quant_dir/self.variant/'transformer/'
-        #textenc2_dir = quant_dir/'text_encoder_2/'
-
-        #with timed('load - transformer'):
-        transformer = self.load_or_quantize('transformer', qtype=qtype, quant_basedir=self.quant_basedir, device=device)
-            #transformer = QuantizedFluxTransformer2DModel.from_pretrained(transformer_dir).to(device) # .to(device) is required to shed the wrapper
-        
-
-        text_encoder = None
-        if text_encoder2_quant.startswith('q'):
-            text_encoder = self.load_or_quantize('text_encoder_2', qtype=text_encoder2_quant, quant_basedir=self.quant_basedir, device=device)
-            #with timed('load - text_encoder'):
-            #    text_encoder = QuantizedModelForTextEncoding.from_pretrained(textenc2_dir).to(device)
+        if te2_quant.startswith('q'):
+            pipe.text_encoder_2 = self.load_or_quantize('text_encoder_2', qtype=te2_quant, quant_basedir=self.quant_basedir, device=device)
                 
-        elif text_encoder2_quant=='bf16':
-            text_encoder = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype)
-
-                
-        with timed('pipe load'):
-            pipe: FluxPipeline = FluxPipeline.from_pretrained(self.model_path, transformer=None, text_encoder_2=None, torch_dtype=torch_dtype)
+        elif te2_quant=='bf16':
+            pipe.text_encoder_2 = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype, )
         
+        else:
+            assert te2_quant.startswith('bnb'), f'Unknown text_encoder2_quant: {te2_quant!r}'
+            bnb_quant_config = BitsAndBytesConfig(load_in_4bit=True) if te2_quant == 'bnb4' else BitsAndBytesConfig(load_in_8bit=True)
+                  
+        # Do not call pipe.to(device) more than once. It will break things
+        pipe.to(dtype=torch_dtype)
         
-        # Do not call pipe.to(device) more than once.
-        # It will break qint4
-        
-        pipe.transformer = transformer
-
-        if text_encoder is not None:
-            pipe.text_encoder_2 = text_encoder
-        
-        if torch_dtype == torch.bfloat16:
-            # can safely cast all elements of pipe to bf16 
-            pipe.to(dtype=torch.bfloat16)
-        
-
         if offload:
             pipe.enable_model_cpu_offload()
-        else:
-          with timed('pipe to device'):
-              pipe.to(device)
         
         # This MUST come after all calls to `.to()`. bnb will yell at you if you try to move it anywhere
-        if use_bnb:
-            pipe.text_encoder_2 = self._bnb_text_encoder(text_encoder2_quant, torch_dtype=torch_dtype)
-            #text_encoder
+        if bnb_quant_config:        
+            with timed('BnB Load - text_encoder_2'):    
+                pipe.text_encoder_2 = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", quantization_config=bnb_quant_config, torch_dtype=torch_dtype, device_map=device)
+                
+            # bnb pros: no initial quant time cost (~40s), results are ~approx on par with i8/f8 
+            # cons: more vram (4bit = 18.6 idle, 20.3 peak | 8bit = 20.0 idle, 21.8 peak) vs 17.6 idle. Slightly slower. CANT OFFLOAD.
+            # Note: load_in_4bit=True bare uses same vRAM, is slightly faster, and better results compared to LLM config args (nf4, bf16, 2xquant) and (fp4, bf16, 1xquant)
 
         print('PIPE:', pipe.dtype, pipe.device)
         print('TRANSFORMER:', pipe.transformer.dtype, pipe.transformer.device)
@@ -1204,16 +1114,60 @@ class FluxBase(OneStageImageGenManager):
         
         
         return pipe
+
+            
+    def load_or_quantize(self, module:typing.Literal["transformer","text_encoder_2"], qtype:typing.Literal['qint4','qint8','qfloat8'], quant_basedir:Path, device:torch.device):
+        torch_dtype = torch.bfloat16
+        if qtype == 'qint4':
+            #torch_dtype = torch.float32
+            transformer_exclude = ["proj_out", "x_embedder", "norm_out", "context_embedder"]
+        else:
+            transformer_exclude = None
+
+        transformer_dir = quant_basedir/qtype/self.variant/'transformer/'
+        textenc2_dir = quant_basedir/qtype/'text_encoder_2/'
+
+        if module=='text_encoder_2':
+            qdevice=0
+            if textenc2_dir.exists(): # /'quanto_qmap.json'
+                with timed('Load - text_encoder_2'):
+                    text_encoder_2 = QuantizedModelForTextEncoding.from_pretrained(textenc2_dir)#.to(device)
+                    # .to(device) is required even if device=None, otherwise will get
+                    # "TypeError: 'QuantizedModelForTextEncoding' object is not callable" since QuantizedTransformersModel doesn't implement __call__
+            else:
+                with timed('Quantize - text_encoder_2'):
+                    text_encoder_2 = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype, device_map=qdevice)#.to(qdevice)
+                    quanto.quantize(text_encoder_2, weights=qtype, exclude=None)
+                    quanto.freeze(text_encoder_2)
+                release_memory()
+            
+            with timed('to(device) - text_encoder_2'):
+                return text_encoder_2.to(device if device is not None else 'cpu')
         
+        if module=='transformer':
+            qdevice = 0 if torch_dtype == torch.bfloat16 else None # {'':0}
+            if transformer_dir.exists():
+                with timed('Load - transformer'):
+                    transformer = QuantizedFluxTransformer2DModel.from_pretrained(transformer_dir)#.to(device) # .to(device) is required to shed the wrapper
+            else:
+                with timed('Quantize - transformer'):
+                    transformer:FluxTransformer2DModel = FluxTransformer2DModel.from_pretrained(self.model_path, subfolder="transformer", torch_dtype=torch_dtype, device_map=qdevice)#.to(qdevice)
+                    quanto.quantize(transformer, weights=qtype, exclude=transformer_exclude)
+                    quanto.freeze(transformer)
+                release_memory()
+                
+            with timed('to(device) - transformer'):
+                return transformer.to(device if device is not None else 'cpu')
+        
+        raise NotImplementedError(f'unknown module {module!r}')
 
-    
 
 
-    # @torch.inference_mode()
+    # @torch.inference_mode() # inference mode can throw an error in some cases
     @torch.no_grad()
     def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None, seed=None):
         if image is not None:
-            return image
+            return image #raise NotImplementedError('Flux does not support redrawing images')
         if seed is None:
             seed = self.global_seed
         gseed = torch.Generator(device='cuda').manual_seed(seed) if seed is not None else None
@@ -1248,6 +1202,14 @@ class FluxBase(OneStageImageGenManager):
         return
     
     @async_wrap_thread
+    def generate_frames(self, *args, **kwargs):
+        raise NotImplementedError('Flux does not support frame generation')
+    
+    @async_wrap_thread
+    def regenerate_frames(self, *args, **kwargs):
+        raise NotImplementedError('Flux does not support frame regeneration')
+    
+    @async_wrap_thread
     def compile_pipeline(self):
         # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
         # - https://huggingface.co/docs/diffusers/optimization/torch2.0#torchcompile
@@ -1270,18 +1232,19 @@ class FluxSchnellManager(FluxBase):
             config = DiffusionConfig(
                 steps = CfgItem(4, bounds=(1,4)),
                 guidance_scale = CfgItem(0.0, locked=True), 
-                strength = CfgItem(0.65, bounds=(0.3, 0.95)),
+                strength = CfgItem(0, locked=True),#CfgItem(0.65, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
-                locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+                refine_steps=CfgItem(0,locked=True),
+                refine_strength=CfgItem(0, locked=True),
+                locked=['denoise_blend',  'refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
            
         )
         self.variant = 'schnell' if 'schnell' in self.model_name else 'dev'
-        self.qtype = 'qfloat8' # ['qint4', 'qint8', 'qfloat8']
-        #self.te_2 = 'bf16' if offload else 'bnb4'  # ['bnb4', 'bnb8', 'bf16', None, 'qint4', 'qint8', 'qfloat8']
-        self.te_2 = None
+        self.qtype = 'qint8'#'qint8' # ['qint4', 'qint8', 'qfloat8']
+        self.te2_quant = ('bf16' if offload else self.qtype)  # ['bnb4', 'bnb8', 'bf16', None, 'qint4', 'qint8', 'qfloat8']
         self.quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/'
         self.max_seq_len = 256
         
@@ -1294,21 +1257,22 @@ class FluxDevManager(FluxBase):
             model_path = 'black-forest-labs/FLUX.1-dev',
             config = DiffusionConfig(
                 steps = CfgItem(50, bounds=(25,60)),
-                guidance_scale = CfgItem(3.5, bounds=(1,10)), 
-                strength = CfgItem(0.65, bounds=(0.3, 0.95)),
+                guidance_scale = CfgItem(3.5, bounds=(1,5)), 
+                strength = CfgItem(0, locked=True),#CfgItem(0.65, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
-                locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+                refine_steps=CfgItem(0,locked=True),
+                refine_strength=CfgItem(0, locked=True),
+                locked=['denoise_blend',  'refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
         )
         self.variant = 'schnell' if 'schnell' in self.model_name else 'dev'
-        self.qtype = 'qint4' # ['qint4', 'qint8', 'qfloat8']
-        #self.te_2 = 'bf16' if offload else 'bnb4'  # ['bnb4', 'bnb8', 'bf16', None]
-        self.te_2 = 'qfloat8'#None
+        self.qtype = 'qint8'#'qint8' # ['qint4', 'qint8', 'qfloat8']
+        self.te2_quant = ('bf16' if offload else self.qtype) # 'bf16' if offload else 'bnb4'  # ['bnb4', 'bnb8', 'bf16', None, 'qint4', 'qint8', 'qfloat8']
         self.quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/'
         self.max_seq_len = 512
-        # self.text_enc_model_id = "black-forest-labs/FLUX.1-schnell"
+        
 
 
 
