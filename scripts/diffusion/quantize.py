@@ -17,6 +17,9 @@ class QuantizedFluxTransformer2DModel(quanto.QuantizedDiffusersModel):
 class QuantizedModelForTextEncoding(quanto.QuantizedTransformersModel):
     auto_class = AutoModelForTextEncoding
 
+def release_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
 
 def quant_and_save(qtype:str, quants_dirpath:Path, skip:list[str] = None, delete_old: bool = True, model_id:str="black-forest-labs/FLUX.1-schnell"):
     flux_variant = 'schnell' if 'schnell' in model_id.lower() else 'dev'
@@ -34,7 +37,6 @@ def quant_and_save(qtype:str, quants_dirpath:Path, skip:list[str] = None, delete
     weight_qtype = quant_options[qtype]
     
     quant_base_dir = quants_dirpath / weight_qtype  # extras/quantized/flux/{qint4,qint8,qfloat8}
-
     quant_variant_dir = quant_base_dir / flux_variant # extras/quantized/flux/{qint4,qint8,qfloat8}/{schnell,dev}
 
     text_encoder2_out_dir = quant_base_dir / 'text_encoder_2' # extras/quantized/flux/{qint4,qint8,qfloat8}/text_encoder_2
@@ -42,54 +44,68 @@ def quant_and_save(qtype:str, quants_dirpath:Path, skip:list[str] = None, delete
 
     text_encoder2_out_dir.mkdir(parents=True, exist_ok=True)
     transformer_out_dir.mkdir(parents=True, exist_ok=True)
+    
+    print('Quantized location:', quant_base_dir)
 
     text_encoder_exclude = None
     transformer_exclude = None
     
     if weight_qtype == 'qint4':
         transformer_exclude = ["proj_out", "x_embedder", "norm_out", "context_embedder"]
-        
     
-    print('Quantized location:', quant_base_dir)
 
-    # subjectively, it seems like pre-cast to bf16 benefits qint, but is determental to qfloat.
-    # However, for qint4, pre-cast means the first call of .to(cuda) will take an exorbonate amount of time.
-    # it seems like it is just requantizing. It's likely that qint4 is not intended to be used like this and quanto is correcting it by just quantizing again 
-    # this is further supported by the fact that you'll get a same dype error (got BFloat16 and Float) once you try to run inference 
-    # dtype_kwarg = {} if weight_qtype == 'qfloat8' else {'torch_dtype': torch.bfloat16}
-    dtype_kwarg = {} if weight_qtype != 'qint8' else {'torch_dtype': torch.bfloat16}
+    # subjectively, it seems like pre-cast to bf16 benefits qint, but is determental to qfloat. That said, source weights are bf16.
+    # I can't see how arbitrarily upcasting to fp32 would make the quantization better. We wouldn't be adding any useful information.
+    # For qint4, however, pre-cast means the first call of .to(cuda) will take an exorbonate amount of time (~240s).
+    # It's likely that qint4 is not intended to be used like this and quanto is correcting by just running quantization again. 
+    # This is further supported by the fact that you'll get a same dype error (got BFloat16 and Float) once you try to run inference 
+    # Attempting to cast i4 to bf16 at any point post-quantization yield "ValueError: The dtype of a QBitsTensor cannot be changed" 
+    # - https://github.com/huggingface/optimum-quanto/blob/601dc193ce0ed381c479fde54a81ba546bdf64d1/optimum/quanto/tensor/qbits/qbits_ops.py#L52
+    torch_dtype = torch.bfloat16
+    vram_reqs = (10, 20) #gb required to fit model in gpu for faster quantization
+
+    #if weight_qtype == 'qint4':
+    #   torch_dtype = torch.float32
+    #   vram_reqs = (20, 40)
     
+    memfree,memtotal = torch.cuda.mem_get_info()
+    vram_gb = round(memtotal / (1024**3))
+    
+    te2_device = 'cuda' if vram_gb > vram_reqs[0] else None
+    transformer_device = 'cuda' if vram_gb > vram_reqs[1] else None
+    
+
     if 'text_encoder_2' not in skip:
         if delete_old:
             for file in text_encoder2_out_dir.iterdir():
                 file.unlink()
         
-        text_encoder = T5EncoderModel.from_pretrained(text_enc_model_id, subfolder="text_encoder_2", use_safetensors=True, **dtype_kwarg)#.to(0, dtype=torch.bfloat16)
+        text_encoder = T5EncoderModel.from_pretrained(text_enc_model_id, subfolder="text_encoder_2", use_safetensors=True, torch_dtype=torch_dtype).to(te2_device)
         
-        print('Quantizing Text Encoder...')
+        print('Quantizing Text Encoder using {}...'.format('cuda' if te2_device else 'cpu'))
         quanto.quantize(text_encoder, weights=weight_qtype, exclude=text_encoder_exclude)
         quanto.freeze(text_encoder)
-        
-        
+        release_memory()
+
         print(f'Saving Text Encoder... ({text_encoder.dtype})')
         text_encoder = QuantizedModelForTextEncoding(text_encoder) 
         text_encoder.save_pretrained(text_encoder2_out_dir)
         print('Quantized text_encoder saved:', text_encoder2_out_dir.as_posix())
 
         del text_encoder
-        gc.collect()
-        torch.cuda.empty_cache()
+        release_memory()
     
     if 'transformer' not in skip:
         if delete_old:
             for file in transformer_out_dir.iterdir():
                 file.unlink()
 
-        transformer = FluxTransformer2DModel.from_pretrained(model_id, subfolder="transformer", use_safetensors=True, **dtype_kwarg)#, torch_dtype=torch.bfloat16) # low_cpu_mem_usage=True,
+        transformer = FluxTransformer2DModel.from_pretrained(model_id, subfolder="transformer", use_safetensors=True, torch_dtype=torch_dtype).to(transformer_device)
         
-        print('Quantizing Transformer...')
+        print('Quantizing Transformer using {}...'.format('cuda' if transformer_device else 'cpu'))
         quanto.quantize(transformer, weights=weight_qtype, exclude=transformer_exclude)
         quanto.freeze(transformer)
+        release_memory()
         
         print(f'Saving Transformer... ({transformer.dtype})')
         transformer = QuantizedFluxTransformer2DModel(transformer)
@@ -107,6 +123,11 @@ def get_cli_args():
     return parser.parse_args()
 
 if __name__ == "__main__":
+    # NOTE: After discovering how fast quantization is on cuda, they only reasons you should bother saving to disk are
+    # if you have < 20 gb of vram or you want to delete the bf16 weights after quantization to save disk space.
+    # Otherwise, it's barely faster to load from disk vs quantize on the fly. Save ~ 10 seconds (20 vs 30)
+    # Additionally, qint4 will cause headaches saving to disk. Life is easier with live quantization.
+
     args = get_cli_args()
     
     quant_path = args.quants_dir
@@ -126,6 +147,5 @@ if __name__ == "__main__":
 
     # USAGE:    
     # python scripts/diffusion/quantize.py -q i8 -m dev -x te2
-
+    
     quant_and_save(args.qtype, quants_dirpath=quant_path, skip=args.exclude, delete_old=(not args.keep_old), model_id=model_id)
-    print('Quantized files saved:',quant_path.as_posix())
