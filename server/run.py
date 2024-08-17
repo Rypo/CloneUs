@@ -2,7 +2,7 @@ import os
 import typing
 import asyncio
 from contextlib import asynccontextmanager
-#import uvloop
+import uvloop
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -144,7 +144,7 @@ class BotUs(commands.Bot):
             await ctx.send(f'An error occurred: {error}')
 
 
-def main():
+async def main():
     cog_list = [c.stem.lower() for c in settings.COGS_DIR.glob(DYN_GLOB) if c.stem != '__init__']
 
     bot = BotUs()
@@ -236,12 +236,26 @@ def main():
         return await ctx.send(f"Synced {len(synced)} commands{where}\n{synced_md}")
         
 
-    
-    bot.run(settings.BOT_TOKEN)
+    await bot.start(settings.BOT_TOKEN)
+    #bot.run(settings.BOT_TOKEN)
 
+def run_main():
+    try:
+        uvloop.run(main())
+    except KeyboardInterrupt:
+        # nothing to do here
+        # `asyncio.run` handles the loop cleanup
+        # and `self.start` closes all sockets and the HTTPClient instance.
+        return
 
 if __name__ == '__main__':
+    #from threading import Thread
     settings._init_dirs()
     settings.setup_logging()
     useridx.check_author_initials()
-    main()
+    # main()
+    # TODO: Bot does not go offline on keyboard interupt
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    run_main()
+    #main_thread = Thread(target=main)
+    #main_thread.run()
