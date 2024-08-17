@@ -41,6 +41,9 @@ class DrawUIView(discord.ui.View):
         self.cur_imgnum = 0
         self.n_images = 0
         self.is_redraw: bool = None
+        self.in_queue=None
+        self.mcounter=None
+        self.call_fn:callable=None
     
     @property
     def kwargs(self):
@@ -52,6 +55,8 @@ class DrawUIView(discord.ui.View):
         del self.images, self.attachments, self.local_paths
         self.clear_items()
         await self.message.edit(view=self)
+        if self.mcounter:
+            await self.mcounter.delete()
 
     async def send(self, ctx: commands.Context, image: Image.Image, fpath: str, ephemeral=False):
         self.call_ctx = ctx
@@ -66,9 +71,9 @@ class DrawUIView(discord.ui.View):
         print('MERGED KWARGS:', kwargs)
         self.kwarg_sets=[kwargs]
         self.is_redraw = 'imgurl' in kwargs or 'imgfile' in kwargs
-        
+        imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
         # default_auto = (self.is_redraw and flags.aspect is None)
-        
+        self.call_fn = imgen.redraw if self.is_redraw else imgen.draw
         # if self.is_redraw:
         #     self.aspect_select.add_option(label='auto', description=f'Auto (best match)', emoji='💠', default=default_auto)
         
@@ -144,9 +149,23 @@ class DrawUIView(discord.ui.View):
         cur_attach = await self.update_view(cur_file)
         self.attachments[index] = cur_attach #.insert(self.cur_imgnum, cur_attach)
         return self.message
+
+    async def update_queue(self, d:int, interaction:discord.Interaction=None):
+        if self.mcounter is None:
+            self.in_queue = 0
+            self.mcounter = await interaction.followup.send(content = f'Queue: {self.in_queue}', wait=True, silent=True)
         
+        self.in_queue += d
+        # if self.in_queue <= 0:
+        #     await self.mcounter.delete()
+        #     self.mcounter = None
+        # else:
+        self.mcounter = await self.mcounter.edit(content = f'Queue: {self.in_queue}',)
+
     async def redo(self, interaction:discord.Interaction, kwargs:dict):
-        await interaction.response.defer(thinking=True)
+        # await interaction.response.defer(thinking=True)
+        await interaction.response.defer()
+        await self.update_queue(1, interaction)
         #kwargs = self.kwargs.copy()
 
         # TODO: Should refine steps be ignored here? for now, yes.
@@ -154,17 +173,21 @@ class DrawUIView(discord.ui.View):
         #kwargs['refine_steps'] = 0
         #self.kwarg_sets.append(kwargs)
         
-        imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
+        #imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
         #if kwargs.get('imgfile'):
-        if self.is_redraw:
-            image, fpath = await self.call_ctx.invoke(imgen.redraw, *self.call_ctx.args, **kwargs)
-        else:
-            #kwargs.pop('imgfile',None) # Still need to pop in case it's passed as None 
-            image, fpath = await self.call_ctx.invoke(imgen.draw, *self.call_ctx.args, **kwargs)
+        
+        image, fpath = await asyncio.create_task(self.call_ctx.invoke(self.call_fn, *self.call_ctx.args, **kwargs))
+        # NOTE: I bet you append these to a list and pop them. Then you'd be able to cancel queued jobs
+        # if self.is_redraw:
+        #     image, fpath = await self.call_ctx.invoke(imgen.redraw, *self.call_ctx.args, **kwargs)
+        # else:
+        #     #kwargs.pop('imgfile',None) # Still need to pop in case it's passed as None 
+        #     image, fpath = await self.call_ctx.invoke(imgen.draw, *self.call_ctx.args, **kwargs)
         
         self.kwarg_sets.append(kwargs)
         await self.add_image(image, fpath)
-        await interaction.delete_original_response()
+        await self.update_queue(-1, interaction)
+        #await interaction.delete_original_response()
 
 
     # @discord.ui.select(cls=discord.ui.Select, placeholder='image layout/aspect ratio', row=0)
@@ -340,7 +363,7 @@ class GifUIView(discord.ui.View):
     
     async def refresh(self):
         # asyncio.to_thread(
-        image_frames = self.optimized_images if self.optimized_images else self.images
+        image_frames = self.optimized_images if self.optimized_images is not None else self.images
         img_file = await asyncio.to_thread(imgutil.gif_to_bfile, image_frames=image_frames, filestem=self.gif_filepath.stem, description=self.prompt)
         self.message = await self.message.edit(content='', attachments=[img_file], view=self)
         
