@@ -101,8 +101,8 @@ class WordRuleFlags(commands.FlagConverter):
 class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     #prompt: str
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
-    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
-    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
     detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
@@ -118,8 +118,8 @@ class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     # prompt: str
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['str']) 
-    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
-    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
     detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
@@ -134,8 +134,8 @@ class UpsampleFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     # prompt: str
     hdsteps: int = commands.flag(default=1, aliases=['refine_steps'])
     hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['refine_strength'])
-    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
-    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
 
 
 class AnimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
@@ -145,8 +145,8 @@ class AnimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
     strength_end: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.80,  aliases=['strmax']) 
     strength_start: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.30,  aliases=['strmin']) 
-    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
-    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
     detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
@@ -161,8 +161,8 @@ class ReanimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
     astrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.50,  aliases=['str'])
     imsize: typing.Literal['small','med','full'] = commands.flag(default='small', aliases=['imscale'])
-    no: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
-    guide: float = commands.flag(default=None, aliases=['guidance', 'guidance_scale'])
+    negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
+    guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
     
     detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
     #aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]

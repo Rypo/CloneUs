@@ -36,6 +36,7 @@ event_logger = settings.logging.getLogger('event')
 
 # IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 # PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
+GUI_TIMEOUT = 30*60
 
 class SetImageConfig:
     bot: BotUs
@@ -61,8 +62,11 @@ class SetImageConfig:
             version: Image model name
             offload: If True, model will be moved off GPU when not in use to save vRAM 
         '''
+        await ctx.defer()
         if self.igen.model_name != version.value or self.igen.offload != offload:
-            await self.igen.unload_pipeline()
+            if self.igen.is_ready:
+                await self.igen.unload_pipeline()
+            #await self.igen.unload_pipeline()
             
             self.igen = imgman.AVAILABLE_MODELS[version.value]['manager'](offload=offload)
             return await self.imgup(ctx)
@@ -106,7 +110,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     def __init__(self, bot: BotUs):
         self.bot = bot
         # self.igen = imgman.ColorfulXLLightningManager(offload=True)
-        self.igen = imgman.RealVizXL4Manager(offload=True)
+        self.igen = imgman.FluxSchnevManager(offload=True)
+        
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
@@ -195,8 +200,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             prompt: A description of the image to be generated.
             steps: Num iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
 
-            no: Negative prompt. What to exclude from image. Usually comma sep list of words. Default=None.
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            negprompt: Negative prompt. What to exclude from image. Usually comma sep list of words. Default=None.
+            guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). square w=h = 1:1. portrait w<h = 13:19. Default='square'. 
             
@@ -209,8 +214,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # flags can't be created by drawUI, so need to separate out draw/redraw functionality
         return await self.draw(ctx, prompt, 
                                steps = flags.steps, 
-                               negative_prompt = flags.no, 
-                               guidance_scale = flags.guide, 
+                               negative_prompt = flags.negprompt, 
+                               guidance_scale = flags.guidance, 
                                detail_weight= flags.detail,
                                aspect = flags.aspect, 
                                refine_steps = flags.hdsteps, 
@@ -249,7 +254,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_file = imgbytes_file(image, prompt)
             out_imgpath = imgutil.save_image_prompt(image, prompt)
             if not has_view:
-                view = imageui.DrawUIView(fwkg, timeout=5*60)
+                view = imageui.DrawUIView(fwkg, timeout=GUI_TIMEOUT)
                 msg = await view.send(ctx, image, out_imgpath)
                 
         return image, out_imgpath
@@ -267,8 +272,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
             strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default varies.
             
-            no: What to exclude from image. Usually comma sep list of words. Default=None.
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
+            guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). If None, will pick nearest to imgfile.
 
@@ -282,8 +287,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         return await self.redraw(ctx, prompt, imgurl, imgfile=imgfile, 
                                  steps = flags.steps, 
                                  strength = flags.strength, 
-                                 negative_prompt = flags.no, 
-                                 guidance_scale = flags.guide, 
+                                 negative_prompt = flags.negprompt, 
+                                 guidance_scale = flags.guidance, 
                                  detail_weight= flags.detail,
                                  aspect = flags.aspect, 
                                  refine_steps = flags.hdsteps, 
@@ -333,7 +338,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_file = imgbytes_file(image, prompt)
             out_imgpath = imgutil.save_image_prompt(image, prompt)
             if needs_view:
-                view = imageui.DrawUIView(fwkg, timeout=5*60)
+                view = imageui.DrawUIView(fwkg, timeout=GUI_TIMEOUT)
                 msg = await view.send(ctx, image, out_imgpath)
             
         #out_imgpath = save_image_prompt(image, prompt)
@@ -350,8 +355,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             prompt: A description of the image. Not required, but if high hdstep/hdstrength helps A LOT.
             hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=1. Usually < 3.
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Default=~30
-            no: What to exclude from image. Usually comma sep list of words. Default=None.
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
+            guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
         """
 
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
@@ -367,7 +372,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         async with self.bot.busy_status(activity='draw'):
             image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, 
                                                            refine_steps=flags.hdsteps,refine_strength=flags.hdstrength,
-                                                           negative_prompt=flags.no, guidance_scale=flags.guide,
+                                                           negative_prompt=flags.no, guidance_scale=flags.guidance,
                                                            strength=0, steps=None, )
             
             msg = await ctx.send(file=imgutil.to_bytes_file(image, prompt=prompt, ext='PNG'))
@@ -392,8 +397,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             strength_end: Strength range end. 0 = No Change. 100=Change All. Default=80.
             strength_start: Strength range start. ignored if `imgurl` is None. Default=30.
             
-            no: What to exclude from image. Usually comma sep list of words. Default=None.
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
+            guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). If None, will pick nearest to img if provided.
 
@@ -405,8 +410,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                   steps = flags.steps, 
                                   strength_end = flags.strength_end, 
                                   strength_start = flags.strength_start, 
-                                  negative_prompt = flags.no, 
-                                  guidance_scale = flags.guide, 
+                                  negative_prompt = flags.negprompt, 
+                                  guidance_scale = flags.guidance, 
                                   detail_weight = flags.detail,
                                   aspect = flags.aspect, 
                                   #refine_steps = flags.hdsteps, 
@@ -427,6 +432,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                       fast: bool = False,
                       seed: int = None
                      ):
+        if self.igen.config.strength == 0:
+            return await ctx.send(f'{self.igen.model_name} does not support `/animate`', ephemeral=True)
         needs_view = await self.view_check_defer(ctx)
         image = None
         if imgurl is not None:
@@ -453,9 +460,12 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             for image in await frame_gen:
             # for image in frame_gen:
-                image_frames.append(image)
-                cf += 1
-                msg  = await msg.edit(content=f'Cooking... {cf}/{nframes}')
+                # image_frames.append(image)
+                if not isinstance(image, list):
+                    cf += 1
+                    msg  = await msg.edit(content=f'Cooking... {cf}/{nframes}')
+                else:
+                    image_frames = image
                 
             #image_file = imgbytes_file(image, prompt)
             #out_imgpath = save_image_prompt(image, prompt)
@@ -464,7 +474,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
            
             if needs_view:
-                view = imageui.GifUIView(image_frames, timeout=5*60)
+                view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
                 msg = await view.send(msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
@@ -483,8 +493,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             astrength: Animation Strength. Frame alteration intensity. 0 = No change. 100=Complete Change. Default=50.
             imsize: How big gif should be. smaller = fast, full = slow, higher quality. Default=small. 
             
-            no: What to exclude from image. Usually comma sep list of words. Default=None.
-            guide: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
+            guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
@@ -495,8 +505,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                     steps = flags.steps, 
                                     astrength = flags.astrength, 
                                     imsize = flags.imsize, 
-                                    negative_prompt = flags.no, 
-                                    guidance_scale = flags.guide, 
+                                    negative_prompt = flags.negprompt, 
+                                    guidance_scale = flags.guidance, 
                                     detail_weight= flags.detail,
                                     #aspect = flags.aspect, 
                                     #refine_steps = flags.hdsteps, 
@@ -516,7 +526,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                         fast: bool = False,
                         aseed: int = None
                         ):
-        
+        if self.igen.config.strength == 0:
+            return await ctx.send(f'{self.igen.model_name} does not support `/reanimate`', ephemeral=True)
         # this may be passed a url string in drawUI config
         image_url = imgutil.clean_discord_urls(imgurl)
         try:
@@ -532,6 +543,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         needs_view = await self.view_check_defer(ctx) # This needs to be AFTER the checks or message will not be ephemeral because of ctx.defer()
         
+        
+
         if len(prompt) > 1000:
             prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
                 
@@ -556,7 +569,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
 
             if needs_view:
-                view = imageui.GifUIView(image_frames, timeout=5*60)
+                view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
                 msg = await view.send(msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
