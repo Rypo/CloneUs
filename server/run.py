@@ -144,10 +144,10 @@ class BotUs(commands.Bot):
             await ctx.send(f'An error occurred: {error}')
 
 
-async def main():
+async def main(bot=None):
     cog_list = [c.stem.lower() for c in settings.COGS_DIR.glob(DYN_GLOB) if c.stem != '__init__']
-
-    bot = BotUs()
+    if bot is None:
+        bot = BotUs()
 
     @bot.tree.command(name='reload', description='Reload a set of commands')
     @app_commands.choices(cog=[app_commands.Choice(name=cog, value=cog) for cog in cog_list])
@@ -235,14 +235,19 @@ async def main():
             where = ''
         return await ctx.send(f"Synced {len(synced)} commands{where}\n{synced_md}")
         
-
-    await bot.start(settings.BOT_TOKEN)
+    async with bot:
+        await bot.start(settings.BOT_TOKEN)
     #bot.run(settings.BOT_TOKEN)
 
 def run_main():
+    bot = None # BotUs()
+    
     try:
-        uvloop.run(main())
+        uvloop.run(main(bot))
     except KeyboardInterrupt:
+        #for task in asyncio.all_tasks(bot.loop):
+        #    task.cancel()
+
         # nothing to do here
         # `asyncio.run` handles the loop cleanup
         # and `self.start` closes all sockets and the HTTPClient instance.
