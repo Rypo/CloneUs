@@ -19,6 +19,41 @@ from PIL import Image
 
 from utils import image as imgutil
 
+class ConfirmActionView(discord.ui.View):
+    def __init__(self, *, timeout: float = 15):
+        super().__init__(timeout=timeout)
+        self.value = None
+    
+    def disable_and_clear(self):
+        for item in self.children:
+            item.disabled = True
+        self.clear_items()
+    
+    async def on_timeout(self) -> None:
+        self.value = True
+        self.disable_and_clear()
+    
+
+    @discord.ui.button(label='Accept', style=discord.ButtonStyle.green)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        #await interaction.response.send_message('Confirming', ephemeral=True)
+        self.value = True
+        self.disable_and_clear()
+
+        self.stop()
+
+    @discord.ui.button(label='Reject', style=discord.ButtonStyle.grey)
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = False
+        self.disable_and_clear()
+        self.stop()
+
+    @discord.ui.button(label='cancel', style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = '<CANCEL>'
+        self.disable_and_clear()
+        self.stop()
+
 class DrawUIView(discord.ui.View):
     def __init__(self, kwargs:dict, *, timeout=None):
         super().__init__(timeout=timeout)
