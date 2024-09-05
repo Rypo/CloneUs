@@ -38,9 +38,31 @@ event_logger = settings.logging.getLogger('event')
 # PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
 GUI_TIMEOUT = 30*60
 
+
+class Autocorrect:
+    def __init__(self, model_relpath:str='extras/models/jamspell/en.bin') -> None:
+        import jamspell
+        from cloneus import cpaths
+        self.corrector = jamspell.TSpellCorrector()
+        self.corrector.LoadLangModel(str(cpaths.ROOT_DIR/model_relpath))
+        self.blacklist = set()
+
+    def __call__(self, text:str) -> tuple[str, bool]:
+        fixed_text = self.corrector.FixFragment(text)
+        return fixed_text, fixed_text!=text
+
+    def correct(self, text:str):
+        return self.corrector.FixFragment(text)
+    
+    def check(self, text:str):
+        return self.corrector.FixFragment(text) != text
+    
+    def ban_text(self, text):
+        self.blacklist.add(text)
+
 class SetImageConfig:
     bot: BotUs
-    igen: imgman.OneStageImageGenManager
+    igen: imgman.BaseSDXLManager|imgman.BaseFluxManager|imgman.BaseSD3Manager
 
     def argsettings(self):
         return [
@@ -111,6 +133,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         self.bot = bot
         # self.igen = imgman.ColorfulXLLightningManager(offload=True)
         self.igen = imgman.FluxSchnevManager(offload=True)
+        self.spell_check = Autocorrect()
         
 
     async def cog_unload(self):
@@ -133,6 +156,43 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             await asyncio.sleep(1)
             needs_view = True
         return needs_view
+    
+    def fix_prompt(self, prompt:str, check_spelling:bool = True):
+        was_corrected = False
+
+        if prompt is None:
+            return '', False
+        
+        if check_spelling and prompt not in self.spell_check.blacklist:
+            prompt, was_corrected = self.spell_check(prompt)
+        
+        if len(prompt) > 1000:
+            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
+
+        return prompt, was_corrected
+    
+    async def validate_prompt(self, ctx: commands.Context, prompt:str):
+        prompt_new, was_sp_corrected = self.fix_prompt(prompt)
+        if was_sp_corrected:
+            view = imageui.ConfirmActionView(timeout=10)
+            diffstr = (
+                '```diff\n'
+                f'- {prompt}\n\n'
+                f'+ {prompt_new}\n'
+                '```'
+            )
+            msg = await ctx.channel.send(f'Accept changes?\n{diffstr}', view=view)#, ephemeral=True)
+            await view.wait()
+            if view.value == '<CANCEL>':
+                await msg.delete()
+                return '<CANCEL>'
+            keep_changes =  view.value or view.value is None
+            if not keep_changes:
+                prompt_new,was_sp_corrected = self.fix_prompt(prompt, check_spelling=False)
+                self.spell_check.ban_text(prompt)
+            await msg.delete()
+        return prompt_new
+
 
     @commands.command(name='istatus', aliases=['iinfo','imginfo', 'imageinfo'])
     async def istatus_report(self, ctx: commands.Context):
@@ -191,6 +251,32 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             await msg.edit(content='🏎 I am SPEED. 🏎 ')
 
 
+    @commands.hybrid_command(name='caption')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    async def caption(self, ctx: commands.Context, imgurl:str, level:typing.Literal['brief', 'detailed', 'verbose']='verbose', text_only:bool=False):
+        """Write a text description for an image.
+
+        Args:
+            imgurl: URL of the image to be described.
+            level: level of detail in the description. Default=verbose.
+            text_only: If True, only return text description, otherwise show the image. Default=False.
+        """
+        await ctx.defer()
+        await asyncio.sleep(1)
+        image_url = imgutil.clean_discord_urls(imgurl, True)#imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)
+        # test for gif/mp4/animated file
+
+        image = await imgutil.aload_image(image_url, result_type='np')
+        
+        if image.ndim > 3:
+            image = image[0] # gifs
+        image = Image.fromarray(image)
+        
+        desc = self.igen.caption(image, level)
+        file = None if text_only else imgutil.to_bfile(image, description=desc)
+
+        return await ctx.send(desc, file=file)
+
     @commands.hybrid_command(name='draw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _draw(self, ctx: commands.Context, prompt:commands.Range[str,1,1000], *, flags: cmd_flags.DrawFlags):
@@ -237,14 +323,16 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                    fast: bool = False,
                    seed: int = None,
                    ):
+        refine_strength = cmd_tfms.percent_transform(refine_strength)
         
-        if len(prompt) > 1000:
-            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
-
         has_view = ctx.interaction.response.is_done()
         if not has_view:
             await ctx.defer()
             await asyncio.sleep(1)
+        
+        prompt = await self.validate_prompt(ctx, prompt)
+        if prompt == '<CANCEL>':
+            return await ctx.send('Canceled', silent=True, delete_after=1)
         
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=False)
@@ -252,6 +340,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                          refine_steps=refine_steps, refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
             #await send_imagebytes(ctx, image, prompt)
             #image_file = imgbytes_file(image, prompt)
+            # this needs to overide calling args
+            fwkg.update(prompt=prompt)
             out_imgpath = imgutil.save_image_prompt(image, prompt)
             if not has_view:
                 view = imageui.DrawUIView(fwkg, timeout=GUI_TIMEOUT)
@@ -311,6 +401,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                      fast:bool = False,
                      seed:int = None
                      ):
+        # manual conversion may be needed because discord transformer doesn't proc when function called internally (e.g. by GUI redo button)
+        strength = cmd_tfms.percent_transform(strength)
+        refine_strength = cmd_tfms.percent_transform(refine_strength)
         # this may be passed a url string in drawUI config
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         # test for gif/mp4/animated file
@@ -319,8 +412,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                         negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, fast=fast, seed=seed)
 
         image = await imgutil.aload_image(image_url)#.convert('RGB')
-        if len(prompt) > 1000:
-            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
         needs_view = False
         if not ctx.interaction.response.is_done():
@@ -328,13 +419,17 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             await asyncio.sleep(1)
             needs_view = True
         
+        prompt = await self.validate_prompt(ctx, prompt)
+        if prompt == '<CANCEL>':
+            return await ctx.send('Canceled', silent=True, delete_after=1)
+        
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
             image, fwkg = await self.igen.regenerate_image(prompt=prompt, image=image, 
                                                            steps=steps, strength=strength, negative_prompt=negative_prompt, 
                                                            guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, refine_steps=refine_steps,
                                                            refine_strength=refine_strength, denoise_blend=denoise_blend,seed=seed)
-            
+            fwkg.update(prompt=prompt)
             #image_file = imgbytes_file(image, prompt)
             out_imgpath = imgutil.save_image_prompt(image, prompt)
             if needs_view:
@@ -358,20 +453,21 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
         """
-
+        refine_strength = cmd_tfms.percent_transform(flags.hdstrength)
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
         image = await imgutil.aload_image(image_url)#load_image(image_url, None)#.convert('RGB')
-        if prompt is None:
-            prompt = ''
-        if len(prompt) > 1000:
-            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
         
         await ctx.defer()
         await asyncio.sleep(1)
 
+        prompt = await self.validate_prompt(ctx, prompt)
+        if prompt == '<CANCEL>':
+            return await ctx.send('Canceled', silent=True, delete_after=1)
+
+
         async with self.bot.busy_status(activity='draw'):
             image, fwkg = await self.igen.regenerate_image(image=image, prompt=prompt, 
-                                                           refine_steps=flags.hdsteps,refine_strength=flags.hdstrength,
+                                                           refine_steps=flags.hdsteps,refine_strength=refine_strength,
                                                            negative_prompt=flags.no, guidance_scale=flags.guidance,
                                                            strength=0, steps=None, )
             
@@ -432,17 +528,21 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                       fast: bool = False,
                       seed: int = None
                      ):
+        strength_end = cmd_tfms.percent_transform(strength_end)
+        strength_start = cmd_tfms.percent_transform(strength_start)
+        
         if self.igen.config.strength == 0:
             return await ctx.send(f'{self.igen.model_name} does not support `/animate`', ephemeral=True)
+        
         needs_view = await self.view_check_defer(ctx)
         image = None
         if imgurl is not None:
             image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
-            image = await imgutil.aload_image(image_url, result_type=None)#load_image(image_url)
+            image = await imgutil.aload_image(image_url, result_type=None)
         
-        if len(prompt) > 1000:
-            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
-        
+        prompt = await self.validate_prompt(ctx, prompt)
+        if prompt == '<CANCEL>':
+            return await ctx.send('Canceled', silent=True, delete_after=1)
         
         image_frames = []
         #nf = gif_array.shape[0]
@@ -526,6 +626,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                         fast: bool = False,
                         aseed: int = None
                         ):
+        astrength = cmd_tfms.percent_transform(astrength)
         if self.igen.config.strength == 0:
             return await ctx.send(f'{self.igen.model_name} does not support `/reanimate`', ephemeral=True)
         # this may be passed a url string in drawUI config
@@ -543,10 +644,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         needs_view = await self.view_check_defer(ctx) # This needs to be AFTER the checks or message will not be ephemeral because of ctx.defer()
         
-        
-
-        if len(prompt) > 1000:
-            prompt = prompt[:1000]+'...' # Will error out if >1024 chars.
+        prompt = await self.validate_prompt(ctx, prompt)
+        if prompt == '<CANCEL>':
+            return await ctx.send('Canceled', silent=True, delete_after=1)
                 
         image_frames = []
         nf = gif_array.shape[0]
@@ -559,10 +659,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                            guidance_scale=guidance_scale, detail_weight=detail_weight, aseed=aseed)
             
             msg = await ctx.send(f'Cooking... {cf}/{nf}', silent=True)
-            for images in await frame_gen:
-                image_frames.extend(images)
-                cf += len(images)
-                msg  = await msg.edit(content=f'Cooking... {cf}/{nf}')
+            for frames in await frame_gen:
+                #image_frames.extend(images)
+                if not isinstance(frames, list):
+                    cf += frames#len(images)
+                    msg  = await msg.edit(content=f'Cooking... {cf}/{nf}')
+                else:
+                    image_frames = frames
             
             msg  = await msg.edit(content=f'Seasoning...')
             out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
@@ -582,7 +685,5 @@ async def setup(bot: BotUs):
     igen = ImageGen(bot)
 
     await bot.add_cog(igen)
-
-
 
 
