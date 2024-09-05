@@ -5,7 +5,7 @@ import torch
 
 import peft
 import diffusers.utils as diffutils 
-from diffusers import FluxTransformer2DModel
+from diffusers import FluxTransformer2DModel, FluxPipeline
 import safetensors.torch as sft
 
 # in SD3 original implementation of AdaLayerNormContinuous, it split linear projection output into shift, scale;
@@ -283,3 +283,44 @@ def manual_lora(converted_state_dict:dict[str, torch.Tensor], transformer:FluxTr
     incompatible_keys = peft.set_peft_model_state_dict(transformer, converted_state_dict, adapter_name=adapter_name)
     
     return transformer, incompatible_keys
+
+def get_lora_state_dict(state_dict:dict|Path):
+    if isinstance(state_dict, (str,Path)):
+        state_dict = sft.load_file(state_dict)
+    
+    k1 = list(state_dict.keys())[0]
+    
+    if any(k1.endswith(ext) for ext in ['.lora_B.weight', '.lora_A.weight']):
+        converted_state_dict = state_dict
+    else:
+        converted_state_dict, (unused_up,unused_down) = convert_sd(state_dict,)
+        if (unused_keys := sorted(list(unused_up.keys())+list(unused_down.keys()))):
+            print(f'WARNING: failed to convert some keys to Diffusers format:\n{unused_keys}')
+    
+    return converted_state_dict
+
+def set_lora_transformer(pipe:FluxPipeline, state_dict:dict, adapter_name:str|None=None):
+    if isinstance(state_dict, (str,Path)):
+        state_dict = sft.load_file(state_dict)
+    
+    k1 = list(state_dict.keys())[0]
+    
+    if any(k1.endswith(ext) for ext in ['.lora_B.weight', '.lora_A.weight']):
+        converted_state_dict = state_dict
+    else:
+        converted_state_dict, (unused_up,unused_down) = convert_sd(state_dict,)
+        if (unused_keys := sorted(list(unused_up.keys())+list(unused_down.keys()))):
+            print(f'WARNING: failed to convert some keys to Diffusers format:\n{unused_keys}')
+    
+    if adapter_name is not None:
+        transformer_adapters = pipe.get_list_adapters().get('transformer',[])
+        if adapter_name in transformer_adapters:
+            print('removing adapters', adapter_name)
+            pipe.delete_adapters(adapter_name)
+    else:
+        old_adapters = pipe.get_active_adapters()
+        print('removing adapters',old_adapters)
+        pipe.delete_adapters(old_adapters)
+    
+    pipe.transformer, incompat_keys = manual_lora(converted_state_dict, pipe.transformer, adapter_name)
+    print(pipe.get_active_adapters())
