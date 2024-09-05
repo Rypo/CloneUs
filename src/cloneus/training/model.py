@@ -11,7 +11,7 @@ from transformers import (
 from transformers.utils.quantization_config import  QuantizationConfigMixin
 import transformers
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model, AutoPeftModelForCausalLM
-from unsloth import FastLanguageModel
+
 
 from ..utils import misc
 from ..data import tokenization
@@ -34,6 +34,7 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
     return model, tokenizer
 
 def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
+    from unsloth import FastLanguageModel
     # pip install -e "git+https://github.com/unslothai/unsloth.git#egg=unsloth
     # https://pip.pypa.io/en/stable/cli/pip_install/
 
@@ -44,8 +45,8 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
         fix_tokenizer=True,
         load_in_4bit = (peft_config.init_lora_weights != 'loftq'),
         device_map = "sequential",
-        use_gradient_checkpointing = True,
-        # use_gradient_checkpointing = "unsloth",
+        # use_gradient_checkpointing = True,
+        use_gradient_checkpointing = "unsloth",
     )
     if Path(model_id).exists():
         return model,tokenizer

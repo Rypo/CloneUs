@@ -14,10 +14,7 @@ from transformers import (
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
 
-from trl import SFTTrainer
-# from trl.trainer import ConstantLengthDataset
-# import wandb.vendor.pynvml.pynvml
-# wandb.vendor.pynvml.pynvml.nvmlDeviceGetName = lambda handle: "NVIDIA GeForce RTX 3090"
+from trl import SFTTrainer #, SFTConfig
 
 def _get_cosine_const_schedule_with_warmup_lr_lambda(current_step: int, *, num_warmup_steps: int, num_const_steps:int, num_training_steps: int, num_cycles: float):
     
