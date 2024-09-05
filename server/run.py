@@ -153,8 +153,11 @@ async def main(bot=None):
     @app_commands.choices(cog=[app_commands.Choice(name=cog, value=cog) for cog in cog_list])
     async def reload(interaction: discord.Interaction, cog: str):
         """Reload a command set."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await bot.reload_extension(f'cogs.{cog.lower()}')
-        await interaction.response.send_message(f'Reloaded: {cog}', ephemeral=True, delete_after=1)
+        #await interaction.response.send_message(f'Reloaded: {cog}', ephemeral=True, delete_after=1)
+        msg = await interaction.followup.send(f'Reloaded: {cog}', ephemeral=True, wait=True)
+        await msg.delete(delay=1)
     
 
     @bot.command(name='restart')
@@ -240,13 +243,14 @@ async def main(bot=None):
     #bot.run(settings.BOT_TOKEN)
 
 def run_main():
-    bot = None # BotUs()
+    bot = BotUs()
     
     try:
         uvloop.run(main(bot))
     except KeyboardInterrupt:
-        #for task in asyncio.all_tasks(bot.loop):
-        #    task.cancel()
+        for task in asyncio.all_tasks(bot.loop):
+           print(task.get_name())
+           task.cancel()
 
         # nothing to do here
         # `asyncio.run` handles the loop cleanup
