@@ -44,6 +44,7 @@ from diffusers import (
 )
 
 from diffusers.schedulers import AysSchedules
+from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img import retrieve_latents
 from huggingface_hub import hf_hub_download, snapshot_download
 
 
@@ -58,25 +59,24 @@ from accelerate import cpu_offload,init_empty_weights
 from accelerate.utils import BnbQuantizationConfig, load_and_quantize_model
 
 from DeepCache import DeepCacheSDHelper
+from tgate import TgateSDXLDeepCacheLoader
 from PIL import Image
 from spandrel import ImageModelDescriptor, ModelLoader
 from compel import Compel, ReturnedEmbeddingsType
 
 from cloneus import cpaths
-from cloneus.plugins.vision import quantops,specialists,loraops
+from cloneus.plugins.vision import quantops,specialists,loraops, interpolate
 from cloneus.plugins.vision.fluximg2img import FluxImg2ImgPipeline
 from cloneus.utils.common import release_memory, batched
 
-# import config.settings as settings
-# from cmds import flags as cmd_flags, transformers as cmd_tfms
-# from utils.globthread import async_wrap_thread, stop_global_thread
-# from utils.image import batched
 
 SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
 # other: [(1280, 768),(768, 1280),]
 
-def print_memstats(label:str):
+def print_memstats(label:str, reset_peak:bool=True):
     print(f'({label}) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
+    if reset_peak:
+        torch.cuda.reset_peak_memory_stats()
 
 def torch_compile_flags(restore_defaults=False, verbose=False):
     # https://huggingface.co/docs/diffusers/tutorials/fast_diffusion#use-faster-kernels-with-torchcompile
@@ -116,9 +116,9 @@ class DiffusionConfig:
     strength: float = 0.55
     negative_prompt: str = None
     aspect: typing.Literal['square','portrait','landscape'] = 'square'
-    refine_steps: int = CfgItem(0, bounds=(0, 3))
-    refine_strength: float = CfgItem(0.3, bounds=(0.2, 0.4))
-    denoise_blend: float = None
+    clip_skip: int = None
+    
+    #denoise_blend: float = None
     
     img_dims: tuple[int, int]|list[tuple[int, int]] = (1024, 1024)
     refine_guidance_scale: float = None
@@ -177,7 +177,7 @@ class DiffusionConfig:
             if v.bounds is not None:
                 lb, ub = v.bounds
             # These values are displayed as 0-100 for end-user simplicity
-            if k in ['strength', 'refine_strength', 'denoise_blend']:
+            if k in ['strength', 'refine_strength', ]: # 'denoise_blend'
                 default = int(default*100)
                 lb = int(lb*100)
                 ub = int(ub*100)
@@ -200,7 +200,7 @@ class DiffusionConfig:
             filled_kwargs[k] = v
         return filled_kwargs
         
-    def nearest_dims(self, img_wh:tuple[int,int], dim_choices:list[tuple[int,int]]=None, scale:float=1.0, use_hf_sbr:bool=False):
+    def nearest_dims(self, img_wh:tuple[int,int], dim_choices:list[tuple[int,int]]=None, use_hf_sbr:bool=False):
         # TODO: compare implementation vs transformers select_best_resolution
         if dim_choices is None:
             dim_choices = self.img_dims
@@ -208,11 +208,11 @@ class DiffusionConfig:
         if isinstance(dim_choices, tuple):
             return dim_choices
 
-        scale_dims = np.array(dim_choices)
-        if scale != 1:
-            scale_dims *= scale
-            scale_dims -= (scale_dims % 64) #8) # equiv: ((scale_dims//64)*64
-        dim_choices = list(map(tuple,scale_dims.astype(int)))
+        # scale_dims = np.array(dim_choices)
+        # if scale != 1:
+        #     scale_dims *= scale
+        #     scale_dims -= (scale_dims % 64) #8) # equiv: ((scale_dims//64)*64
+        # dim_choices = list(map(tuple,scale_dims.astype(int)))
 
         #dim_choices = list(map(tuple,(np.array(dim_choices)*scale).astype(int)))
         
@@ -261,6 +261,19 @@ def discretize_strengths(steps:int, nframes:int, start:float=0.3, end:float=0.8,
     strengths = round_steps/steps
     return strengths
 
+def rebatch_prompt_embs(emb_prompts:dict[str, torch.Tensor], batch_size:int):
+    rebatched_prombs = {}
+    for k,v in emb_prompts.items():
+        non_batch_dims = [-1]*(v.ndim - 1)
+        rebatched_prombs[k] = v[[0], ...].expand(batch_size, *non_batch_dims)
+            
+    return rebatched_prombs
+
+def generator_batch(seed:int|None, batch_size:int, device='cpu'):
+    if seed is not None:
+        return [torch.Generator(device=device).manual_seed(seed) for _ in range(batch_size)]
+    return None
+    
 
 def get_scheduler(alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], init_sched_config:dict, **kwargs):
     # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
@@ -307,27 +320,41 @@ class DeepCacheMixin:
         # TODO: https://huggingface.co/docs/diffusers/v0.30.0/en/optimization/tgate?pipelines=Stable+Diffusion+XL
         self.dc_base = DeepCacheSDHelper(self.base)
         self.dc_base.set_params(cache_interval=3, cache_branch_id=0)
-        
-        self.dc_basei2i = DeepCacheSDHelper(self.basei2i)
-        self.dc_basei2i.set_params(cache_interval=3, cache_branch_id=0)
+        #self._dc_base = TgateSDXLDeepCacheLoader(self.base, cache_interval=3, cache_branch_id=0)
+        #self.dc_base = functools.partial(self._dc_base.tgate, gate_step=10)
+        #self.dc_base.tgate()
+        #self.dc_basei2i = DeepCacheSDHelper(self.basei2i)
+        #self.dc_basei2i.set_params(cache_interval=3, cache_branch_id=0)
+        #self._dc_basei2i = TgateSDXLDeepCacheLoader(self.basei2i, cache_interval=3, cache_branch_id=0)
+        #self.dc_basei2i = functools.partial(self._dc_basei2i.tgate, gate_step=10)
+
         self.dc_enabled = False
         
     def dc_fastmode(self, enable:bool, img2img=False):
         # TODO: This will break under various conditions
         # if min_effective_steps (steps*strength < 5) refine breaks?
         # e.g. refine_strength=0.3, steps < 25 / refine_strength=0.4, steps < 20
-        if self.dc_enabled is None:
-            self._setup_dc()
-        if enable != self.dc_enabled: 
-            if enable:
-                (self.dc_basei2i if img2img else self.dc_base).enable()
-            else:
-                (self.dc_basei2i if img2img else self.dc_base).disable()
-                
-            self.dc_enabled=enable 
+        if enable:
+            if self.dc_enabled is None:
+                self._setup_dc()
+            self.dc_base.enable()
+        elif self.dc_enabled:
+            self.dc_base.disable()
+        self.dc_enabled=enable
+        # if enable != self.dc_enabled:
+        #     if enable:
+        #         self.dc_base.enable()
+        #         #(self.dc_basei2i if img2img else self.dc_base).enable()
+        #     else:
+        #         self.dc_base.disable()
 
+                #(self.dc_basei2i if img2img else self.dc_base).disable()
+                
+            #self.dc_enabled=enable 
+
+    
 class SingleStagePipeline:
-    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_setup:str|tuple[str, dict]=None, clip_skip:int=None):
+    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_setup:str|tuple[str, dict]=None):
         self.is_compiled = False
         self.is_ready = False
         self.dc_enabled = None
@@ -340,10 +367,13 @@ class SingleStagePipeline:
         self._scheduler_setup = (scheduler_setup, {}) if isinstance(scheduler_setup,str) else scheduler_setup
         self.scheduler_kwargs = None
         
-        self.clip_skip = clip_skip
-        self.global_seed = None
-        self.has_adapters = False
-
+        self.clip_skip = self.config.clip_skip
+        #self.global_seed = None
+        self.adapter_names = []
+        self.adapter_weight = None
+        # core
+        self.base = None
+        self.basei2i = None
         # specialists
         self.upsampler = None
         self.florence = None
@@ -351,8 +381,8 @@ class SingleStagePipeline:
         # processors
         self.compeler = None
         
-    def set_seed(self, seed:int|None = None):
-        self.global_seed = seed
+    # def set_seed(self, seed:int|None = None):
+    #     self.global_seed = seed
     
     def load_lora(self, weight_name:str = 'detail-tweaker-xl.safetensors', lora_dirpath:Path=None):
         pass
@@ -424,15 +454,22 @@ class SingleStagePipeline:
         raise NotImplementedError('Requires subclass override')
     
     @torch.inference_mode()    
-    def upsample(self, image, scale:float|None=None):
-        '''If scale is None, do not resize after upsampling. Out size will be 4x image_dims (if 4xUltra) '''
+    def upsample(self, image:np.ndarray | Image.Image | list[Image.Image], scale:float|None=None, out_wh:tuple[int,int]=None):
+        '''If scale is None, do not resize after upsampling. Out size will be 4x image_dims (if 4xUltra).
+        If out_wh, resize to images exactly (w,h) after upsamping
+        '''
         if self.upsampler is None:
             self.upsampler = specialists.Upsampler('4xUltrasharp-V10.pth', "BGR", dtype=torch.bfloat16)
         
         if scale is None:
-            return self.upsampler.upsample(image)
-
-        return self.upsampler.upscale(image, scale=scale)
+            images = self.upsampler.upsample(image)
+        else:
+            images = self.upsampler.upscale(image, scale=scale)
+        
+        if out_wh is not None:
+            images = [img.resize(out_wh, resample=Image.Resampling.LANCZOS) for img in images]
+        
+        return images
 
     @torch.inference_mode()    
     def caption(self, image:Image.Image, caption_type:typing.Literal['brief', 'detailed', 'verbose']):
@@ -442,58 +479,64 @@ class SingleStagePipeline:
         return self.florence.caption(image, caption_type)
     
     @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None, refine_steps=None, refine_strength=None, image=None, target_size=None, seed=None):
-        if seed is None:
-            seed = self.global_seed
-        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+    def toggle_loras(self, detail_weight:float|None = None):
+        lora_scale = None
+        if self.adapter_names and detail_weight != self.adapter_weight:
+            print('Detail weight:', detail_weight, 'Current adapter weight:', self.adapter_weight)
+            if detail_weight:
+                lora_scale = detail_weight
+                self.base.enable_lora()
+                #self.base.enable_adapters()
+                self.base.set_adapters(self.adapter_names, detail_weight)
+            else:
+                #self.base.disable_adapters()
+                self.base.disable_lora()
+            self.adapter_weight = detail_weight
+        
+        print('Active Adapters:', self.base.get_active_adapters())
+        print('All Adapters:', self.base.get_list_adapters())
+        return lora_scale
+
+    @torch.inference_mode()
+    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None,  refine_strength=None, image=None, target_size=None, seed=None):
             
         t0 = time.perf_counter()
-        lora_scale = detail_weight if detail_weight and self.has_adapters else None
-        if self.has_adapters and detail_weight is not None:
-            self.base.set_adapters(self.base.get_active_adapters(), detail_weight)
-        
+
+        lora_scale = self.toggle_loras(detail_weight)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
+        torch.cuda.empty_cache()
 
         t_pe = time.perf_counter()
         t_main = t_pe # default in case skip
         mlabel = '_2I'
         # Txt2Img
         if image is None: 
-            #h,w is all you need -- https://github.com/huggingface/diffusers/blob/v0.26.3/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl.py#L1075
-            h,w = target_size
-            image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0] # num_images_per_prompt=4
-            #return make_image_grid(imgs, 2, 2)
+            image = self._pipe_txt2img(prompt_encodings, num_inference_steps, guidance_scale, target_size, seed)
             t_main = time.perf_counter()
             print_memstats('draw')
-            #release_memory()
             mlabel = 'T2I'
         
         # Img2Img - not just else because could pass image with str=0 to just up+refine. But should never be image=None + strength
         elif strength:
-            w,h = image.size
-            #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
-            strength = np.clip(strength, 1/num_inference_steps, 1)
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0]
-
+            image = self._pipe_img2img(image, prompt_encodings, num_inference_steps, strength, guidance_scale, seed)
             t_main = time.perf_counter()
             print_memstats('redraw')
             mlabel = 'I2I'
             
         t_up = t_re = t_main  # default in case skip
         # Upscale + Refine - must be up->refine. refine->up does not improve quality
-        if refine_steps > 0 and refine_strength: 
+        if refine_strength: 
+            # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
+            # all this does is ensure that at least `refine_steps` steps occurs given `refine_strength`
+            # most of the time (high default `num_inference_steps`) it = num_inference_steps
+            # it only maters for very low default steps (~ 4)
+            #esteps_refine = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)
             image = self.upsample(image, scale=1.5)[0]
-            w,h = image.size
             t_up = time.perf_counter()
             print_memstats('upscale')
-            #release_memory()
             torch.cuda.empty_cache()
-            
-            # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
-            # num_inference_steps = calc_esteps(-1, refine_strength, min_effective_steps=refine_steps)
-            #num_inference_steps = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)
-            refine_strength = np.clip(refine_strength, 1/num_inference_steps, 1)
-            image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0] 
+
+            image = self._pipe_img2img(image, prompt_encodings, num_inference_steps, refine_strength, guidance_scale, seed)
             t_re = time.perf_counter()
             print_memstats('refine')
         
@@ -505,35 +548,100 @@ class SingleStagePipeline:
         return image
     
     @torch.inference_mode()
+    def _pipe_txt2img(self, prompt_encodings:dict, num_inference_steps:int, guidance_scale:float, target_size:tuple[int,int], seed=None):
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        h,w = target_size
+        image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0] # num_images_per_prompt=4
+        
+        return image
+
+    @torch.inference_mode()
+    def _pipe_img2img(self, image:Image.Image, prompt_encodings:dict, num_inference_steps:int, strength:float, guidance_scale:float, seed=None):
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        w,h = image.size
+        #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
+        strength = np.clip(strength, 1/num_inference_steps, 1)
+        image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0]
+        
+        return image
+
+    @torch.inference_mode()
+    def _pipe_img2upimg(self, image:Image.Image, prompt_encodings:dict, num_inference_steps:int, refine_strength:float, guidance_scale:float, seed=None, scale=1.5):
+        image = self.upsample(image, scale=scale)[0]
+        print('upsized (w,h):', image.size)
+        torch.cuda.empty_cache()
+
+        return self._pipe_img2img(image, prompt_encodings, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
+
+    
+    def _resize_image(self, image:Image.Image, aspect = None, dim_choices = None):
+        if aspect is None:
+            dim_out = self.config.nearest_dims(image.size, dim_choices=dim_choices, use_hf_sbr=False) 
+        else:
+            dim_out = self.config.get_dims(aspect) 
+        print('_prepare_image input size:', image.size, '->', dim_out)
+        
+        image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
+        return image
+    
+    @torch.inference_mode()
+    def _resize_image_frames(self, frame_array:np.ndarray, dim_choices, max_num_frames:int=100, upsample_px_thresh:int = 256, upsample_bsz:int = 8):
+        nf,in_h,in_w,c = frame_array.shape
+        fstep = (nf//max_num_frames) + 1 # if more than 100 frames, take every nth frame so we're not here all day
+        frame_array = frame_array[::fstep]
+        print(f'num frames: {nf} -> {frame_array.shape[0]}')
+        init_wh = (in_w, in_h)
+
+        dim_out = self.config.nearest_dims(init_wh, dim_choices=dim_choices, use_hf_sbr=False)
+
+        if in_w*in_h <= upsample_px_thresh**2: 
+            print(f'Upsampling... ({in_w}*{in_h}) < {upsample_px_thresh}² < {dim_out}')
+            
+            batched_frames = list(batched(frame_array, upsample_bsz))
+            resized_images = [img for imbatch in tqdm(batched_frames) for img in self.upsample(imbatch, scale=None, out_wh=dim_out)]
+            print_memstats('batched upsample')
+            torch.cuda.empty_cache()
+        else:
+            resized_images = [Image.fromarray(imarr).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
+        
+        
+        print('regenerate_frames input size:', init_wh, '->', dim_out)
+        return resized_images
+
+    @torch.inference_mode()
     def generate_image(self, prompt:str, 
                        steps:int=None, 
                        negative_prompt:str=None, 
                        guidance_scale:float=None, 
                        detail_weight:float=0,
                        aspect:typing.Literal['square','portrait','landscape']=None, 
-                       refine_steps:int=0, 
                        refine_strength:float=None, 
                        seed:int = None,
-                       **kwargs) -> Image.Image:
+                       **kwargs) -> tuple[Image.Image, dict]:
         
-        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength, aspect=aspect)
-        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
-        img_dims = self.config.get_dims(fkwg['aspect'])
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
+        steps = fkwg['steps']
+        guidance_scale = fkwg['guidance_scale']
+        negative_prompt=fkwg['negative_prompt']
+        aspect = fkwg['aspect']
+
+        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+
+        img_dims = self.config.get_dims(aspect)
         target_size = (img_dims[1], img_dims[0]) # h,w
         
-        # TODO: return the ACTUAL kwargs used instead of subset. Do filtering in imagegen cog.
 
-        # We don't want to run refine unless refine steps passed
-        call_kwargs = dict(prompt=prompt, num_inference_steps=fkwg['steps'], negative_prompt=fkwg['negative_prompt'], 
-                              guidance_scale=fkwg['guidance_scale'], detail_weight=detail_weight, refine_steps=refine_steps, refine_strength=refine_strength, target_size=target_size, seed=seed)
+        lora_scale = self.toggle_loras(detail_weight)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
         
-        image = self.pipeline(**call_kwargs)
-        
-        if detail_weight:
-            fkwg.update(detail_weight=detail_weight)
-        if seed is not None:
-            fkwg.update(seed=seed)
-        return image, fkwg
+        image = self._pipe_txt2img(prompt_encodings, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seed)
+        if refine_strength:
+            image = self._pipe_img2upimg(image, prompt_encodings, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
+
+
+        call_kwargs = dict(prompt=prompt, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
+                           detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength,  seed=seed)
+        return image, call_kwargs
 
     @torch.inference_mode()
     def regenerate_image(self, prompt: str, image: Image.Image,  
@@ -543,139 +651,72 @@ class SingleStagePipeline:
                          guidance_scale: float = None, 
                          detail_weight: float = 0,
                          aspect: typing.Literal['square','portrait','landscape'] = None, 
-                         refine_steps: int = 0, 
+                         
                          refine_strength: float = None, 
                          seed: int = None,
-                         **kwargs) -> Image.Image:
+                         **kwargs) -> tuple[Image.Image, dict]:
         
-        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, refine_steps=refine_steps, refine_strength=refine_strength)
-        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, )
+        
+        steps = fkwg['steps']
+        guidance_scale = fkwg['guidance_scale']
+        negative_prompt=fkwg['negative_prompt']
+        strength = fkwg['strength']
+
+        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
         # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
-        dim_out = self.config.nearest_dims(image.size, use_hf_sbr=False) if aspect is None else self.config.get_dims(aspect)
-        print('regenerate_image input size:', image.size, '->', dim_out)
+        image = self._resize_image(image, aspect)
+                
+
+        lora_scale = self.toggle_loras(detail_weight)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
         
-        image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
-        target_size = tuple(reversed(image.size))
 
-        call_kwargs = dict(prompt=prompt, num_inference_steps=fkwg['steps'], strength=strength, negative_prompt=fkwg['negative_prompt'], guidance_scale=fkwg['guidance_scale'], 
-                              detail_weight=detail_weight, refine_steps=refine_steps, refine_strength=refine_strength, image=image, target_size=target_size, seed=seed,)
+        image = self._pipe_img2img(image, prompt_encodings, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seed)
+        if refine_strength:
+            image = self._pipe_img2upimg(image, prompt_encodings, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
         
-        image = self.pipeline(**call_kwargs)
+        #image = self.pipeline(**call_kwargs)
+        call_kwargs = dict(prompt=prompt, image=image, steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
+                           detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed,)
 
-        # Don't want to fill with default value, but still want it in filledkwargs
-        call_kwargs.update(aspect=aspect)
-        fkwg.update(aspect=aspect)
-        if detail_weight:
-            fkwg.update(detail_weight=detail_weight)
-        if seed is not None:
-            fkwg.update(seed=seed)
-        return image, fkwg
-
-
+        return image, call_kwargs
+    
     @torch.inference_mode()
-    def regenerate_frames(self, prompt: str, frame_array: np.ndarray, 
-                          steps: int = None, 
-                          astrength: float = 0.5, 
-                          imsize: typing.Literal['tiny','small','med','full'] = 'small', 
-
-                          negative_prompt: str = None, 
-                          guidance_scale: float = None, 
-                          detail_weight: float = 0, 
-                          aseed: int = None, 
-                          **kwargs):   
+    def refine_image(self, image: Image.Image,
+                     prompt: str = '', # prompt is optional
+                     refine_strength: float = 0.3, 
+                     steps: int = None, 
+                     negative_prompt: str = None, 
+                     guidance_scale: float = None, 
+                     detail_weight: float = 0,
+                     seed: int = None,
+                     **kwargs) -> tuple[Image.Image, dict]:
         
-        gseed = None
-        # NOTE: special behavior since having a seed improves results substantially 
-        if aseed is None: 
-            if self.global_seed is not None:
-                aseed = self.global_seed
-            else:
-                aseed = np.random.randint(1e9, 1e10-1)
-        elif aseed < 0:
-            aseed = False
-            
-        if self.has_adapters and detail_weight is not None:
-            self.base.set_adapters(self.base.get_active_adapters(), detail_weight)
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, )
         
-        lora_scale = detail_weight if detail_weight and self.has_adapters else None
-
-        fkwg = self.config.get_if_none(steps=steps, strength=astrength, negative_prompt=negative_prompt, guidance_scale=guidance_scale)
         steps = fkwg['steps']
-        #astrength = cmd_tfms.percent_transform(astrength)
+        guidance_scale = fkwg['guidance_scale']
         negative_prompt=fkwg['negative_prompt']
-        guidance_scale=fkwg['guidance_scale']
 
-        astrength = np.clip(astrength, 1/steps, 1) # clip strength so at least 1 step occurs
-        #astrength = max(astrength*steps, 1)/steps 
-        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
-        
-        nf,h,w,c = frame_array.shape
-        fstep = (nf//100) + 1 # if more than 100 frames, take every nth frame so we're not here all day
-        frame_array = frame_array[::fstep]
-        img_wh = (w,h)
-        
-        # NOTE: walking the latents could be maybe used? This implemention even makes use of slerp 
-        # https://old.reddit.com/r/StableDiffusion/comments/1ez6m4q/a_simple_python_notebook_to_render_your_own/
-        # https://github.com/rolux/flux-random-walk/blob/main/flux-random-walk.ipynb
-        # Another guide: https://huggingface.co/learn/cookbook/en/stable_diffusion_interpolation
+        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        image = self._resize_image(image) # Resize to best dim match
 
-        upsample_bsz = 8
-        upsample_px_thresh = 256 # upsample first if less than 1/4th the recommended total pixels 
-        
-        dim_choices,bsz = self.batch_settings(imsize)
-        
-        dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1, use_hf_sbr=False)
+        lora_scale = self.toggle_loras(detail_weight)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
 
-        if img_wh[0]*img_wh[1] <= upsample_px_thresh**2: 
-            print(f'Upsampling... ({img_wh[0]}*{img_wh[1]}) < {upsample_px_thresh}² < {dim_out}')
-            # resized_images = [self.upsampler.upsample(Image.fromarray(imarr, mode='RGB')).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
-            
-            batched_frames = list(batched(frame_array, upsample_bsz))
-            resized_images = [img.resize(dim_out, resample=Image.Resampling.LANCZOS) for imbatch in tqdm(batched_frames) for img in self.upsample(imbatch, scale=None)]
-            print_memstats('batched upsample')
-            torch.cuda.empty_cache()
-        else:
-            resized_images = [Image.fromarray(imarr).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
-        
-        w,h = dim_out
-        print('regenerate_frames input size:', img_wh, '->', dim_out)
-        
-        batched_prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
-        
-        latents = []
-        t0 = time.perf_counter()
-        for imbatch in batched(resized_images, bsz):
-            batch_len = len(imbatch)
-            # shared common seed helps SIGNIFICANTLY with cohesion
-            if aseed:
-                # list of generators is very important. Otherwise it does not apply correctly
-                gseed = [torch.Generator(device='cuda').manual_seed(aseed) for _ in range(batch_len)]
-            
-            if batch_len != bsz:
-                # it can only be less due to how batched is implemented, so slice is fine
-                batched_prompts_encodings = {k: v[:batch_len] for k,v in batched_prompts_encodings.items() if v is not None}
-
-            images = self.basei2i(image=imbatch, num_inference_steps=steps, strength=astrength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts_encodings, generator=gseed, output_type='latent', **kwargs).images 
-            latents.append(images)
-            yield batch_len
-            
-        
-        image_frames = self.decode_latents(latents, height=h, width=w)
-        yield image_frames
-
-        te = time.perf_counter()
-        runtime = te-t0
-        print(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
-        release_memory()
-        
-        
+        image = self._pipe_img2upimg(image, prompt_encodings, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
         
 
+        call_kwargs = dict(image=image, prompt=prompt, refine_strength=refine_strength, steps=steps, negative_prompt=negative_prompt, 
+                           guidance_scale=guidance_scale, detail_weight=detail_weight, seed=seed,)
+        return image, call_kwargs
+    
     @torch.inference_mode()
     def generate_frames(self, prompt: str, 
                             image: Image.Image|None = None, 
-                            nframes: int = 16,
+                            nframes: int = 11,
                             steps: int = None, 
                             strength_end: float = 0.80, 
                             strength_start: float = 0.30, 
@@ -685,26 +726,26 @@ class SingleStagePipeline:
                             aspect: typing.Literal['square','portrait','landscape'] = None, 
                             seed: int = None, 
                             **kwargs):   
-        #from tqdm.auto import tqdm
-        if seed is None:
-            seed = self.global_seed
-            # NOTE: if you attempt to update the seed on each iteration, you get some interesting behavoir
-            # you effectively turn it into a coloring book generator. I assume this is a product of how diffusion works
-            # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
-            # the minimal representation of the prompt. If you 
         
         gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
-
+        # NOTE: if you attempt to update the seed on each iteration, you get some interesting behavoir
+        # you effectively turn it into a coloring book generator. I assume this is a product of how diffusion works
+        # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
+        # the minimal representation of the prompt. If you 
+        
 
         fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
+        
         negative_prompt=fkwg['negative_prompt']
         guidance_scale=fkwg['guidance_scale']
         steps = fkwg['steps']
         aspect = fkwg['aspect']
-        print(f'kwargs: {kwargs}\nfkwg:{fkwg}')
+
+        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
-        lora_scale = detail_weight if detail_weight and self.has_adapters else None
+        lora_scale = self.toggle_loras(detail_weight)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
+        
         # subtract 1 for first image
         nframes = nframes - 1
         
@@ -715,45 +756,156 @@ class SingleStagePipeline:
             strengths = [strength_end]*nframes
             w,h = self.config.get_dims(aspect)
             # timesteps=AysSchedules["StableDiffusionXLTimesteps"]
-            # image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, generator=gseed).images[0]
-            image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0]
-                              #**clip_kwargs, **prompt_encodings, **lora_kwargs, generator=gseed).images[0] # num_images_per_prompt=4
+            image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0] # num_images_per_prompt=4
             
             latents.append(image)
         else:
-            #strengths = np.linspace(strength_start, strength_end, num=nframes)
-            # strengths = np.around(steps*np.linspace(strength_start, strength_end, num=nframes))/steps
             strengths = discretize_strengths(steps, nframes, start=strength_start, end=strength_end)
             # round up strengths since they will be floored in get_timesteps via int()
             # and it makes step distribution more uniform for lightning models
-            
-            img_wh = image.size
-            dim_choices=SDXL_DIMS # None
-            dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1.0, use_hf_sbr=False)
-            print('regenerate_frames input size:', img_wh, '->', dim_out)
-            image = image.resize(dim_out, resample=Image.Resampling.LANCZOS) 
+            image = self._resize_image(image, aspect=aspect, dim_choices=SDXL_DIMS)
+            #img_wh = image.size
+            #dim_choices=SDXL_DIMS # None
+            #dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1.0, use_hf_sbr=False)
+            #print('regenerate_frames input size:', img_wh, '->', dim_out)
+            #image = image.resize(dim_out, resample=Image.Resampling.LANCZOS) 
             image_frames.append(image)
             w,h = image.size
         
         #yield image
         yield -1
-        
-        #steps = calc_esteps(steps, min(strengths), min_effective_steps=1)
-        
+                
         for i in range(nframes):
             # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
             image = self.basei2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='latent', generator=gseed).images
             latents.append(image)
             yield i
             
-            
         image_frames += self.decode_latents(latents, height=h, width=w, )
-        
+        # FIXME: this is producing waay to many frames. set nframes=20 and you'll get like 60
+        image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
         yield image_frames
         release_memory()
     
+
+    @torch.inference_mode()
+    def _batched_img2img(self, images:list[Image.Image]|torch.Tensor, prompts_encodings:dict[str, torch.Tensor], batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
+        batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+        batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
+        w,h = img_wh # need wh in case `images` is a batch of latents
+        
+        for imbatch in batched_images:
+            batch_len = len(imbatch)
+            # shared common seed helps SIGNIFICANTLY with cohesion
+            # list of generators is very important. Otherwise it does not apply correctly
+            generators = generator_batch(seed, batch_len, device='cpu')
+                
+            if batch_len != batch_size:
+               batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
+
+            latents = self.basei2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=generators, output_type='latent', **kwargs).images 
+
+            yield latents
+    
+
+    
+    @torch.inference_mode()
+    def regenerate_frames(self, prompt: str, frame_array: np.ndarray, 
+                          steps: int = None, 
+                          astrength: float = 0.5, 
+                          imsize: typing.Literal['tiny','small','med','full'] = 'small', 
+
+                          negative_prompt: str = None, 
+                          guidance_scale: float = None, 
+                          detail_weight: float = 0,
+                          two_stage: bool = False, 
+                          aseed: int = None, 
+                          **kwargs):   
+        
+       
+        # NOTE: special behavior since having a seed improves results substantially 
+        if aseed is None: 
+            aseed = np.random.randint(1e9, 1e10-1)
+        elif aseed < 0:
+            aseed = None
+            
+        # if self.has_adapters and detail_weight is not None:
+        #     self.base.set_adapters(self.base.get_active_adapters(), detail_weight)
+        
+        # lora_scale = detail_weight if detail_weight and self.has_adapters else None
+
+        fkwg = self.config.get_if_none(steps=steps, strength=astrength, negative_prompt=negative_prompt, guidance_scale=guidance_scale)
+        steps = fkwg['steps']
+        negative_prompt=fkwg['negative_prompt']
+        guidance_scale=fkwg['guidance_scale']
+
+        astrength = np.clip(astrength, 1/steps, 1) # clip strength so at least 1 step occurs
+        #astrength = max(astrength*steps, 1)/steps 
+        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+                
+        dim_choices,bsz = self.batch_settings(imsize)
+        resized_images = self._resize_image_frames(frame_array, dim_choices, max_num_frames=100, upsample_px_thresh=256, upsample_bsz=8) # upsample first if less 256^2 pixels 
+        dim_out = resized_images[0].size
+        w,h = dim_out
+        
+        lora_scale = self.toggle_loras(detail_weight)
+        prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
+        
+        # First, yield the total number of frames since it may have changed from slice
+        yield len(resized_images)
+
+        latents = []
+        t0 = time.perf_counter()
+        for img_lats in self._batched_img2img(resized_images, prompts_encodings, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+            latents.append(img_lats)
+            yield len(img_lats)
+ 
+        
+        if two_stage:
+            latents=torch.cat(latents, 0)
+            raw_image_latents, latent_soft_mask = self._prepare_raw_latents(resized_images, aseed)
+            latent_blend = self._interpolate_latents(raw_image_latents, latents, latent_soft_mask, dim_out, time_blend=True, keep_dims=True)
+            
+            latents = []
+            for img_lats in self._batched_img2img(latent_blend, prompts_encodings, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+                latents.append(img_lats)
+                yield len(img_lats)
+            
+        latents = torch.cat(latents, 0)
+        
+        image_frames = self.decode_latents(latents, height=h, width=w)
+        yield image_frames
+
+        te = time.perf_counter()
+        runtime = te-t0
+        print(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
+        release_memory()
+    
+    @torch.inference_mode()
+    def _prepare_raw_latents(self, resized_images, seed):
+        raw_image_latents = self.encode_images(resized_images, seed)
+        
+        mot_mask_tensor = torch.from_numpy(interpolate.motion_mask(resized_images, px_thresh=0.02, qtile=90))
+        #if raw_image_latents.ndim == 4:
+        mot_mask_tensor = mot_mask_tensor.expand(1, 1, -1, -1)
+
+        latent_soft_mask = torch.nn.functional.interpolate(
+            mot_mask_tensor,
+            size=raw_image_latents.shape[-2:], #(h // self.pipei2i.vae_scale_factor, w // self.pipei2i.vae_scale_factor)
+            mode='area',#'bilinear',
+            ).to(raw_image_latents)
+        #print(raw_image_latents.shape, latent_soft_mask.shape)
+        return raw_image_latents, latent_soft_mask
+    
+    @torch.inference_mode()
+    def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
+        # flux will override this
+        blended_latents = interpolate.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
+        return blended_latents
+
+  
     @abstractmethod
-    def encode_images(self, images, **kwargs):
+    def encode_images(self, images, seed:int=42, **kwargs):
         raise NotImplementedError('Requires subclass override')
     
     @abstractmethod
@@ -764,7 +916,7 @@ class SingleStagePipeline:
 
 
 
-class SDXLBase(SingleStagePipeline, DeepCacheMixin):
+class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
     def load_pipeline(self):
         pipeline_loader = (StableDiffusionXLPipeline.from_single_file if self.model_path.endswith('.safetensors') 
                            else AutoPipelineForText2Image.from_pretrained)
@@ -811,13 +963,10 @@ class SDXLBase(SingleStagePipeline, DeepCacheMixin):
         
         try:
             self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
-            self.has_adapters = True
+            self.adapter_names.append(adapter_name)
+            self.base.disable_lora()
         except IOError as e:
-            if weight_name == 'detail-tweaker-xl.safetensors':
-                print('detail-tweaker-xl not found, detail parameter will not function. '
-                    'To use, download from: https://civitai.com/models/122359/detail-tweaker-xl')
-            else:
-                raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
+            raise NotImplementedError(f'Unsupported lora adapter {adapter_name!r}')
             
 
     def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
@@ -861,9 +1010,19 @@ class SDXLBase(SingleStagePipeline, DeepCacheMixin):
             prompt_embeds=p_emb, negative_prompt_embeds=neg_p_emb, 
             pooled_prompt_embeds=pooled_p_emb, negative_pooled_prompt_embeds=neg_pooled_p_emb
         )
-            
+        torch.cuda.empty_cache()    
         return prompt_encodings
-
+    
+    @torch.inference_mode()
+    def encode_images(self, images:list[Image.Image], seed:int=42):
+        nframes = len(images)
+        w,h = images[0].size
+        gseed = [torch.Generator('cpu').manual_seed(seed) for _ in range(nframes)]
+        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w)
+        latents = self.basei2i.prepare_latents(proc_images, timestep=None, batch_size=1, num_images_per_prompt=nframes, dtype=torch.bfloat16, device=0, generator=gseed, add_noise=False)
+        release_memory()
+        return latents
+    
     @torch.inference_mode()
     def decode_latents(self, latents, **kwargs):
         # https://github.com/huggingface/diffusers/blob/c977966502b70f4758c83ee5a855b48398042b03/src/diffusers/pipelines/stable_diffusion_xl/pipeline_stable_diffusion_xl_img2img.py#L1444
@@ -908,8 +1067,8 @@ class SDXLBase(SingleStagePipeline, DeepCacheMixin):
     
 
 class SD3Base(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, clip_skip: int = None, ):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, clip_skip)
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup)
     
     @torch.inference_mode()
     def load_pipeline(self):
@@ -950,7 +1109,7 @@ class SD3Base(SingleStagePipeline):
 
         (prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds) = self.base.encode_prompt(
             prompt=prompt, prompt_2=None, prompt_3=None, negative_prompt=negative_prompt, num_images_per_prompt=batch_size,
-            device=self.base.text_encoder_2.device, lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'))
+            device=self.base.device, lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'))
         
         # moving the text encoder is just always a good idea since it's in full bf16 most of the time.
         if not self.offload and kwargs.get('partial_offload'): 
@@ -958,7 +1117,7 @@ class SD3Base(SingleStagePipeline):
             torch.cuda.empty_cache()
         
             print(prompt_embeds.dtype, prompt_embeds.device)
-        
+        torch.cuda.empty_cache()
         return dict(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds, negative_pooled_prompt_embeds=negative_pooled_prompt_embeds) # .bfloat16()
     
     @torch.inference_mode()
@@ -975,7 +1134,29 @@ class SD3Base(SingleStagePipeline):
         for _ in range(3):
             _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
         self.is_compiled = True
+        torch.compiler.reset()
+    
+    @torch.inference_mode()
+    def encode_images(self, images:list[Image.Image], seed:int=42):
+        nframes = len(images)
+        w,h = images[0].size
+        
+        gseed = generator_batch(seed, nframes, 'cpu') #[torch.Generator('cpu').manual_seed(seed) for _ in range(nframes)]
+        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(dtype=torch.float32)
+                
+        #latents = self.basei2i._encode_vae_image(image=proc_images, generator=gseed)
+        #img_encodings = self.basei2i.vae.encode(proc_images)
+        # NOTE: this might be wrong
+        latents = [
+            retrieve_latents(self.basei2i.vae.encode(proc_images), generator=gseed[0])# for i in range(batch_size)
+        ]
+        latents = torch.cat(latents, dim=0)
 
+        latents = (latents - self.basei2i.vae.config.shift_factor) * self.basei2i.vae.config.scaling_factor
+        #latents = self.basei2i.prepare_latents(proc_images, timestep=None, batch_size=1, num_images_per_prompt=nframes, dtype=torch.bfloat16, device=0, generator=gseed, add_noise=False)
+        release_memory()
+        return latents
+    
     @torch.inference_mode()
     def decode_latents(self, latents, **kwargs):
         # https://github.com/huggingface/diffusers/blob/f63c12633f154c2a1d79c17f4238fb073133652c/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py#L924
@@ -989,10 +1170,10 @@ class SD3Base(SingleStagePipeline):
         return image
 
 class FluxBase(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, clip_skip: int = None, 
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None,
                  qtype:typing.Literal['bnb4','qint4','qint8','qfloat8'] = 'bnb4', te2_qtype:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'] = 'bf16', quant_basedir:Path = None):
         
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, clip_skip)
+        super().__init__(model_name, model_path, config, offload, scheduler_setup)
         
         self.text_enc_model_id = "black-forest-labs/FLUX.1-dev" # use same shared text_encoder_2, avoid 2x-download
         self.qtype = qtype
@@ -1006,47 +1187,42 @@ class FluxBase(SingleStagePipeline):
     
     def unload_pipeline(self):
         components = ['text_encoder','text_encoder_2','transformer','vae']
-        if self.base:
-            self.base.to('cpu')
+        if self.is_ready:
+            #self.base.to('cpu')
             for comp in components:
-                getattr(self.base, comp).to('cpu')
+                #getattr(self.base, comp).to('cpu')
                 setattr(self.base, comp, None)
+                setattr(self.basei2i, comp, None)
             
-        #     self.base.to('cpu')
-        #     self.base.text_encoder_2.to('cpu')
-        #     self.base.text_encoder.to('cpu')
-        #     self.base.transformer.to('cpu')
-        #     self.base.vae.to('cpu')
-        # self.base.text_encoder_2 = None
-        # self.base.text_encoder = None
-        # self.base.transformer = None
-        # self.base.vae = None
         self.text_pipe = None
         super().unload_pipeline()
-        #print('basei2i:',self.basei2i)
-        # self.base = None
-        # self.basei2i = None
-        # self.text_pipe = None
-        # self.compeler = None
-        # self.upsampler = None
-        # self.initial_scheduler_config = None
-        # self.scheduler_kwargs = None
-        # release_memory()
-        # self.is_ready = False
-        # if self.is_compiled:
-        #     torch_compile_flags(restore_defaults=True)
-        #     torch._dynamo.reset()
-        #     self.is_compiled = False
+    
+    @torch.inference_mode()
+    def _load_pipe_default(self):
+        if str(self.model_path).endswith('.safetensors'):
+            transformer = quantops.load_sd_bnb4_transformer(safetensor_filepath=self.model_path)
+        else:
+            bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
+            transformer = quantops.bnb4_transformer(self.model_path, torch.bfloat16, bnb_qconfig)
+        
+        pipe = FluxPipeline.from_pretrained(self.text_enc_model_id, transformer=transformer, torch_dtype=torch.bfloat16,)
+        
+        if not self.offload: 
+            pipe.to(0)
+            # if not offloading everything, just offload text_encoder_2
+            pipe.text_encoder_2 = cpu_offload(pipe.text_encoder_2, execution_device = torch.device('cuda:0'))
+        return pipe
 
     def load_pipeline(self):
-        with torch.inference_mode():
+        if self.qtype == 'bnb4' and self.te2_qtype == 'bf16':
+            self.base = self._load_pipe_default()
+        else:
+            #with torch.inference_mode():
             self.base: FluxPipeline = self._load_helper(qtype=self.qtype, offload=self.offload, te2_qtype=self.te2_qtype)
-        
-        if not self.offload:
-            self.base.to(0)
-        
+            
+            #if not self.offload:
+            #    self.base.to(0)
         self.base.vae.enable_slicing() # all this does is iterate over batch instead of all at once, no reason to ever disable
-
         self.initial_scheduler_config = self.base.scheduler.config
         
         if self._scheduler_setup is not None:
@@ -1056,11 +1232,9 @@ class FluxBase(SingleStagePipeline):
         self.load_lora('detail-maximizer.safetensors')
         self.load_lora('midjourneyV6_1.safetensors')
         
-        with torch.inference_mode():
-            self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base)
+        #with torch.inference_mode():
+        self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base)
 
-        #self.upsampler = Upsampler('4xUltrasharp-V10.pth', "BGR", dtype=torch.bfloat16)
-        #self.upsampler = Upsampler('4xNMKD-Superscale.pth', "RGB", dtype=torch.bfloat16)
         if self.offload:
             # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
             self.base.enable_model_cpu_offload()
@@ -1080,8 +1254,7 @@ class FluxBase(SingleStagePipeline):
                 #transformer = bnbops.bnb4_transformer(self.model_path, torch_dtype).to(device, dtype=torch_dtype)
             else:
                
-                bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', 
-                                                     bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
+                bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
                                                     # bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='fp32', torch_dtype=torch.float32, )
 
                 #return  bnbops.create_4bit_transformer(self.model_path, bnb_qconfig).to(device, dtype=torch_dtype)
@@ -1163,16 +1336,15 @@ class FluxBase(SingleStagePipeline):
         try:
             #loraops.set_lora_transformer(self.base, Path(lora_dirpath).joinpath(weight_name), adapter_name)
             lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
-            self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
-            print(self.base.get_active_adapters())
+            #self.base.transformer,skipped_keys = loraops.manual_lora(lora_sd, self.base.transformer, adapter_name=adapter_name)
+            self.base.load_lora_into_transformer(lora_sd, None, self.base.transformer, adapter_name=adapter_name)
+            #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
+            self.base.disable_lora()
             #self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
-            self.has_adapters = True
+            self.adapter_names.append(adapter_name)
+            
         except IOError as e:
-            if weight_name == 'detail-maximizer.safetensors':
-                print('detail-maximizer not found, detail parameter will not function. '
-                    'To use, download from: https://civitai.com/models/562866/flux-image-upgrader-detail-maximizer-contrast-fix-for-low-cfg-sdxl-sd-15')
-            else:
-                raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
+            raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
 
     def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
         dims_opts = {
@@ -1182,8 +1354,8 @@ class FluxBase(SingleStagePipeline):
             'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
         }
         
-        batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2} # With out vae_slicing
-        #batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
+        # batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2} # With out vae_slicing
+        batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
         #batch_sizes = {'tiny': 24, 'small': 16, 'med': 12, 'full': 4} 
 
         return (dims_opts[imsize], batch_sizes[imsize])
@@ -1191,31 +1363,21 @@ class FluxBase(SingleStagePipeline):
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
         prompt = [prompt]#*batch_size
-        if self.base.text_encoder_2 is None:
+        # lora weights for Flux should ONLY be loaded into transformer, not text_encoder
+        lora_scale = None # kwargs.get('lora_scale')
+        device = torch.device('cuda:0')
+        if self.text_pipe is None:
+                (prompt_embeds, pooled_prompt_embeds,_,) = self.base.encode_prompt(
+                prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size, 
+                device=device, lora_scale=lora_scale)
+        else:
             (prompt_embeds, pooled_prompt_embeds,_,) = self.text_pipe.encode_prompt(
                 prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size,
-                  device=self.text_pipe.text_encoder_2.device, lora_scale=kwargs.get('lora_scale'))
-            
-        else:
-            if not self.offload:
-                self.base.text_encoder_2.to(0)
-
-            (prompt_embeds, pooled_prompt_embeds,_,) = self.base.encode_prompt(
-                prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size, 
-                device=self.base.text_encoder_2.device, lora_scale=kwargs.get('lora_scale'))
-            
-            # moving the text encoder is just always a good idea since it's in full bf16 most of the time.
-            if not self.offload and kwargs.get('partial_offload'): 
-                self.base.text_encoder_2.to('cpu')
-                torch.cuda.empty_cache()
-            print(prompt_embeds.dtype, prompt_embeds.device)
-        
-        return dict(prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds) # .bfloat16()
+                  device=self.text_pipe.device, lora_scale=lora_scale)
+        torch.cuda.empty_cache()
+        return dict(prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds)
         #return  dict(prompt=prompt) #, negative_prompt=negative_prompt) # neg not supported (offically)
     
-    # Unsupported
-    def dc_fastmode(self, enable:bool, img2img=False):
-        return
     
     @torch.inference_mode()
     def compile_pipeline(self):
@@ -1231,7 +1393,35 @@ class FluxBase(SingleStagePipeline):
         for _ in range(3):
             _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
         self.is_compiled = True
-
+        torch.compiler.reset()
+    
+    @torch.inference_mode()
+    def encode_images(self, images:list[Image.Image], seed:int=42):
+        nframes = len(images)
+        w,h = images[0].size
+        generators = generator_batch(seed, nframes, device='cpu')
+        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(self.basei2i.device, self.basei2i.dtype)
+        latents = self.basei2i._encode_vae_image(image=proc_images, generator=generators)
+        
+        release_memory()
+        return latents
+    
+    @torch.inference_mode()
+    def _repack_latents(self, latents, img_h, img_w): # ex: ([NFRAME, 16, 80, 80]) -> ([NFRAME, 1600, 64]) 
+        num_channels_latents = self.basei2i.transformer.config.in_channels // 4
+        height = 2 * (int(img_h) // self.basei2i.vae_scale_factor)
+        width = 2 * (int(img_w) // self.basei2i.vae_scale_factor)
+        latents = self.basei2i._pack_latents(latents, latents.shape[0], num_channels_latents, height, width)
+        return latents
+            
+    @torch.inference_mode()
+    def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
+        img_w,img_h = img_wh
+        unpacked_latents = self.basei2i._unpack_latents(out_latents, img_h, img_w, self.basei2i.vae_scale_factor)
+        blended_latents = interpolate.blend_latents(raw_image_latents, unpacked_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
+        packed_blended_latents = self._repack_latents(blended_latents, img_h, img_w)
+        return packed_blended_latents
+    
     @torch.inference_mode()
     def decode_latents(self, latents, height:int, width:int):
         # https://github.com/huggingface/diffusers/blob/4cfb2164fb05d54dd594373b4bd1fbb101fef70c/src/diffusers/pipelines/flux/pipeline_flux.py#L759
