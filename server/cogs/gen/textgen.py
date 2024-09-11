@@ -23,7 +23,7 @@ import config.settings as settings
 from utils import text as text_utils, io as io_utils
 from utils.command import check_up
 
-from utils.globthread import async_wrap_thread, stop_global_thread
+from utils.globthread import wrap_async_executor, stop_global_executors
 
 from views import contextview as cview
 from cmds import (
@@ -75,7 +75,7 @@ class TextGen(commands.Cog, SetConfig):
         await self.txtdown(self.bot.get_channel(settings.CHANNEL_ID), announce=False)
         print('TextGen - Goodbye')
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
-        stop_global_thread()
+        stop_global_executors()
 
     async def cog_after_invoke(self, ctx: commands.Context) -> None:
         #print('after invoke', datetime.datetime.now())

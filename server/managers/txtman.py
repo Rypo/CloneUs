@@ -15,7 +15,7 @@ from discord.ext import commands, tasks
 import config.settings as settings
 from utils import text as text_utils, io as io_utils
 
-from utils.globthread import async_wrap_thread
+from utils.globthread import wrap_async_executor
 
 from cloneus import Cloneus
 from cloneus.data import useridx
@@ -106,7 +106,7 @@ class CloneusManager():
 
         return statuses
     
-    @async_wrap_thread
+    @wrap_async_executor
     def unload(self):
         prekwargs = {'checkpoint_path':self.clo.path_data.checkpoint_path, 'gen_config':self.clo.gen_config, 
                      'dtype':self.clo.cfg.dtype, 'attn_implementation':self.clo.cfg.attn_implementation}
@@ -119,7 +119,7 @@ class CloneusManager():
         if self.clo is None or self.clo.model is None:
             self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation, load=False)
 
-    @async_wrap_thread
+    @wrap_async_executor
     def load(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None ):
         if self.clo is None:
             self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation, load=True)
@@ -237,7 +237,7 @@ class CloneusManager():
         
         return update_message
 
-    @async_wrap_thread
+    @wrap_async_executor
     def predict_author(self, message_cache:list[discord.Message],  autoreply_mode: str, author_candidates: list[str]=None) -> str:
         
         llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
@@ -272,7 +272,7 @@ class CloneusManager():
         return author_choice
     
 
-    @async_wrap_thread
+    @wrap_async_executor
     def _base_generate(self, text_inputs:list[str], system_prompt:str = None):
         """Generate a response."""
         input_text, model_output, input_length, output_len = self.clo.base_generate(text_inputs, system_prompt, return_tuple=True)
@@ -291,7 +291,7 @@ class CloneusManager():
         
         return messages
     
-    @async_wrap_thread
+    @wrap_async_executor
     def _base_streaming_generate(self, text_inputs:list[str], system_prompt:str = None):
 
         chunk_idx = 0
@@ -347,20 +347,20 @@ class CloneusManager():
         return messages
 
     # NOTE: this WORKS
-    @async_wrap_thread
+    @wrap_async_executor
     def generate(self, llm_input_messages: list[tuple], author:str, seed_text:str):
         """Generate a response."""
         input_text, model_output, input_length, output_len = self.clo.generate(llm_input_messages, (author, seed_text), return_tuple=True)
         return input_text, model_output, input_length, output_len
         
-    @async_wrap_thread
+    @wrap_async_executor
     def batch_generate(self, llm_input_messages: list[tuple], authors: list[str], seed_text: str):
         """Generate a batch of response."""        
         base_input_text, author_prompts, model_outputs, input_length, output_lengths = self.clo.batch_generate(llm_input_messages, authors, seed_text, return_tuple=True)
         return base_input_text, author_prompts, model_outputs, input_length, output_lengths
 
     
-    @async_wrap_thread
+    @wrap_async_executor
     def streaming_generate(self, llm_input_messages: list[tuple], author: str, seed_text: str):
         generated_text = ""
         tick=0
@@ -379,7 +379,7 @@ class CloneusManager():
         #    yield updated_content
 
         
-    @async_wrap_thread
+    @wrap_async_executor
     def streaming_batch_generate(self, llm_input_messages: list[tuple], authors: list[str], seed_text: str):
         generated_text, last_i, tick = "", 0, 0
         for i,new_word in self.clo.stream_batch_generate(llm_input_messages, authors, seed_text):

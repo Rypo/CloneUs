@@ -89,7 +89,7 @@ class AICore(commands.Cog):
         #self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         await self.bot.remove_cog('TextGen')
         release_memory()
-        globthread.stop_global_thread()
+        globthread.stop_global_executors()
 
 
     @tasks.loop(minutes=1.0)
