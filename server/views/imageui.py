@@ -20,7 +20,7 @@ from PIL import Image
 from utils import image as imgutil
 
 class ConfirmActionView(discord.ui.View):
-    def __init__(self, *, timeout: float = 15):
+    def __init__(self, *, timeout: float = 30):
         super().__init__(timeout=timeout)
         self.value = None
     
@@ -39,7 +39,6 @@ class ConfirmActionView(discord.ui.View):
         #await interaction.response.send_message('Confirming', ephemeral=True)
         self.value = True
         self.disable_and_clear()
-
         self.stop()
 
     @discord.ui.button(label='Reject', style=discord.ButtonStyle.grey)
@@ -78,7 +77,7 @@ class DrawUIView(discord.ui.View):
         self.is_redraw: bool = None
         self.in_queue=None
         self.mcounter=None
-        self.call_fn:callable=None
+        self.call_fn:typing.Callable=None
     
     @property
     def kwargs(self):
@@ -89,20 +88,20 @@ class DrawUIView(discord.ui.View):
             item.disabled = True
         del self.images, self.attachments, self.local_paths
         self.clear_items()
-        await self.message.edit(view=self)
+        self.message = await self.message.edit(view=self)
         if self.mcounter:
             await self.mcounter.delete()
 
-    async def send(self, ctx: commands.Context, image: Image.Image, fpath: str, ephemeral=False):
+    async def send(self, ctx: commands.Context, image: Image.Image, fpath: str):
         self.call_ctx = ctx
-        call_kwargs = {**self.call_ctx.kwargs} # prompt, imgfile
-        flags = call_kwargs.pop('flags')
+        #call_kwargs = {**self.call_ctx.kwargs} # prompt, imgfile
+        #flags = call_kwargs.pop('flags')
         kwargs = self.kwarg_sets[-1]
-        kwargs = {
-            **call_kwargs,
-            **kwargs, 
-            'fast': flags.fast,
-        }
+        # kwargs = {
+        #     **call_kwargs,
+        #     **kwargs, 
+        #     'fast': flags.fast,
+        # }
         print('MERGED KWARGS:', kwargs)
         self.kwarg_sets=[kwargs]
         self.is_redraw = 'imgurl' in kwargs or 'imgfile' in kwargs
@@ -203,13 +202,9 @@ class DrawUIView(discord.ui.View):
         await self.update_queue(1, interaction)
         #kwargs = self.kwargs.copy()
 
-        # TODO: Should refine steps be ignored here? for now, yes.
-        # since they are seperated in config Modal
-        #kwargs['refine_steps'] = 0
-        #self.kwarg_sets.append(kwargs)
-        
-        #imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
-        #if kwargs.get('imgfile'):
+        # need to reset refine strength in case was changed in modal.
+        # otherwise would be refining on every single redo
+        kwargs.pop('refine_strength',None)
         
         image, fpath = await asyncio.create_task(self.call_ctx.invoke(self.call_fn, *self.call_ctx.args, **kwargs))
         # NOTE: I bet you append these to a list and pop them. Then you'd be able to cancel queued jobs
@@ -269,7 +264,12 @@ class DrawUIView(discord.ui.View):
         if isinstance(image_url, discord.Attachment):
             image_url = image_url.url
         
-        hd_config = {'refine_steps': kwargs.pop('refine_steps'), 'refine_strength':kwargs.pop('refine_strength')}
+        # hd_config = {'refine_steps': kwargs.pop('refine_steps'), 'refine_strength':kwargs.pop('refine_strength')}
+        if (ref_strength := kwargs.pop('refine_strength', None)) is None:
+            ref_strength = 0.30
+        
+        hd_config = {'refine_strength': ref_strength}
+        
         cm = ConfigModal(vals={
             'prompt': kwargs.pop('prompt'),
             'negative_prompt': kwargs.pop('negative_prompt'),
@@ -317,26 +317,39 @@ class DrawUIView(discord.ui.View):
         imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
         kwargs['imgurl'] = self.message.attachments[0].url
         kwargs['imgfile'] = self.message.attachments[0]
-        kwargs['strength'] = 0 # set to 0 to avoid strong redraw.
-        kwargs['refine_steps'] = max(kwargs['refine_steps'], 1)
+        
+        if (ref_strength := kwargs.get('refine_strength')) is None:
+            ref_strength = 0.30
+        
+        
+        hd_kwargs = {
+            'imgurl': self.message.attachments[0].url,
+            'prompt': kwargs.get('prompt'),
+            'imgfile': self.message.attachments[0],
+            'refine_strength': ref_strength,
+            'steps': kwargs.get('steps'),
+            'negative_prompt':kwargs.get('negative_prompt'),
+            'guidance_scale':kwargs.get('guidance_scale'),
+            'detail_weight':kwargs.get('detail_weight'),
+            'seed':kwargs.get('seed'),
+        }
+        #kwargs['strength'] = 0 # set to 0 to avoid strong redraw.
+        #kwargs['refine_steps'] = max(kwargs['refine_steps'], 1)
         #kwargs['denoise_blend'] = kwargs.get('denoise_blend', None),
         
         # Pop aspect so that dimensions are preserved
-        kwargs.pop('aspect', None)
-        image, fpath = await self.call_ctx.invoke(imgen.redraw, *self.call_ctx.args, **kwargs)
+        #kwargs.pop('aspect', None)
+        print(self.call_ctx.args)
+        #image, fpath = await self.call_ctx.invoke(imgen.hd_upsample, *self.call_ctx.args, **kwargs)
+        image, fpath = await self.call_ctx.invoke(imgen.hd_upsample, *self.call_ctx.args, **hd_kwargs)
         
         #await interaction.followup.send(file=to_bytes_file(image_file, kwargs['prompt']))
-        ifile = imgutil.to_bytes_file(image, kwargs['prompt'])
+        ifile = imgutil.to_bytes_file(image, kwargs['prompt'], ext='PNG')
         
         # if self.upsample_thread is None:
         #    self.upsample_thread = await self.call_ctx.channel.create_thread(name='Upsampled Images', message=self.message)
         
         # await self.upsample_thread.send(file=ifile)
-        
-        # if self.upsample_message.content:
-        #     self.upsample_message = await self.upsample_message.edit(content=None, attachments=[ifile])
-        # else:
-        #     self.upsample_message = await self.upsample_message.add_files(ifile)
 
         if self.upsample_message is None:
             self.upsample_message = await self.message.reply(file=ifile)
@@ -392,7 +405,24 @@ class GifUIView(discord.ui.View):
         self.prompt = prompt
         #self.filenames = [self.out_gifpath.with_stem(self.out_gifpath.stem + f'_{i}').with_suffix('.webp').name for i in range(len(self.images))]
         
-        self.message, self.optimized_images = await imgutil.try_send_gif(self.message, out_gifpath, prompt, view=self)
+        # TODO: if too big, etiher:
+        # - halve the number of frames
+        # - reduce size (w,h) of gif
+        # - use catbox hosting
+        # - return exploded view with the collapse button disabled. 
+        #   - FIXME: Currently will error out if you try to collapse
+
+        message, self.optimized_images = await imgutil.try_send_gif(self.message, out_gifpath, prompt, view=self)
+        if message is not None:
+            self.message = message
+        else:
+            # failed to send, twice.
+            # return exploded view with the collapse button disabled.
+            view = PagedImageGridView(prev_view=None, images=self.images, filestems=[str(self.gif_filepath.stem)]*len(self.images), descriptions=None, timeout=self.timeout)
+            self.message = await self.message.edit(content=f"Still too big, maybe tone it down a bit next time.", view=view)
+            
+            self.message = await view.send(self.message)
+
         #self.message.edit(content='', attachments=[discord.File(fp=out_gifpath, filename=out_gifpath.name, description=prompt)], view=self)
         return self.message
     
@@ -440,7 +470,7 @@ class ImageGridView(discord.ui.View):
 
 
 class PagedImageGridView(discord.ui.View):
-    def __init__(self, prev_view:GifUIView|DrawUIView, images:list[Image.Image], filestems: list[str], descriptions: list[str] = None, *, max_grid_images:int=10, timeout=None):
+    def __init__(self, prev_view:GifUIView|DrawUIView|None, images:list[Image.Image], filestems: list[str], descriptions: list[str] = None, *, max_grid_images:int=10, timeout=None):
         super().__init__(timeout=(timeout if timeout is not None else prev_view.timeout))
         self.prev_view = prev_view
         self.max_grid_images = max_grid_images
@@ -461,6 +491,8 @@ class PagedImageGridView(discord.ui.View):
         return self.message
     
     def _init_buttons(self):
+        if self.prev_view is None:
+            self.collapse_button.disabled = True
         self.prev_button.disabled = self.n_batches < 2 # (self.cur_imgnum <= 1)
         self.next_button.disabled = self.n_batches < 2 # (self.cur_imgnum >= self.n_images)
         self.update_buttons()
@@ -500,8 +532,9 @@ class PagedImageGridView(discord.ui.View):
     async def on_timeout(self) -> None:
         # https://discordpy.readthedocs.io/en/stable/faq.html#how-can-i-disable-all-items-on-timeout
         self.freeze()
-        self.clear_items().stop()
+        self.clear_items()
         self.message = await self.message.edit(view=self)
+        self.stop()
         #del self.image_attrs_batches
         
     
