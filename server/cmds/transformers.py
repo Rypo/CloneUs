@@ -44,7 +44,7 @@ class PercentTransformer(app_commands.Transformer):
                 value/=100.0
         return value
 
-def percent_transform(value: float):
+def percent_transform(value: float|None):
     '''Rescales from 1-100 to 0.01-1.00 if not already in range'''
     if value:
         value = float(value) 
