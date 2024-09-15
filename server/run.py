@@ -192,7 +192,8 @@ async def main(bot=None):
         # - https://gist.github.com/AbstractUmbra/a9c188797ae194e592efe05fa129c57f#syncing-gotchas
         await bot.wait_until_ready()
         if (guild := ctx.guild) is None:
-            guild = settings.GUILDS_ID 
+            guild = bot.get_guild(settings.GUILDS_ID_INT)
+            
         
         print(guild, bot.guilds)
         
@@ -227,26 +228,30 @@ async def main(bot=None):
             synced = set(global_synced+guild_synced)
         
         #synced_md = '\n- ' + '\n- '.join([s.name,s. for s in synced]) if synced else ''
-        synced_md = '\n'.join([f'- {s.name} <{"guild" if s.guild_id else "global"}>' for s in synced]) if synced else ''
+        synced_md = '\n'.join([f'- {s.name} <{"guild" if s.guild_id else "global"}>' for s in sorted(synced, key=lambda x: x.name)]) if synced else ''
+        guild_cnt = synced_md.count("guild")
+        global_cnt = synced_md.count("global")
         if spec is None:
-            where = f' globally and to the guild ({guild.name}).'
+            where = f': ({global_cnt}) global and ({guild_cnt}) guild "{guild.name}".'
         elif spec == '~':
-            where = ' globally.'
+            where = 'globally.'
         elif spec == '.':
-            where = f' to the current guild ({guild.name}).'
+            where = f'to the current guild ({guild.name}).'
         else:
             where = ''
-        return await ctx.send(f"Synced {len(synced)} commands{where}\n{synced_md}")
+        print(synced_md)
+        return await ctx.send(f"Synced {len(synced)} commands {where}".strip())
         
     async with bot:
         await bot.start(settings.BOT_TOKEN)
     #bot.run(settings.BOT_TOKEN)
 
 def run_main():
+    DEBUG = None
     bot = BotUs()
     
     try:
-        uvloop.run(main(bot))
+        uvloop.run(main(bot), debug=DEBUG)
     except KeyboardInterrupt:
         for task in asyncio.all_tasks(bot.loop):
            print(task.get_name())
@@ -263,7 +268,6 @@ if __name__ == '__main__':
     settings.setup_logging()
     useridx.check_author_initials()
     # main()
-    # TODO: Bot does not go offline on keyboard interupt
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     run_main()
     #main_thread = Thread(target=main)
