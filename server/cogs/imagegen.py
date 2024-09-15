@@ -36,7 +36,7 @@ event_logger = settings.logging.getLogger('event')
 
 # IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 # PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
-GUI_TIMEOUT = 30*60
+GUI_TIMEOUT = 5*60
 
 
 class Autocorrect:
@@ -296,6 +296,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         Args:
             prompt: A description of the image to be generated.
+            n: The number of images to draw from the prompt.
             steps: Num iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
 
             negprompt: Negative prompt. What to exclude from image. Usually comma sep list of words. Default=None.
@@ -309,7 +310,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         """
         # dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
         # flags can't be created by drawUI, so need to separate out draw/redraw functionality
+        view = imageui.DrawUIView(timeout=GUI_TIMEOUT)
         return await self.draw(ctx, prompt, 
+                               n_images = flags.n,
                                steps = flags.steps, 
                                negative_prompt = flags.negprompt, 
                                guidance_scale = flags.guidance, 
@@ -320,9 +323,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                #denoise_blend = flags.dblend, 
                                fast = flags.fast,
                                seed = flags.seed,
+                               _view = view
                                )
         
     async def draw(self, ctx: commands.Context, prompt:str, *,
+                   n_images:int = 1,
                    steps: int = None, 
                    negative_prompt: str = None, 
                    guidance_scale: float = None, 
@@ -333,47 +338,40 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                    #denoise_blend: float|None = None, 
                    fast: bool = False,
                    seed: int = None,
+                   _view: imageui.DrawUIView = None,
                    ):
         refine_strength = cmd_tfms.percent_transform(refine_strength)
         needs_view = await self.view_check_defer(ctx)
-        # has_view = ctx.interaction.response.is_done()
-        # if not has_view:
-        #     await ctx.defer()
-        #     await asyncio.sleep(1)
-        
+        view = _view
+
         prompt = await self.validate_prompt(ctx, prompt)
         if prompt == '<CANCEL>':
-            return await ctx.send('Canceled', silent=True, delete_after=1)
-        
+            await ctx.send('Canceled', silent=True, delete_after=1)
+            return 
+
         async with self.bot.busy_status(activity='draw'):
-            self.igen.dc_fastmode(enable=fast, img2img=False)
-            image, call_kwargs = await self.igen.generate_image(prompt, steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, 
-                                                          refine_strength=refine_strength, seed=seed)
-            #await send_imagebytes(ctx, image, prompt)
-            #image_file = imgbytes_file(image, prompt)
-            # this needs to overide calling args
-            #fwkg.update(prompt=prompt)
-
-            # fast is toggled and then never considered again, so it's not passed but still need to track
-            call_kwargs.update(fast=fast)
-
-            out_imgpath = imgutil.save_image_prompt(image, prompt)
+            self.igen.dc_fastmode(enable=fast)
+            output = await self.igen.generate_image(prompt, n_images=n_images, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
+                                                    detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed)
+            
             if needs_view:
-                view = imageui.DrawUIView(call_kwargs, timeout=GUI_TIMEOUT)
-                msg = await view.send(ctx, image, out_imgpath)
+                msg = await view.send(ctx, n_init_images = n_images, )
+            
+            async for imbatch,kwbatch in async_gen(output):
+                await view.add_images(imbatch, call_kwargs=kwbatch)
                 
-        return image, out_imgpath
+
 
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _redraw(self, ctx: commands.Context, imgurl:str, prompt: commands.Range[str,1,1000], imgfile: discord.Attachment=None, *, flags: cmd_flags.RedrawFlags):
+    async def _redraw(self, ctx: commands.Context, imgurl:str, prompt: commands.Range[str,1,1000],  *, flags: cmd_flags.RedrawFlags):
         """Remix an image from a text prompt and image.
 
         Args:
             prompt: A description of what you want to infuse the image with.
-            imgurl: Url of image. Will be ignored if imgfile is used. 
-            imgfile: image attachment. Square = Best results. Ideal size= 1024x1024 (Turbo ideal= 512x512).
-            
+            imgurl: Url of image. Will be ignored if `imgfile` is used. 
+            n: The number of redrawn images to produce from the image and prompt.
+            imgfile: image attachment. To use, write anything in `imgurl` and drag+drop image. 
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
             strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default varies.
             
@@ -382,13 +380,15 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). If None, will pick nearest to imgfile.
 
-            
-            hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored if hdsteps=0.
-            fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
+            hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored unless > 0.
+            fast: Trades image quality for speed - about 2-3x faster. Default=False.
             seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
         """
         # hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=0. Usually < 3.
-        return await self.redraw(ctx, prompt, imgurl, imgfile=imgfile, 
+        view = imageui.DrawUIView(timeout=GUI_TIMEOUT)
+        return await self.redraw(ctx, prompt, imgurl, 
+                                 n_images=flags.n,
+                                 imgfile=flags.imgfile, 
                                  steps = flags.steps, 
                                  strength = flags.strength, 
                                  negative_prompt = flags.negprompt, 
@@ -398,10 +398,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  
                                  refine_strength = flags.hdstrength, 
                                  fast = flags.fast,
-                                 seed = flags.seed
+                                 seed = flags.seed,
+                                 _view = view
                                  )
 
-    async def redraw(self, ctx: commands.Context, prompt: str, imgurl:str, imgfile: discord.Attachment=None,*, 
+    async def redraw(self, ctx: commands.Context, prompt: str, imgurl:str, *, 
+                     imgfile: discord.Attachment|None=None,
+                     n_images:int = 1,
                      steps: int = None, 
                      strength: float = None, 
                      negative_prompt: str = None, 
@@ -411,7 +414,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 
                      refine_strength: float = None,
                      fast:bool = False,
-                     seed:int = None
+                     seed:int = None,
+                     _view: imageui.DrawUIView = None,
                      ):
         
         # manual conversion may be needed because discord transformer doesn't proc when function called internally (e.g. by GUI redo button)
@@ -419,7 +423,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         refine_strength = cmd_tfms.percent_transform(refine_strength)
         
         needs_view = await self.view_check_defer(ctx)
-
+        view = _view
         # this may be passed a url string in drawUI config
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile, discord.Attachment) else imgurl)
         
@@ -429,34 +433,27 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         image = Image.fromarray(image)
         
-        # needs_view = False
-        # if not ctx.interaction.response.is_done():
-        #     await ctx.defer()
-        #     await asyncio.sleep(1)
-        #     needs_view = True
-        
+
         prompt = await self.validate_prompt(ctx, prompt)
         if prompt == '<CANCEL>':
-            return await ctx.send('Canceled', silent=True, delete_after=1)
+            await ctx.send('Canceled', silent=True, delete_after=1)
+            return
         
+
         async with self.bot.busy_status(activity='draw'):
-            self.igen.dc_fastmode(enable=fast, img2img=True) # was img2img=False, bug or was it because of crashing?
-            image, call_kwargs = await self.igen.regenerate_image(prompt=prompt, image=image, 
-                                                           steps=steps, strength=strength, negative_prompt=negative_prompt, 
-                                                           guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect,
-                                                           refine_strength=refine_strength,seed=seed)
-            # remove image, replace with url
-            _=call_kwargs.pop('image')
-            call_kwargs.update(imgurl=imgurl, fast=fast)
-            #fwkg.update(prompt=prompt)
-            #image_file = imgbytes_file(image, prompt)
-            out_imgpath = imgutil.save_image_prompt(image, prompt)
+            self.igen.dc_fastmode(enable=fast)
+            output = await self.igen.regenerate_image(prompt=prompt, image=image, n_images=n_images, steps=steps, strength=strength, 
+                                                                  negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, 
+                                                                  aspect=aspect, refine_strength=refine_strength, seed=seed)
             if needs_view:
-                view = imageui.DrawUIView(call_kwargs, timeout=GUI_TIMEOUT)
-                msg = await view.send(ctx, image, out_imgpath)
+                msg = await view.send(ctx, n_init_images = n_images)
             
-        #out_imgpath = save_image_prompt(image, prompt)
-        return image, out_imgpath
+            async for imbatch,kwbatch in async_gen(output):
+                for kws in kwbatch:
+                    kws.pop('image')
+                    kws.update(imgurl=image_url)
+                await view.add_images(imbatch, call_kwargs=kwbatch)
+
     
     @commands.hybrid_command(name='hd')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
@@ -465,15 +462,15 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         Args:
             imgurl: Url of image. Will be ignored if imgfile is used. 
-            prompt: A description of the image. Not required, but if high hdstep/hdstrength helps A LOT.
-            imgfile: image attachment. If bigger than (1216,832)/(1024²)/(1216,832) it's shrunk down first.
+            prompt: A description of the image. Not required, but if high hdstrength helps A LOT.
+            imgfile: image attachment. To use, write anything in `imgurl` and drag+drop image. 
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Default=30
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
             
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
-            seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
+            seed: Random Seed. An arbitrary number to make results reproducible. Default=None.
         """
         return await self.hd_upsample(ctx, imgurl, prompt, imgfile=imgfile, 
                                  steps = flags.steps, 
@@ -485,7 +482,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  seed = flags.seed
                                  )
 
-    async def hd_upsample(self, ctx: commands.Context, imgurl:str, prompt: str = None, imgfile: discord.Attachment=None, *,
+    async def hd_upsample(self, ctx: commands.Context, imgurl:str, prompt: str = None, imgfile: discord.Attachment|None=None, *,
                           refine_strength:float = 0.3, 
                           steps:int = None, 
                           negative_prompt: str = None, 
@@ -495,9 +492,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                           ):
         refine_strength = cmd_tfms.percent_transform(refine_strength)
         needs_view = await self.view_check_defer(ctx)
-        
-        image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
-        image = await imgutil.aload_image(image_url)
+        if isinstance(imgfile, Image.Image):
+            image = imgfile # get a little cheeky here to bypass the download
+        else:
+            image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
+            image = await imgutil.aload_image(image_url)
         
         prompt = await self.validate_prompt(ctx, prompt)
         if prompt == '<CANCEL>':
@@ -525,7 +524,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             prompt: A description of the gif to be animated.
             imgurl: Url of image. If set, strengths are linearly scaled from min to max.
 
-            nframes: Number of frames to generate. Default=16.
+            nframes: Number of frames to generate. Default=11.
             
             steps: Num of iters to run per frame. Increase = ⬆Quality, ⬆Run Time. Default varies.
             strength_end: Strength range end. 0 = No Change. 100=Change All. Default=80.

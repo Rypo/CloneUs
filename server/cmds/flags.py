@@ -100,6 +100,7 @@ class WordRuleFlags(commands.FlagConverter):
 
 class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     #prompt: str
+    n: Range[int, 1, ] = commands.flag(default=1, aliases=['n_images'])
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
     negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])
     guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
@@ -116,6 +117,8 @@ class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
 class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     # imgfile: discord.Attachment
     # prompt: str
+    n: Range[int, 1, ] = commands.flag(default=1, aliases=['n_images'])
+    imgfile: discord.Attachment = commands.flag(default=None)
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None,  aliases=['str']) 
     negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'])

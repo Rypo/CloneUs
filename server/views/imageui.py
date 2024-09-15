@@ -6,6 +6,7 @@ import yaml
 import asyncio
 import tempfile
 import random
+import datetime
 import traceback
 import typing
 from pathlib import Path
@@ -18,6 +19,7 @@ from discord.utils import MISSING
 from PIL import Image
 
 from utils import image as imgutil
+from cloneus.utils import common as comutil
 
 class ConfirmActionView(discord.ui.View):
     def __init__(self, *, timeout: float = 30):
@@ -54,7 +56,7 @@ class ConfirmActionView(discord.ui.View):
         self.stop()
 
 class DrawUIView(discord.ui.View):
-    def __init__(self, kwargs:dict, *, timeout=None):
+    def __init__(self, *, timeout=None):
         super().__init__(timeout=timeout)
         
         self.call_ctx = None
@@ -62,84 +64,80 @@ class DrawUIView(discord.ui.View):
         self.message = None
         self.upsample_message = None
         #self.upsample_thread = None
-        #self.kwargs = kwargs
-        kwargs['seed'] = kwargs.get('seed', random.randint(1e9, 1e10-1))
-        self.kwarg_sets = [kwargs]
 
-        self.attachments: list[discord.Attachment] = []
+        self.kwarg_sets = []
         self.local_paths = []
         self.images = []
-        #self.files: list[discord.File] = []
-        #self.already_upsampled = []
+
         self.cur_filename = None
         self.cur_imgnum = 0
-        self.n_images = 0
+        self.img_count = 0
+
         self.is_redraw: bool = None
-        self.in_queue=None
-        self.mcounter=None
-        self.call_fn:typing.Callable=None
+        self.imgen: commands.Cog = None
+        self.call_fn: typing.Callable=None
+        self.init_flags = None
+        
+        self.in_queue=0
+        self.queue_message=None
     
     @property
     def kwargs(self):
         return self.kwarg_sets[self.cur_imgnum-1]
 
     async def on_timeout(self) -> None:
+        print(f'{self.__class__.__name__} Timeout:', datetime.datetime.now())
         for item in self.children:
             item.disabled = True
-        del self.images, self.attachments, self.local_paths
+        del self.images, self.local_paths
         self.clear_items()
         self.message = await self.message.edit(view=self)
-        if self.mcounter:
-            await self.mcounter.delete()
+        if self.queue_message:
+            self.queue_message = await self.queue_message.delete()
 
-    async def send(self, ctx: commands.Context, image: Image.Image, fpath: str):
-        self.call_ctx = ctx
-        #call_kwargs = {**self.call_ctx.kwargs} # prompt, imgfile
-        #flags = call_kwargs.pop('flags')
-        kwargs = self.kwarg_sets[-1]
-        # kwargs = {
-        #     **call_kwargs,
-        #     **kwargs, 
-        #     'fast': flags.fast,
-        # }
-        print('MERGED KWARGS:', kwargs)
-        self.kwarg_sets=[kwargs]
-        self.is_redraw = 'imgurl' in kwargs or 'imgfile' in kwargs
-        imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
-        # default_auto = (self.is_redraw and flags.aspect is None)
-        self.call_fn = imgen.redraw if self.is_redraw else imgen.draw
-        # if self.is_redraw:
-        #     self.aspect_select.add_option(label='auto', description=f'Auto (best match)', emoji='💠', default=default_auto)
+
+    def add_kwargs(self, call_kwargs:list[dict]):
+
+        if self.is_redraw is None: # first run
+            kwargs = call_kwargs[-1]
+            self.is_redraw = 'imgurl' in kwargs or 'imgfile' in kwargs
+            self.imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
+            self.call_fn = self.imgen.redraw if self.is_redraw else self.imgen.draw
+            self.init_flags = self.call_ctx.kwargs['flags']
         
-        # for soption in ['🔲 square (1:1)', '📱 portrait (13:19)', '🖼️ landscape (19:13)']:
-        #     emoji, label, ar = soption.split()
-        #     is_default = not default_auto and self.kwargs['aspect']==label
-        #     self.aspect_select.add_option(label=label, description=f'{label.title()} {ar}', emoji=emoji, default=is_default)
+        #seed = kwargs.pop('seed', None)#random.randint(1e9, 1e10-1))
+        for kset in call_kwargs:
+            kset.update(fast=self.init_flags.fast)
+        
+        self.kwarg_sets.extend(call_kwargs)
 
+    async def send(self, ctx: commands.Context, n_init_images:int, start_as_grid:bool = False): #, kwargs:dict=None, image: Image.Image|None=None): #image: Image.Image|None, fpath: str|None):
+        self.call_ctx = ctx
         self.message = await ctx.send(view=self)
-        #self.upsample_message = await self.message.reply('<Embiggened Images>')
-        #self.upsample_message = await ctx.send('<Embiggened Images>')
-        #self.upsample_thread = await ctx.channel.create_thread(name='<Embiggened Images>', message=self.message)
-        # https://github.com/Rapptz/discord.py/issues/9008#issuecomment-1299999500
-        # print(self.call_ctx.command)
-        # print(self.call_ctx.author)
-        await self.add_image(image, fpath)
-
+        await self.update_queue(n_init_images)
+        # if self.mcounter is None:
+        #     self.in_queue = n_init_images
+        #     #self.mcounter = await interaction.followup.send(content = f'Queue: {self.in_queue}', wait=True, silent=True)
+        #     self.mcounter = await self.message.reply(content = f'Queue: {self.in_queue}', silent=True)
         return self.message
 
     def update_buttons(self):
         #print('before mod:', self.cur_imgnum)
         if self.cur_imgnum < 1:
-            self.cur_imgnum = self.n_images
-        elif self.cur_imgnum > self.n_images:
+            self.cur_imgnum = self.img_count
+        elif self.cur_imgnum > self.img_count:
             self.cur_imgnum = 1
         
-        self.prev_button.disabled = self.n_images < 2 # (self.cur_imgnum <= 1)
-        self.next_button.disabled = self.n_images < 2 # (self.cur_imgnum >= self.n_images)
-        self.explode_button.disabled = self.n_images < 2
+        self.prev_button.disabled = self.img_count < 2 # (self.cur_imgnum <= 1)
+        self.next_button.disabled = self.img_count < 2 # (self.cur_imgnum >= self.n_images)
+        self.explode_button.disabled = self.img_count < 2
 
-        self.redo_button.label = f'({self.cur_imgnum} / {self.n_images})'
+        self.redo_button.label = f'({self.cur_imgnum} / {self.img_count})'
         
+        if self.img_count != 0:
+            self.redo_button.disabled = False
+            self.config_button.disabled = False
+            self.upsample_button.disabled = False
 
     async def update_view(self, img_file: discord.File = None):
         self.update_buttons()
@@ -149,75 +147,89 @@ class DrawUIView(discord.ui.View):
         else:
             self.message = await self.message.edit(attachments=[img_file], view=self)
         
-        return self.message.attachments[0]
+        #return self.message.attachments[0]
 
-    async def add_image(self, image: Image.Image, fpath:str):
-        self.n_images += 1
-        self.cur_imgnum  = self.n_images
+    # async def add_image(self, image: Image.Image, call_kwargs:dict):
+    #     self.img_count += 1
+    #     self.cur_imgnum  = self.img_count
+    #     self.add_kwargs([call_kwargs])
+    #     #self.kwarg_sets += self.proc_kwargs(kwargs)
+
+    #     prompt = call_kwargs['prompt']
         
-        bfile = imgutil.to_bytes_file(image, self.kwargs['prompt'])
-        cur_attach = await self.update_view(bfile)
-        #self.files.append(bfile)
-        self.attachments.append(cur_attach)
-        self.images.append(image)
-        self.local_paths.append(fpath)
+    #     fpath = imgutil.save_image_prompt(image, prompt=prompt, ext='PNG', bidx=None)
+    #     self.images.append(image)
+    #     self.local_paths.append(fpath)
         
+    #     await self.refresh()
+    #     #bfile = imgutil.impath_to_file(fpath, description=prompt)
+    #     #bfile = imgutil.to_bytes_file(image, self.kwargs['prompt'])
+    #     #cur_attach = await self.update_view(bfile)
+    #     #self.files.append(bfile)
+    #     await self.update_queue(-1)
+        
+    
+    async def add_images(self, images: list[Image.Image], call_kwargs:list[dict]):
+        n = len(images)
+        self.img_count += n
+        self.cur_imgnum  = self.img_count
+        self.add_kwargs(call_kwargs)
+        self.images.extend(images)
+        
+        fpaths = [imgutil.save_image_prompt(images[i], call_kwargs[i]['prompt'], ext='PNG', bidx=i) for i in range(n)]
+        self.local_paths.extend(fpaths)
+        #fp_tasks = asyncio.gather(*[asyncio.to_thread(imgutil.save_image_prompt, images[i], prompt, ext='PNG', bidx=i) for i in range(n)])
+
+
+        #fpaths = await fp_tasks#asyncio.gather(*fp_tasks)
+        #for fpath in fpaths:
+        #    self.local_paths.append(fpath)
+            #bfile = imgutil.impath_to_file(fpath, prompt)
+            
+        await self.refresh()
+        await self.update_queue(-n)
+ 
 
     async def refresh(self):
         self.update_buttons()
         index = self.cur_imgnum-1
-        print(f'Index: {index} | Local Paths: {[p.name for p in self.local_paths]}')
-        print(f'kwarg_sets:', [k['prompt'] for k in self.kwarg_sets])
-        print(f'kwarg_sets[{index}]:', self.kwarg_sets[index])
-        # time is comparable for both methods. 0.5 - 1.0 seconds
-        # try:
-        #    cur_file = await self.attachments[index].to_file(use_cached=True)
-        #    await self.update_view(cur_file)
-        # except discord.errors.NotFound:
-        #     print('Content expired. Falling back to local file.')
-        
-        expired_attach = self.attachments[index]
-        #cur_file = discord.File(self.local_paths[index], filename=expired_attach.filename, description=expired_attach.description)
-        cur_file = imgutil.to_bfile(self.images[index], filestem=expired_attach.filename, description=expired_attach.description)
-        
-        cur_attach = await self.update_view(cur_file)
-        self.attachments[index] = cur_attach #.insert(self.cur_imgnum, cur_attach)
+        #print(f'Index: {index} | local_paths[{index}]: {self.local_paths[index].name} | kwarg_sets[{index}]: {self.kwarg_sets[index]}') #[p.name for p in self.local_paths]
+        #print(f'prompts:', set([k['prompt'] for k in self.kwarg_sets]))
+
+        cur_file = imgutil.to_bfile(self.images[index], filestem=self.local_paths[index].stem, description=self.kwarg_sets[index]['prompt'])
+        await self.update_view(cur_file)
+        #cur_attach = await self.update_view(cur_file)
+
         return self.message
 
     async def update_queue(self, d:int, interaction:discord.Interaction=None):
-        if self.mcounter is None:
-            self.in_queue = 0
-            self.mcounter = await interaction.followup.send(content = f'Queue: {self.in_queue}', wait=True, silent=True)
+        # if self.mcounter is None:
+        #     self.in_queue = 0
+        #     #self.mcounter = await interaction.followup.send(content = f'Queue: {self.in_queue}', wait=True, silent=True)
+        #     self.mcounter = await self.message.reply(content = f'Queue: {self.in_queue}', silent=True)
         
         self.in_queue += d
-        # if self.in_queue <= 0:
-        #     await self.mcounter.delete()
-        #     self.mcounter = None
-        # else:
-        self.mcounter = await self.mcounter.edit(content = f'Queue: {self.in_queue}',)
+
+        msg = f'Queue: {self.in_queue}' if self.in_queue != 0 else '\u200b' # if it goes negative, I wanna know '​'
+
+        #self.mcounter = await self.mcounter.edit(content = msg)
+        self.message = await self.message.edit(content = msg)
 
     async def redo(self, interaction:discord.Interaction, kwargs:dict):
-        # await interaction.response.defer(thinking=True)
         await interaction.response.defer()
         await self.update_queue(1, interaction)
         #kwargs = self.kwargs.copy()
-
+        
+        kwargs.pop('refine_strength',None)
         # need to reset refine strength in case was changed in modal.
         # otherwise would be refining on every single redo
-        kwargs.pop('refine_strength',None)
         
-        image, fpath = await asyncio.create_task(self.call_ctx.invoke(self.call_fn, *self.call_ctx.args, **kwargs))
+        
         # NOTE: I bet you append these to a list and pop them. Then you'd be able to cancel queued jobs
-        # if self.is_redraw:
-        #     image, fpath = await self.call_ctx.invoke(imgen.redraw, *self.call_ctx.args, **kwargs)
-        # else:
-        #     #kwargs.pop('imgfile',None) # Still need to pop in case it's passed as None 
-        #     image, fpath = await self.call_ctx.invoke(imgen.draw, *self.call_ctx.args, **kwargs)
         
-        self.kwarg_sets.append(kwargs)
-        await self.add_image(image, fpath)
-        await self.update_queue(-1, interaction)
-        #await interaction.delete_original_response()
+        #await self.call_ctx.invoke(self.call_fn, *self.call_ctx.args, **kwargs, _view=self)
+        #task = asyncio.create_task(self.call_fn(self.call_ctx, *self.call_ctx.args, **kwargs, _view=self))
+        await asyncio.create_task(self.call_ctx.invoke(self.call_fn, *self.call_ctx.args, **kwargs, _view=self))        
 
 
     # @discord.ui.select(cls=discord.ui.Select, placeholder='image layout/aspect ratio', row=0)
@@ -236,7 +248,7 @@ class DrawUIView(discord.ui.View):
         self.cur_imgnum -= 1
         await self.refresh()
     
-    @discord.ui.button(label='(0 / 0)', style=discord.ButtonStyle.secondary, disabled=False, emoji='🔄', row=1) # ▶️ 🔄 ♻️
+    @discord.ui.button(label='(0 / 0)', style=discord.ButtonStyle.secondary, disabled=True, emoji='🔄', row=1) # ▶️ 🔄 ♻️
     async def redo_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         kwargs = self.kwargs.copy()
         kwargs['seed'] = random.randint(1e9, 1e10-1)
@@ -250,7 +262,7 @@ class DrawUIView(discord.ui.View):
         self.cur_imgnum += 1
         await self.refresh()
 
-    @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='⚙️', row=1) # 🎛️ ⚙️ 🎚️
+    @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=True, emoji='⚙️', row=1) # 🎛️ ⚙️ 🎚️
     async def config_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         #await interaction.response.defer()
         
@@ -301,31 +313,33 @@ class DrawUIView(discord.ui.View):
             **hd_config
         })
         if self.is_redraw:
-            new_kwargs.update({'imgfile': cm.vals['image_url']})
+            #new_kwargs.update({'imgfile': cm.vals['image_url']})
+            new_kwargs.update({'imgurl': cm.vals['image_url']})
         
         #self.kwarg_sets.append(new_kwargs)
         # NOTE: if decide to do this, remove the defer from on_submit
         await self.redo(cm.submit_interaction, new_kwargs)
     
 
-    @discord.ui.button(label='HD', style=discord.ButtonStyle.green, disabled=False, emoji='⬇️', row=1) # 🆙
+    @discord.ui.button(label='HD', style=discord.ButtonStyle.green, disabled=True, emoji='⬇️', row=1) # 🆙
     async def upsample_button(self, interaction:discord.Interaction, button: discord.ui.Button):
         # TODO: Maybe just make it a toggle? like -- red: HD (off), green: HD (on)
         await interaction.response.defer(thinking=True)
         # print(interaction.message.attachments)
         kwargs = self.kwargs.copy()
-        imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
+        #imgen = self.call_ctx.bot.get_cog(self.call_ctx.cog.qualified_name)
         kwargs['imgurl'] = self.message.attachments[0].url
-        kwargs['imgfile'] = self.message.attachments[0]
+        #kwargs['imgfile'] = self.message.attachments[0]
         
         if (ref_strength := kwargs.get('refine_strength')) is None:
             ref_strength = 0.30
         
-        
+        index = self.cur_imgnum-1
+
         hd_kwargs = {
             'imgurl': self.message.attachments[0].url,
             'prompt': kwargs.get('prompt'),
-            'imgfile': self.message.attachments[0],
+            'imgfile': self.images[index], # bypass the download
             'refine_strength': ref_strength,
             'steps': kwargs.get('steps'),
             'negative_prompt':kwargs.get('negative_prompt'),
@@ -341,7 +355,7 @@ class DrawUIView(discord.ui.View):
         #kwargs.pop('aspect', None)
         print(self.call_ctx.args)
         #image, fpath = await self.call_ctx.invoke(imgen.hd_upsample, *self.call_ctx.args, **kwargs)
-        image, fpath = await self.call_ctx.invoke(imgen.hd_upsample, *self.call_ctx.args, **hd_kwargs)
+        image, fpath = await self.call_ctx.invoke(self.imgen.hd_upsample, *self.call_ctx.args, **hd_kwargs)
         
         #await interaction.followup.send(file=to_bytes_file(image_file, kwargs['prompt']))
         ifile = imgutil.to_bytes_file(image, kwargs['prompt'], ext='PNG')
@@ -351,6 +365,7 @@ class DrawUIView(discord.ui.View):
         
         # await self.upsample_thread.send(file=ifile)
 
+        # TODO: this would break if > 10 upsamples
         if self.upsample_message is None:
             self.upsample_message = await self.message.reply(file=ifile)
         else:
@@ -373,11 +388,18 @@ class DrawUIView(discord.ui.View):
         # button.disabled = False # already handled in button_update
         button.emoji = '↗️'        
         
-        if self.n_images <= 10:
-            files = [imgutil.to_bfile(img, att.filename, att.description) for img,att in zip(self.images,self.attachments)]#attach.to_file() for attach in self.attachments]
-            self.message = await self.message.edit(content='',attachments=files, view=ImageGridView(self))
+        if self.img_count <= 10:
+            files = [imgutil.to_bfile(img, filestem=fpath.stem, description=kwargs['prompt']) for img,fpath,kwargs in zip(self.images, self.local_paths, self.kwarg_sets)]
+            #self.message = await self.message.edit(content='',attachments=files, view=ImageGridView(self))
+            self.message = await self.message.edit(attachments=files, view=ImageGridView(self))
         else:
-            filestems, descriptions = list(zip(*[(Path(at.filename).stem, at.description) for at in self.attachments]))
+            filestems, descriptions = [], []
+            for fpath, kwargs in zip(self.local_paths, self.kwarg_sets):
+                filestems.append(fpath.stem)
+                descriptions.append(kwargs['prompt'])
+
+            #list(zip(*[(fpath.stem, kwargs['prompt']) for fpath,kwargs in zip(self.local_paths, self.kwarg_sets)]))
+
             view = PagedImageGridView(self, images=self.images, filestems=filestems, descriptions=descriptions)
             self.message = await view.send(message=self.message)
 
@@ -393,6 +415,7 @@ class GifUIView(discord.ui.View):
         self.optimized_images = None
     
     async def on_timeout(self) -> None:
+        print(f'{self.__class__.__name__} Timeout:', datetime.datetime.now())
         for item in self.children:
             item.disabled = True
         self.clear_items()
@@ -445,7 +468,7 @@ class GifUIView(discord.ui.View):
         button.disabled = False
         button.emoji = '↗️'
         
-        view = PagedImageGridView(self, images=self.images, filestems=[str(self.gif_filepath.stem)]*len(self.images), descriptions=None)
+        view = PagedImageGridView(self, images=self.images, filestems=[str(self.gif_filepath.stem)]*len(self.images), descriptions=None, timeout=self.timeout)
         self.message = await view.send(self.message)
         
 
@@ -457,6 +480,7 @@ class ImageGridView(discord.ui.View):
         self.prev_view = prev_view
     
     async def on_timeout(self) -> None:
+        print(f'{self.__class__.__name__} Timeout:', datetime.datetime.now())
         for item in self.children:
             item.disabled = True
         self.clear_items().stop()
@@ -487,12 +511,13 @@ class PagedImageGridView(discord.ui.View):
 
     async def send(self, message: discord.Message):
         self.message = message
-        self.message = await self.send_fullsize()
+        await self.send_fullsize()
         return self.message
     
     def _init_buttons(self):
         if self.prev_view is None:
             self.collapse_button.disabled = True
+        
         self.prev_button.disabled = self.n_batches < 2 # (self.cur_imgnum <= 1)
         self.next_button.disabled = self.n_batches < 2 # (self.cur_imgnum >= self.n_images)
         self.update_buttons()
@@ -505,14 +530,14 @@ class PagedImageGridView(discord.ui.View):
             descriptions = [None]*n_images
 
         image_attrs = [{'image':img, 'fstem':stem, 'desc':desc} for img,stem,desc in zip(images, filestems, descriptions)]
-        image_attrs_batches = list(imgutil.batched(image_attrs, n = self.max_grid_images))
+        image_attrs_batches = list(comutil.batched(image_attrs, n = self.max_grid_images))
 
         thumb_attrs = [{'image':img, 'fstem':stem, 'desc':desc} for img,stem,desc in zip(
             imgutil.to_thumbnails(images, max_size=(256,256)), 
             [f'{fs}_thb_{i}' for i,fs in enumerate(filestems)], 
             descriptions)]
 
-        thumb_attrs_batches = list(imgutil.batched(thumb_attrs, n = self.max_grid_images))
+        thumb_attrs_batches = list(comutil.batched(thumb_attrs, n = self.max_grid_images))
 
         return image_attrs_batches, thumb_attrs_batches
 
@@ -530,11 +555,13 @@ class PagedImageGridView(discord.ui.View):
         
 
     async def on_timeout(self) -> None:
+        print(f'{self.__class__.__name__} Timeout:', datetime.datetime.now())
         # https://discordpy.readthedocs.io/en/stable/faq.html#how-can-i-disable-all-items-on-timeout
         self.freeze()
         self.clear_items()
-        self.message = await self.message.edit(view=self)
-        self.stop()
+        await self.message.edit(view=self)
+        #self.message = await self.message.edit(view=self)
+        #self.stop()
         #del self.image_attrs_batches
         
     
@@ -547,27 +574,54 @@ class PagedImageGridView(discord.ui.View):
         #self.collapse_button.disabled = False
         self.counter_button.label = f'({self.cur_batchnum} / {self.n_batches})'
     
-    def file_batch(self, img_batch, ext, **kwargs):
-        # https://docs.python.org/3/library/asyncio-task.html#running-in-threads
-        return [imgutil.to_discord_file(img_attr['image'], img_attr['fstem'], img_attr['desc'], ext=ext, **kwargs) for img_attr in img_batch]
-        #return [await asyncio.to_thread(imgutil.to_discord_file, image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext=ext, **kwargs) for img_attr in img_batch]
+    async def file_coro(self, img_attr:dict, ext:str, **kwargs):
+        return imgutil.to_discord_file(image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext=ext, **kwargs)
+    
+    async def async_file_batch(self, img_thumbnails:bool, ext:str, **kwargs):
+        index = self.cur_batchnum-1
+        img_batch = self.thumb_attrs_batches[index] if img_thumbnails else self.image_attrs_batches[index]
+        #try:
+        for img_attr in img_batch:
+            #task=asyncio.create_task(asyncio.to_thread(imgutil.to_discord_file, image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext=ext, **kwargs))
+            
+            #yield asyncio.to_thread(imgutil.to_discord_file, image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext=ext, **kwargs)
+            yield imgutil.to_discord_file(image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext=ext, **kwargs)
+
+    
     
     async def send_thumbnails(self):
-        index = self.cur_batchnum-1
-        thumb_batch = self.thumb_attrs_batches[index]
+        #index = self.cur_batchnum-1
+        #thumb_batch = self.thumb_attrs_batches[index]
         #img_files = [imgutil.to_discord_file(thb_attr['image'], thb_attr['fstem'], thb_attr['desc'], ext='JPEG', optimize=True, quality=50) for thb_attr in thumb_batch]
-        img_files = await asyncio.to_thread(self.file_batch, img_batch = thumb_batch, ext='JPEG', optimize=False, quality=30)
-        return await self.message.edit(attachments=img_files, view=self)
+        #img_files = await asyncio.to_thread(self.file_batch, img_batch = thumb_batch, ext='JPEG', optimize=False, quality=30)
+        
+       
+        #img_files = [await file async for file in self.async_file_batch(img_thumbnails=True, ext='JPEG', optimize=False, quality=30)]
+        img_files = [file async for file in self.async_file_batch(img_thumbnails=True, ext='JPEG', optimize=False, quality=30)]
+        
+        #async for img_attr in self.async_img_batch(thumbnails=True):
+        #    img_files.append(imgutil.to_discord_file(image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext='JPEG', optimize=False, quality=30))
+        #img_files = await self.file_batch( img_batch = thumb_batch, ext='JPEG', optimize=False, quality=30) #asyncio.to_thread(self.file_batch, img_batch = thumb_batch, ext='JPEG', optimize=False, quality=30)
+
+        self.message = await self.message.edit(attachments=img_files, view=self)
+        
     
 
     async def send_fullsize(self):
-        index = self.cur_batchnum-1
-        img_batch = self.image_attrs_batches[index]
+        #print('sending full size')
+        #index = self.cur_batchnum-1
+        #img_batch = self.image_attrs_batches[index]
         ##self.message = await self.message.edit(attachments=[], view=self)
         #img_files = [imgutil.to_discord_file(img_attr['image'], img_attr['fstem'], img_attr['desc'], ext='WebP') for img_attr in img_batch] #  lossless=True, quality=0
-
-        img_files = await asyncio.to_thread(self.file_batch, img_batch = img_batch, ext='WebP')
-        return await self.message.edit(attachments=img_files, view=self)
+        
+        #img_files = [await file async for file in self.async_file_batch(img_thumbnails=False, ext='WebP')] #  lossless=True, quality=0
+        img_files = [file async for file in self.async_file_batch(img_thumbnails=False, ext='WebP')] #  lossless=True, quality=0
+        
+        #img_files = [imgutil.to_discord_file(image=img_attr['image'], filestem=img_attr['fstem'], description=img_attr['desc'], ext='WebP') async for img_attr in self.async_img_batch(False)]
+        #img_files = await self.file_batch(img_batch = img_batch, ext='WebP')
+        #img_files = await asyncio.to_thread(self.file_batch, img_batch = img_batch, ext='WebP')
+        self.message = await self.message.edit(attachments=img_files, view=self)
+        
 
     async def update_ui(self, interaction:discord.Interaction):
         self.interrupt_refresh()
@@ -575,12 +629,13 @@ class PagedImageGridView(discord.ui.View):
         self.update_buttons()
         # img_files = [imgutil.to_bfile(img, fname, desc) for img,fname,desc in self.thumb_attrs_batches[self.cur_batchnum-1]]
         # img_files = [imgutil.to_discord_file(img, None, None) for img,fname,desc in self.thumb_attrs_batches[self.cur_batchnum-1]]
-        self.message = await self.send_thumbnails()
+        await self.send_thumbnails()
         #await interaction.response.edit_message(view=self)
         
         #self.message = await self.message.edit(view=self)
-        
+        #self.display_timer = asyncio.get_event_loop().call_later(self.page_update_delay,self.refresh)
         self.display_timer = asyncio.create_task(self.refresh())
+        
 
     async def refresh(self, delay:float = None):
         if delay is None:
@@ -588,7 +643,8 @@ class PagedImageGridView(discord.ui.View):
                 
         await asyncio.sleep(delay)
         
-        self.message = await self.send_fullsize()
+        await self.send_fullsize()
+        return self.message
         #return self.message
         #return await self.refresh(files)
         
@@ -597,16 +653,19 @@ class PagedImageGridView(discord.ui.View):
         self.freeze() # Need this or clicking an arrow will make the view comeback
         button.disabled = True
         button.emoji = '⏳'
-        await interaction.response.defer()
-        self.message = await self.message.edit(view=self)
+        await interaction.response.edit_message(view=self)
+        #await interaction.response.defer()
+        #self.message = await self.message.edit(view=self)
         #await interaction.response.edit_message(view=self)
         
         #await interaction.response.defer()
         #self.message = await self.previous_view.refresh()
         
         #return await self.prev_view.refresh()
-        self.message = await self.prev_view.refresh()
-        
+        return await self.prev_view.refresh()
+        #self.message = await self.prev_view.refresh()
+        #button.disabled = False
+        #button.emoji = '↙️'
         #await self.on_timeout()
         #await interaction.delete_original_response()
         #self.message = await self.previous_view.refresh()
