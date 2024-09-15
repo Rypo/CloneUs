@@ -4,6 +4,7 @@ import re
 import io
 import math
 import time
+import random
 import typing
 import itertools
 import functools
@@ -262,6 +263,14 @@ def discretize_strengths(steps:int, nframes:int, start:float=0.3, end:float=0.8,
     return strengths
 
 def rebatch_prompt_embs(emb_prompts:dict[str, torch.Tensor], batch_size:int):
+    cur_bz = emb_prompts[next(iter(emb_prompts))].size(0)
+    if cur_bz == batch_size:
+        return emb_prompts
+    
+    # most common case, no need to expand
+    if batch_size < cur_bz: 
+        return {k: v[:batch_size,...] for k,v in emb_prompts.items()}
+    
     rebatched_prombs = {}
     for k,v in emb_prompts.items():
         non_batch_dims = [-1]*(v.ndim - 1)
@@ -269,10 +278,27 @@ def rebatch_prompt_embs(emb_prompts:dict[str, torch.Tensor], batch_size:int):
             
     return rebatched_prombs
 
-def generator_batch(seed:int|None, batch_size:int, device='cpu'):
-    if seed is not None:
-        return [torch.Generator(device=device).manual_seed(seed) for _ in range(batch_size)]
-    return None
+def generator_batch(seed:int|list[int]|None, num_seeds:int, device='cpu', all_unique:bool=False):
+    if seed is None:
+        return None
+    
+    if isinstance(seed, int):
+        seeds = [seed]*num_seeds
+    
+    else:
+        seeds = seed
+        # given the exact same params, you can use 1 generator to reproduce. 
+        # But if you change how you iterate over inputs, outputs with differ. This controls for that.
+        
+        if (unqlen := len(set(seeds))) != num_seeds:
+            raise ValueError(f'If `seed` is a list of ints, it must have `num_seeds` ({num_seeds}) unique elements but only ({unqlen}) unique seeds passed')
+        #seeds = seed
+        #seeds = [seed + i for i in range(batch_size)]
+
+
+    return [torch.Generator(device=device).manual_seed(s) for s in seeds]
+
+    
     
 
 def get_scheduler(alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], init_sched_config:dict, **kwargs):
@@ -327,20 +353,24 @@ class DeepCacheMixin:
         #self.dc_basei2i.set_params(cache_interval=3, cache_branch_id=0)
         #self._dc_basei2i = TgateSDXLDeepCacheLoader(self.basei2i, cache_interval=3, cache_branch_id=0)
         #self.dc_basei2i = functools.partial(self._dc_basei2i.tgate, gate_step=10)
-
-        self.dc_enabled = False
+        self.dc_base.enable()
+        self.dc_enabled = True
         
     def dc_fastmode(self, enable:bool, img2img=False):
         # TODO: This will break under various conditions
         # if min_effective_steps (steps*strength < 5) refine breaks?
         # e.g. refine_strength=0.3, steps < 25 / refine_strength=0.4, steps < 20
-        if enable:
-            if self.dc_enabled is None:
-                self._setup_dc()
-            self.dc_base.enable()
-        elif self.dc_enabled:
-            self.dc_base.disable()
-        self.dc_enabled=enable
+
+        # NOTE: if you call enable when already enabled, it will crash and burn
+        if self.dc_enabled is None:
+            if enable: self._setup_dc()
+        elif self.dc_enabled != enable:
+            # it's already been set up and states are in disagreement
+            if enable: self.dc_base.enable()
+            else: self.dc_base.disable()
+            self.dc_enabled = enable
+        
+        # self.dc_enabled=enable
         # if enable != self.dc_enabled:
         #     if enable:
         #         self.dc_base.enable()
@@ -497,56 +527,7 @@ class SingleStagePipeline:
         print('All Adapters:', self.base.get_list_adapters())
         return lora_scale
 
-    @torch.inference_mode()
-    def pipeline(self, prompt, num_inference_steps, negative_prompt=None, guidance_scale=None, detail_weight=None, strength=None,  refine_strength=None, image=None, target_size=None, seed=None):
-            
-        t0 = time.perf_counter()
 
-        lora_scale = self.toggle_loras(detail_weight)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
-        torch.cuda.empty_cache()
-
-        t_pe = time.perf_counter()
-        t_main = t_pe # default in case skip
-        mlabel = '_2I'
-        # Txt2Img
-        if image is None: 
-            image = self._pipe_txt2img(prompt_encodings, num_inference_steps, guidance_scale, target_size, seed)
-            t_main = time.perf_counter()
-            print_memstats('draw')
-            mlabel = 'T2I'
-        
-        # Img2Img - not just else because could pass image with str=0 to just up+refine. But should never be image=None + strength
-        elif strength:
-            image = self._pipe_img2img(image, prompt_encodings, num_inference_steps, strength, guidance_scale, seed)
-            t_main = time.perf_counter()
-            print_memstats('redraw')
-            mlabel = 'I2I'
-            
-        t_up = t_re = t_main  # default in case skip
-        # Upscale + Refine - must be up->refine. refine->up does not improve quality
-        if refine_strength: 
-            # NOTE: this will use the models default num_steps every time since "steps" isnt a param in HD
-            # all this does is ensure that at least `refine_steps` steps occurs given `refine_strength`
-            # most of the time (high default `num_inference_steps`) it = num_inference_steps
-            # it only maters for very low default steps (~ 4)
-            #esteps_refine = calc_esteps(num_inference_steps, refine_strength, min_effective_steps=refine_steps)
-            image = self.upsample(image, scale=1.5)[0]
-            t_up = time.perf_counter()
-            print_memstats('upscale')
-            torch.cuda.empty_cache()
-
-            image = self._pipe_img2img(image, prompt_encodings, num_inference_steps, refine_strength, guidance_scale, seed)
-            t_re = time.perf_counter()
-            print_memstats('refine')
-        
-        t_fi = time.perf_counter()
-        #release_memory()
-        torch.cuda.empty_cache()
-        
-        print(f'total: {t_fi-t0:.2f}s | prompt_embed: {t_pe-t0:.2f}s | {mlabel}: {t_main-t_pe:.2f}s | upscale: {t_up-t_main:.2f}s | refine: {t_re-t_up:.2f}s')
-        return image
-    
     @torch.inference_mode()
     def _pipe_txt2img(self, prompt_encodings:dict, num_inference_steps:int, guidance_scale:float, target_size:tuple[int,int], seed=None):
         gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
@@ -556,7 +537,7 @@ class SingleStagePipeline:
         return image
 
     @torch.inference_mode()
-    def _pipe_img2img(self, image:Image.Image, prompt_encodings:dict, num_inference_steps:int, strength:float, guidance_scale:float, seed=None):
+    def _pipe_img2img(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, strength:float, guidance_scale:float, seed=None):
         gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
         w,h = image.size
         #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
@@ -566,20 +547,76 @@ class SingleStagePipeline:
         return image
 
     @torch.inference_mode()
-    def _pipe_img2upimg(self, image:Image.Image, prompt_encodings:dict, num_inference_steps:int, refine_strength:float, guidance_scale:float, seed=None, scale=1.5):
+    def _pipe_img2upimg(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, refine_strength:float, guidance_scale:float, seed=None, scale=1.5):
         image = self.upsample(image, scale=scale)[0]
         print('upsized (w,h):', image.size)
         torch.cuda.empty_cache()
 
-        return self._pipe_img2img(image, prompt_encodings, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
-
+        return self._pipe_img2img(prompt_encodings, image, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
     
+    @torch.inference_mode()
+    def _batched_txt2img(self, prompts_encodings:dict[str, torch.Tensor], num_images:int, batch_size:int, num_inference_steps:int, guidance_scale:float, target_size:tuple[int, int], seed:list[int]|None, output_type:str='pil'):
+        generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
+        if generators is None:
+            generators = [None]*num_images
+        h,w = target_size
+
+        batch_size = min(num_images, batch_size)
+        batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+
+
+        for gen_batch in batched(generators, batch_size):
+            if (batch_len := len(gen_batch)) != batch_size:
+               batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
+            
+            if gen_batch[0] is None:
+                gen_batch = None
+            
+            images = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type,).images
+            
+            if output_type != 'latent':
+                torch.cuda.empty_cache()
+            
+            yield images
+
+    @torch.inference_mode()
+    def _batched_img2img(self, prompts_encodings:dict[str, torch.Tensor], image:Image.Image, num_images:int, batch_size:int, num_inference_steps:int, strength:float, guidance_scale:float, seed:list[int]|None, output_type:str='pil'):
+        generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
+        if generators is None:
+            generators = [None]*num_images
+        w,h = image.size
+
+        batch_size = min(num_images, batch_size)
+        batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+        
+        # n_full_batches,final_batch_size = divmod(num_images, batch_size)
+        # batch_lengths = [batch_size]*n_full_batches
+        # if final_batch_size:
+        #     batch_lengths.append(final_batch_size)
+        
+        # gen_batch = generators
+        for gen_batch in batched(generators, batch_size):
+            if (batch_len := len(gen_batch)) != batch_size:
+                batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
+            if gen_batch[0] is None:
+                gen_batch = None
+            #if generators is not None:
+            #    gen_batch, generators = generators[:batch_len], generators[batch_len:] # pop slice
+            
+            images = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type).images 
+            
+            if output_type != 'latent':
+                torch.cuda.empty_cache()
+
+            yield images
+
     def _resize_image(self, image:Image.Image, aspect = None, dim_choices = None):
-        if aspect is None:
-            dim_out = self.config.nearest_dims(image.size, dim_choices=dim_choices, use_hf_sbr=False) 
-        else:
-            dim_out = self.config.get_dims(aspect) 
-        print('_prepare_image input size:', image.size, '->', dim_out)
+        dim_out = self.config.nearest_dims(image.size, dim_choices=dim_choices, use_hf_sbr=False)
+        if aspect is not None:
+             dim_out = self.config.get_dims(aspect) 
+        #else:
+            
+        print('_resize_image input size:', image.size, '->', dim_out)
         
         image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
         return image
@@ -605,11 +642,12 @@ class SingleStagePipeline:
             resized_images = [Image.fromarray(imarr).resize(dim_out, resample=Image.Resampling.LANCZOS) for imarr in frame_array]
         
         
-        print('regenerate_frames input size:', init_wh, '->', dim_out)
+        print('_resize_image_frames input size:', init_wh, '->', dim_out)
         return resized_images
 
     @torch.inference_mode()
     def generate_image(self, prompt:str, 
+                       n_images:int=1,
                        steps:int=None, 
                        negative_prompt:str=None, 
                        guidance_scale:float=None, 
@@ -617,14 +655,13 @@ class SingleStagePipeline:
                        aspect:typing.Literal['square','portrait','landscape']=None, 
                        refine_strength:float=None, 
                        seed:int = None,
-                       **kwargs) -> tuple[Image.Image, dict]:
+                       **kwargs): 
         
         fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
         steps = fkwg['steps']
         guidance_scale = fkwg['guidance_scale']
         negative_prompt=fkwg['negative_prompt']
         aspect = fkwg['aspect']
-
         print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
 
         img_dims = self.config.get_dims(aspect)
@@ -633,18 +670,33 @@ class SingleStagePipeline:
 
         lora_scale = self.toggle_loras(detail_weight)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
-        
-        image = self._pipe_txt2img(prompt_encodings, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seed)
-        if refine_strength:
-            image = self._pipe_img2upimg(image, prompt_encodings, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
-
 
         call_kwargs = dict(prompt=prompt, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                           detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength,  seed=seed)
-        return image, call_kwargs
+                           detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed)
+                
+        if n_images > 1:
+            _,BSZ = self.batch_settings('full')
+            np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
+            # could technically fail, but heat death of universe seems more likely
+            seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
+
+            call_kwargsets = [{**call_kwargs, 'seed':s} for s in seeds]
+
+            batchgen = self._batched_txt2img(prompt_encodings, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seeds, output_type='pil')
+            
+            for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
+                yield (imbatch, kwbatch)
+        else:
+            image = self._pipe_txt2img(prompt_encodings, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seed)
+            if refine_strength:
+                image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
+            yield ([image], [call_kwargs])
+        
+        release_memory()
 
     @torch.inference_mode()
     def regenerate_image(self, prompt: str, image: Image.Image,  
+                         n_images: int = 1,
                          steps: int = None, 
                          strength: float = None, 
                          negative_prompt: str = None, 
@@ -654,7 +706,7 @@ class SingleStagePipeline:
                          
                          refine_strength: float = None, 
                          seed: int = None,
-                         **kwargs) -> tuple[Image.Image, dict]:
+                         **kwargs):
         
         fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, )
         
@@ -662,7 +714,6 @@ class SingleStagePipeline:
         guidance_scale = fkwg['guidance_scale']
         negative_prompt=fkwg['negative_prompt']
         strength = fkwg['strength']
-
         print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
         # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
@@ -672,16 +723,31 @@ class SingleStagePipeline:
         lora_scale = self.toggle_loras(detail_weight)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
         
-
-        image = self._pipe_img2img(image, prompt_encodings, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seed)
-        if refine_strength:
-            image = self._pipe_img2upimg(image, prompt_encodings, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
-        
-        #image = self.pipeline(**call_kwargs)
-        call_kwargs = dict(prompt=prompt, image=image, steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
+        # don't want to pass around full image, going to replace with image_url in imagegen anyway
+        call_kwargs = dict(prompt=prompt, image='PLACEHOLDER', steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
                            detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed,)
+        
+        
+        if n_images > 1:
+            _,BSZ = self.batch_settings('full')
+            np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
+            seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
+            #seeds = [seed + i for i in range(n_images)]
+            call_kwargsets = [{**call_kwargs, 'seed':s} for s in seeds]
+            
+            batchgen = self._batched_img2img(prompt_encodings, image, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seeds, output_type='pil')
+            
+            for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
+                yield (imbatch, kwbatch)
+        else:
+            image = self._pipe_img2img(prompt_encodings, image, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seed)
+            if refine_strength:
+                image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
+            
+            yield ([image], [call_kwargs])
 
-        return image, call_kwargs
+        release_memory()
+        #return image, call_kwargs
     
     @torch.inference_mode()
     def refine_image(self, image: Image.Image,
@@ -701,16 +767,16 @@ class SingleStagePipeline:
         negative_prompt=fkwg['negative_prompt']
 
         print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
-        image = self._resize_image(image) # Resize to best dim match
+        image = self._resize_image(image, aspect=None, dim_choices=None) # Resize to best dim match
 
         lora_scale = self.toggle_loras(detail_weight)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
 
-        image = self._pipe_img2upimg(image, prompt_encodings, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
+        image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
         
-
         call_kwargs = dict(image=image, prompt=prompt, refine_strength=refine_strength, steps=steps, negative_prompt=negative_prompt, 
                            guidance_scale=guidance_scale, detail_weight=detail_weight, seed=seed,)
+        release_memory()
         return image, call_kwargs
     
     @torch.inference_mode()
@@ -764,11 +830,7 @@ class SingleStagePipeline:
             # round up strengths since they will be floored in get_timesteps via int()
             # and it makes step distribution more uniform for lightning models
             image = self._resize_image(image, aspect=aspect, dim_choices=SDXL_DIMS)
-            #img_wh = image.size
-            #dim_choices=SDXL_DIMS # None
-            #dim_out = self.config.nearest_dims(img_wh, dim_choices=dim_choices, scale=1.0, use_hf_sbr=False)
-            #print('regenerate_frames input size:', img_wh, '->', dim_out)
-            #image = image.resize(dim_out, resample=Image.Resampling.LANCZOS) 
+
             image_frames.append(image)
             w,h = image.size
         
@@ -783,13 +845,18 @@ class SingleStagePipeline:
             
         image_frames += self.decode_latents(latents, height=h, width=w, )
         # FIXME: this is producing waay to many frames. set nframes=20 and you'll get like 60
+        # 5 -> 33
+        # 10 -> 36
+        # 15 -> 42
+        # 20 -> 57
+        # 25 -> 72
         image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
         yield image_frames
         release_memory()
     
 
     @torch.inference_mode()
-    def _batched_img2img(self, images:list[Image.Image]|torch.Tensor, prompts_encodings:dict[str, torch.Tensor], batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
+    def _batched_imgs2imgs(self, prompts_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
         batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
         batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
         w,h = img_wh # need wh in case `images` is a batch of latents
@@ -856,7 +923,7 @@ class SingleStagePipeline:
 
         latents = []
         t0 = time.perf_counter()
-        for img_lats in self._batched_img2img(resized_images, prompts_encodings, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+        for img_lats in self._batched_imgs2imgs(prompts_encodings, resized_images, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
             latents.append(img_lats)
             yield len(img_lats)
  
@@ -867,7 +934,7 @@ class SingleStagePipeline:
             latent_blend = self._interpolate_latents(raw_image_latents, latents, latent_soft_mask, dim_out, time_blend=True, keep_dims=True)
             
             latents = []
-            for img_lats in self._batched_img2img(latent_blend, prompts_encodings, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+            for img_lats in self._batched_imgs2imgs(prompts_encodings, latent_blend, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
                 latents.append(img_lats)
                 yield len(img_lats)
             
