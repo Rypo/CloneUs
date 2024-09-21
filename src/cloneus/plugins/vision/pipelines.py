@@ -119,8 +119,6 @@ class DiffusionConfig:
     aspect: typing.Literal['square','portrait','landscape'] = 'square'
     clip_skip: int = None
     
-    #denoise_blend: float = None
-    
     img_dims: tuple[int, int]|list[tuple[int, int]] = (1024, 1024)
     refine_guidance_scale: float = None
     _ : KW_ONLY
@@ -676,6 +674,11 @@ class SingleStagePipeline:
                 
         if n_images > 1:
             _,BSZ = self.batch_settings('full')
+            if n_images <= 10:
+                BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
+            elif n_images > 20:
+                BSZ *= 2
+
             np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
             # could technically fail, but heat death of universe seems more likely
             seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
@@ -730,6 +733,10 @@ class SingleStagePipeline:
         
         if n_images > 1:
             _,BSZ = self.batch_settings('full')
+            if n_images <= 10:
+                BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
+            elif n_images > 20:
+                BSZ *= 2
             np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
             seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
             #seeds = [seed + i for i in range(n_images)]
@@ -1057,16 +1064,17 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
             negative_prompt = [negative_prompt]#*batch_size
         
         prompt_encodings = {}
-        
-        if set(prompt) & set('()-+'):
+        compel_tokens = set('()-+')
+
+        if set(prompt) & compel_tokens:
             conditioning, pooled = self.compeler(prompt)
             prompt_encodings.update(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
             prompt = None
 
-            if negative_prompt is not None:
-                neg_conditioning, neg_pooled = self.compeler(negative_prompt)
-                prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
-                negative_prompt = None
+        if negative_prompt is not None and set(negative_prompt) & compel_tokens:
+            neg_conditioning, neg_pooled = self.compeler(negative_prompt)
+            prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
+            negative_prompt = None
             
 
         (p_emb, neg_p_emb, pooled_p_emb, neg_pooled_p_emb) = self.base.encode_prompt(
