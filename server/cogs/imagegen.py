@@ -36,7 +36,7 @@ event_logger = settings.logging.getLogger('event')
 
 # IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 # PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
-GUI_TIMEOUT = 5*60
+GUI_TIMEOUT = 10*60 # NOTE: limit is 15 minutes unless fixed
 
 
 class Autocorrect:
@@ -45,11 +45,13 @@ class Autocorrect:
         from cloneus import cpaths
         self.corrector = jamspell.TSpellCorrector()
         self.corrector.LoadLangModel(str(cpaths.ROOT_DIR/model_relpath))
-        self.blacklist = set()
+        self.ignored_texts = set()
+        self.ignored_words = set()
 
     def __call__(self, text:str) -> tuple[str, bool]:
-        fixed_text = self.corrector.FixFragment(text)
-        return fixed_text, fixed_text!=text
+        return self.filtered_correction(text=text)
+        #fixed_text = self.corrector.FixFragment(text)
+        #return fixed_text, fixed_text!=text
 
     def correct(self, text:str):
         return self.corrector.FixFragment(text)
@@ -57,8 +59,49 @@ class Autocorrect:
     def check(self, text:str):
         return self.corrector.FixFragment(text) != text
     
-    def ban_text(self, text):
-        self.blacklist.add(text)
+    def filtered_correction(self, text:str):
+        # whole phrase ignored
+        if text in self.ignored_texts:
+            return text, False
+        
+        new_text = self.correct(text)
+        
+        # no corrections
+        if new_text == text:
+            return text, False
+        
+        corrections,nfilt = self.get_corrections(text, new_text, filter_ignored=True)
+        
+        # all corrections filtered
+        if not corrections:
+            return text, False
+        
+        # no correction filtered
+        if nfilt == 0:
+            return new_text, True
+        
+        # some filtered, some not
+        new_text = text
+        for o,n in corrections:
+            new_text = new_text.replace(o, n)
+        
+        return new_text, True
+
+
+    def ban_texts(self, old:str, new:str):
+        self.ignored_texts.add(old)
+
+        corrected,_ = self.get_corrections(old, new)
+        for o,_ in corrected:
+            self.ignored_words.add(o)
+        
+    def get_corrections(self, old:str, new:str, filter_ignored:bool = True):
+        corrections = [(o,n) for o,n in zip(old.split(), new.split()) if o != n]
+        n_chg = len(corrections)
+        if filter_ignored:
+            corrections = list(filter(lambda o_: o_[0] not in self.ignored_words, corrections))
+        n_filtered = n_chg - len(corrections)
+        return corrections, n_filtered
 
     @staticmethod
     def show_diff(old:str, new:str):
@@ -70,6 +113,8 @@ class Autocorrect:
                 diffed.append(oword)
 
         return ' '.join(diffed)
+
+
 class SetImageConfig:
     bot: BotUs
     igen: imgman.BaseSDXLManager|imgman.BaseFluxManager|imgman.BaseSD3Manager
@@ -87,7 +132,7 @@ class SetImageConfig:
     
     @isetarg.command(name='model', aliases=['artist',])
     @app_commands.choices(version=cmd_choices.IMAGE_MODELS)
-    async def iset_model(self, ctx: commands.Context, version: app_commands.Choice[str], offload: bool=True):
+    async def iset_model(self, ctx: commands.Context, version: app_commands.Choice[str], offload: bool=False):
         '''Loads in the image generation model
         
         Args:
@@ -107,15 +152,6 @@ class SetImageConfig:
         else:
             await ctx.send(f'{version.name} already up')
 
-    # @isetarg.command(name='seed', aliases=['iseed','imgseed', 'imageseed'])
-    # async def iset_seed(self, ctx: commands.Context, seed:int = None):
-    #     '''Set image model seed for deterministic output
-        
-    #     Args:
-    #         seed: A number to seed generation for all future outputs  
-    #     '''
-    #     self.igen.set_seed(seed=seed)
-    #     return await ctx.send(f'Global image seed set to {seed}. Welcome to the land of {"non-" if seed is None else ""}determinisim')
 
     async def scheduler_autocomplete(self, interaction: discord.Interaction, current: str,) -> list[app_commands.Choice[str]]:
         if not self.igen.is_ready:
@@ -141,9 +177,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     
     def __init__(self, bot: BotUs):
         self.bot = bot
-        # self.igen = imgman.ColorfulXLLightningManager(offload=True)
+        #self.igen = imgman.ColorfulXLLightningManager(offload=False)
         # self.igen = imgman.FluxSchnevManager(offload=False)
         self.igen = imgman.JuggernautXIManager(offload=False)
+        #self.igen = imgman.RealVizXL5Manager(offload=False)
         self.spell_check = Autocorrect()
         
 
@@ -174,7 +211,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if prompt is None:
             return '', False
         
-        if check_spelling and prompt not in self.spell_check.blacklist:
+        if check_spelling:
             prompt, was_corrected = self.spell_check(prompt)
         
         if len(prompt) > 1000:
@@ -200,8 +237,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 return '<CANCEL>'
             keep_changes =  view.value or view.value is None
             if not keep_changes:
+                self.spell_check.ban_texts(prompt, prompt_new)
                 prompt_new,was_sp_corrected = self.fix_prompt(prompt, check_spelling=False)
-                self.spell_check.ban_text(prompt)
+                
             await msg.delete()
         return prompt_new
 
@@ -305,7 +343,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             aspect: Image aspect ratio (shape). square w=h = 1:1. portrait w<h = 13:19. Default='square'. 
             
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Default=0.
-            fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
+            fast: Trades image quality for speed - about 2-3x faster. Default=False.
             seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
         """
         # dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
@@ -320,7 +358,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                aspect = flags.aspect, 
                                
                                refine_strength = flags.hdstrength, 
-                               #denoise_blend = flags.dblend, 
                                fast = flags.fast,
                                seed = flags.seed,
                                _view = view
@@ -509,10 +546,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                            negative_prompt=negative_prompt, guidance_scale=guidance_scale,
                                                            detail_weight=detail_weight, seed=seed, )
             if needs_view:
-                msg = await ctx.send(file=imgutil.to_bytes_file(image, prompt=prompt, ext='PNG'))
-            out_imgpath = imgutil.save_image_prompt(image, prompt)
+                msg = await ctx.send(file=imgutil.to_bytes_file(image, prompt=prompt, ext='WebP', lossless=True))
+                out_imgpath = imgutil.save_image_prompt(image, prompt, ext='WebP', lossless=True)
 
-        return image, out_imgpath
+        return image
 
     @commands.hybrid_command(name='animate')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
@@ -547,9 +584,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                   guidance_scale = flags.guidance, 
                                   detail_weight = flags.detail,
                                   aspect = flags.aspect, 
-                                  #refine_steps = flags.hdsteps, 
-                                  #refine_strength = flags.hdstrength,
-                                  #denoise_blend = flags.dblend, 
                                   fast = flags.fast,
                                   seed = flags.seed)
     
@@ -609,7 +643,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
            
             if needs_view:
                 view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
-                msg = await view.send(msg, out_imgpath, prompt)
+                msg = await view.send(ctx, msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
         return image_frames, out_imgpath
@@ -644,9 +678,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                     guidance_scale = flags.guidance, 
                                     detail_weight= flags.detail,
                                     #aspect = flags.aspect, 
-                                    #refine_steps = flags.hdsteps, 
-                                    #refine_strength = flags.hdstrength,
-                                    #denoise_blend = flags.dblend, 
                                     two_stage = flags.stage2,
                                     fast = flags.fast,
                                     aseed = flags.aseed
@@ -722,7 +753,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
             if needs_view:
                 view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
-                msg = await view.send(msg, out_imgpath, prompt)
+                msg = await view.send(ctx, msg, out_imgpath, prompt)
             
         #out_imgpath = save_image_prompt(image, prompt)
         return image_frames, out_imgpath
