@@ -52,6 +52,11 @@ def percent_transform(value: float|None):
             value/=100.0
     return value
 
+def dash_to_empty(vstring:str|None):
+    '''Convert a single "-" into an empty string. Avoids autofill if None.'''
+    if vstring in ['-']:
+        return ""
+    return vstring
 
 #PercentTransform = typing.NewType('PercentTransform', app_commands.Transform[float, PercentTransformer])
 # https://github.com/Rapptz/discord.py/blob/bd402b486cc12f0c1bf7377fd65f2fe0a8fabd73/discord/app_commands/transformers.py#L514
