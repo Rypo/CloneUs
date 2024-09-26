@@ -30,6 +30,7 @@ import config.settings as settings
 IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
 THUMB_DIR = IMG_DIR.parent/'thumbnails'
+IMG_DIR.mkdir(parents=True, exist_ok=True)
 THUMB_DIR.mkdir(exist_ok=True)
 
 USER_AGENTS = [ # https://github.com/microlinkhq/top-user-agents/blob/master/src/desktop.json
@@ -57,46 +58,56 @@ USER_AGENTS = [ # https://github.com/microlinkhq/top-user-agents/blob/master/src
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 ]
 
-def batched(iterable, n:int):
-    '''https://docs.python.org/3/library/itertools.html#itertools.batched'''
-    # batched('ABCDEFG', 3) → ABC DEF G
-    
-    if n < 1:
-        raise ValueError('n must be at least one')
-    iterator = iter(iterable)
-    while batch := list(itertools.islice(iterator, n)):
-        yield batch
 
-
-
-def prompt_to_filename(prompt:str, suffix:str='png'):
+def prompt_to_filename(prompt:str, ext:typing.Literal['PNG','WebP','JPEG', 'GIF', 'MP4']='PNG', bidx:int=None):
+    suffix=f'.{ext.lower()}'
     tstamp=datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
-    fname = tstamp+'_'+(re.sub('[^\w -]+','', prompt).replace(' ','_')[:100])+f'.{suffix}'
+    prefix = tstamp+'_'
+    if bidx is not None:
+        prefix += f'{bidx:02d}_'
+    fname = prefix+(re.sub('[^\w -]+','', prompt).replace(' ','_')[:100])+suffix
     return fname
 
-def save_gif_prompt(frames:list[Image.Image], prompt:str, optimize:bool=False):
-    fname = prompt_to_filename(prompt, 'gif')
-    out_imgpath = IMG_DIR/fname
-    iio.imwrite(out_imgpath, frames, extension='.gif', loop=0)
+def prompt_to_fpath(prompt:str, ext:typing.Literal['PNG','WebP','JPEG', 'GIF', 'MP4']='WebP', bidx:int=None, *, writable:bool=False):
+    fname = prompt_to_filename(prompt, ext=ext, bidx=bidx)
     
-    if optimize:
-        pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
+    if writable:
+        date = datetime.date.today().strftime('%Y%m%d')
+        (IMG_DIR/date).mkdir(exist_ok=True, parents=True)
+        out_imgpath = IMG_DIR/date/fname
+        return out_imgpath
+    return Path(fname)
+
+def save_animation_prompt(frames:list[Image.Image], prompt:str, ext: typing.Literal['GIF','MP4']='MP4', optimize:bool=False,):
+    out_imgpath = prompt_to_fpath(prompt, ext=ext, bidx=None, writable=True)
+    sfx = f'.{ext.lower()}'
+    
+    if ext == 'GIF':
+        iio.imwrite(out_imgpath, frames, extension=sfx, loop=0)
+        if optimize:
+            pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
+    else:
+        iio.imwrite(out_imgpath, frames, extension=sfx, fps=10)
     
     with PROMPT_FILE.open('a') as f:
-        f.write(f'{fname} : {prompt!r}\n')
+        f.write(f'{out_imgpath.name} : {prompt!r}\n')
     
     return out_imgpath
 
-def save_image_prompt(image: Image.Image, prompt:str):
-    fname = prompt_to_filename(prompt, 'png')
-    out_imgpath = IMG_DIR/fname
+def save_image_prompt(image: Image.Image, prompt:str, ext:typing.Literal['PNG','WebP','JPEG']='PNG', bidx:int=None, **kwargs):
+    out_imgpath = prompt_to_fpath(prompt, ext=ext, bidx=bidx, writable=True)
 
-    image.save(out_imgpath)
+    image.save(out_imgpath, format=ext, **kwargs)
     
     with PROMPT_FILE.open('a') as f:
-        f.write(f'{fname} : {prompt!r}\n')
+        f.write(f'{out_imgpath.name} : {prompt!r}\n')
 
     return out_imgpath
+
+def to_thumb(image:Image.Image, max_size:tuple[int,int]=(256,256)):
+    img = image.copy()
+    img.thumbnail(max_size, Image.Resampling.BOX)
+    return img
 
 def to_thumbnails(images:list[Image.Image], max_size:tuple[int,int]=(256,256), out_filestems: list[str]=None) -> list[Image.Image]|list[Path]:
     out_imgs = [image.copy() for image in images]
@@ -117,10 +128,7 @@ def to_thumbnails(images:list[Image.Image], max_size:tuple[int,int]=(256,256), o
 
 
 def to_bytes_file(image:Image.Image, prompt: str, ext:typing.Literal['PNG','WebP','JPEG']='PNG', **kwargs):
-    sfx = 'jpg' if ext == 'JPEG' else ext.lower()
-        
-    #filename = f'image_{hash(image.tobytes())}.{sfx}' 
-    filename = prompt_to_filename(prompt, suffix=sfx)
+    filename = prompt_to_filename(prompt, ext=ext)
     with io.BytesIO() as imgbin:
         image.save(imgbin, format=ext, **kwargs)
         imgbin.seek(0)
@@ -150,34 +158,19 @@ def to_discord_file(image:Image.Image|str|Path, filestem:str=None, description:s
     
     return impath_to_file(img_path=image, description=description)
 
-def gif_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, **kwargs):
-    filename = filestem+'.gif' if filestem is not None else tempfile.NamedTemporaryFile(suffix='.gif').name
+def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, ext: typing.Literal['GIF','MP4']='GIF', **kwargs):
+    sfx = f'.{ext.lower()}'
+    filename = filestem+sfx if filestem is not None else tempfile.NamedTemporaryFile(suffix=sfx).name
     
     with io.BytesIO() as outbin:
-        iio.imwrite(outbin, image_frames, extension=".gif", loop=kwargs.pop('loop', 0), **kwargs)
+        if ext == 'GIF':
+            iio.imwrite(outbin, image_frames, extension=sfx, loop=kwargs.pop('loop', 0), **kwargs)
+        else:
+            iio.imwrite(outbin, image_frames, extension=sfx, fps=kwargs.pop('fps', 10), **kwargs)
+            # https://imageio.readthedocs.io/en/stable/_autosummary/imageio.plugins.ffmpeg.html#parameters-for-writing
         outbin.seek(0)
         return discord.File(fp=outbin, filename=filename, description=description)
 
-async def try_send_gif(msg:discord.Message, gif_filepath: Path, prompt: str, view: discord.ui.View = None):
-    size_limit = msg.guild.filesize_limit if msg.guild is not None else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES # 25*(1024**2)#2.5e7 # 25MB for non nitro
-    gif_bytes = Path(gif_filepath).stat().st_size
-    print(f'GIF SIZE: {gif_bytes/1e6:0.3f} MB')
-    optimized_images = None
-    if gif_bytes <= size_limit:
-        msg = await msg.edit(content='', attachments=[discord.File(fp=gif_filepath, filename=gif_filepath.name,  description=prompt)], view=view)
-    else:
-        msg = await msg.edit(content=f"Hwoo boy, that's a lotta pixels. Attempting compression...")
-        pygifsicle.optimize(gif_filepath)
-        optimized_images = iio.imread(gif_filepath)
-        try:
-            msg = await msg.edit(content='', attachments=[discord.File(fp=gif_filepath, filename=gif_filepath.name,  description=prompt)], view=view)
-        except discord.errors.HTTPException as e:
-            if e.status == 413:
-                # msg  = await msg.edit(content=f"Uh oh, plate is overflowing. Trying to scrape some off...")
-                msg  = await msg.edit(content=f"Still too big, maybe tone it down a bit next time.", view=view)
-            else:
-                raise e
-    return msg, optimized_images
 
 def tenor_fix(url: str):
     if not isinstance(url, str) or 'tenor' not in url:
@@ -204,6 +197,9 @@ def clean_discord_urls(url:str, verbose=False):
     # GIF: https://media.discordapp.net/attachments/.../XYZ.gif?ex=...&is=...&=&width=837&height=837
     # JPG: https://media.discordapp.net/attachments/.../.../XYZ.jpg?ex=...&is=...&hm=...&=&format=webp&width=396&height=836
     clean_url = url.split('&=&')[0] # gifs don't have a "format=", but both gifs and images have "&=&"
+    #clean_url = re.sub(r'&(?:width|height)=\d*','',url).strip('&')
+    #if '&format=' not in clean_url:
+    #    clean_url += '&=&format=webp&quality=lossless'
     clean_url = clean_url.split('format=')[0].rstrip('&=?')
     
     if verbose:
@@ -267,10 +263,10 @@ def convert_imgarr(image:np.ndarray, result_type:typing.Literal['PIL','np']|None
     if image.ndim < 4 or image.shape[0] < 2:
         # hwc or alpha-hwc
         if result_type != 'np': # None or PIL
-            image = Image.fromarray(image, mode="RGB")
+            image = Image.fromarray(image)#, mode="RGB") # adding mode="RGB" will corrupt images with an alpha channel
     elif result_type == 'PIL':
         # gif
-        image = [Image.fromarray(frame, mode="RGB") for frame in image]
+        image = [Image.fromarray(frame) for frame in image]
 
     return image
 
