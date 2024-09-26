@@ -78,7 +78,7 @@ class SDXLTurboManager(BaseSDXLManager):
                 guidance_scale = CfgItem(0.0, locked=True),
                 strength = CfgItem(0.55, bounds=(0.3, 0.9)),
                 img_dims = (512,512),
-                locked=['guidance_scale', 'negative_prompt', 'aspect', 'denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+                locked=['guidance_scale', 'negative_prompt', 'aspect',  'refine_guidance_scale']
             ), 
             offload=offload)
         
@@ -88,7 +88,7 @@ class SDXLTurboManager(BaseSDXLManager):
 
 
 class SD3MediumManager(BaseSD3Manager):
-    def __init__(self, offload=True):
+    def __init__(self, offload=False):
         super().__init__(
             model_name = 'sd3_medium',
             model_path = 'stabilityai/stable-diffusion-3-medium-diffusers',
@@ -97,54 +97,35 @@ class SD3MediumManager(BaseSD3Manager):
                 guidance_scale = CfgItem(7.0, bounds=(5,10)), 
                 strength = CfgItem(0.65, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
-                locked=['denoise_blend',  'refine_guidance_scale'] # 'refine_strength',
+                locked=[  'refine_guidance_scale']
             ),
             offload=offload,
         )
     
 class ColorfulXLLightningManager(BaseSDXLManager):
-    def __init__(self, offload=True):
+    def __init__(self, offload=False):
         super().__init__( # https://huggingface.co/recoilme/ColorfulXL-Lightning
             model_name = 'colorfulxl_lightning', # https://civitai.com/models/388913/colorfulxl-lightning
             model_path = 'recoilme/ColorfulXL-Lightning',  
             
             config = DiffusionConfig(
-                steps = CfgItem(10, bounds=(4,10)), # https://imgsys.org/rankings
-                guidance_scale = CfgItem(1.5, bounds=(0,2.0)),
+                steps = CfgItem(9, bounds=(4,10)), # https://imgsys.org/rankings
+                guidance_scale = CfgItem(1.0, bounds=(0,2.0)),
                 strength = CfgItem(0.85, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 aspect='square',#'portrait',
                 clip_skip=1,
-                locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+                locked = [ 'refine_guidance_scale']
             ),
             offload=offload,
             scheduler_setup = ('Euler A', {'timestep_spacing': "trailing"}),
             
         )
-
-class RealVizXL4Manager(BaseSDXLManager):
-    def __init__(self, offload=True):
-        super().__init__( # https://huggingface.co/SG161222/RealVisXL_V4.0
-            model_name = 'realvisxl_v4', # https://civitai.com/models/139562?modelVersionId=344487
-            model_path = 'SG161222/RealVisXL_V4.0',  
-            
-            config = DiffusionConfig(
-                steps = CfgItem(25, bounds=(15,40)), # https://imgsys.org/rankings
-                guidance_scale = CfgItem(7.5, bounds=(6,10)),
-                strength = CfgItem(0.55, bounds=(0.3, 0.95)),
-                img_dims = [(1024,1024), (832,1216), (1216,832)],
-                aspect='square',#'portrait',
-                #clip_skip=1,
-                locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
-            ),
-            offload=offload,
-            scheduler_setup='DPM++ 2M Karras'
-            
-        )        
+     
 # https://civitai.com/models/119229/zavychromaxl
 
 class JuggernautXIManager(BaseSDXLManager):
-    def __init__(self, offload=True):
+    def __init__(self, offload=False):
         super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XI-v11
             model_name = 'juggernaut_xi', # https://civitai.com/models/133005?modelVersionId=782002
             model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XI-v11/blob/main/Juggernaut-XI-byRunDiffusion.safetensors',#'RunDiffusion/Juggernaut-XI-v11', 
@@ -157,15 +138,39 @@ class JuggernautXIManager(BaseSDXLManager):
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 aspect='portrait',
                 clip_skip=2,
-                locked = ['denoise_blend', 'refine_guidance_scale'] # 'refine_strength'
+                locked = ['refine_guidance_scale']
             ),
             offload=offload,
             scheduler_setup=('DPM++ 2M SDE'),#, {'lower_order_final':True})
             
         )
 
+class RealVizXL5Manager(BaseSDXLManager):
+    def __init__(self, offload=False):
+        super().__init__( # https://huggingface.co/SG161222/RealVisXL_V5.0
+            model_name = 'realvisxl_v5', # https://civitai.com/models/139562?modelVersionId=789646
+            model_path = 'https://huggingface.co/SG161222/RealVisXL_V5.0/blob/main/RealVisXL_V5.0_fp16.safetensors', #'SG161222/RealVisXL_V5.0',  
+            
+            config = DiffusionConfig(
+                steps = CfgItem(30, bounds=(20,50)), 
+                guidance_scale = CfgItem(5, bounds=(3,10)),
+                strength = CfgItem(0.60, bounds=(0.3, 0.95)),
+                #negative_prompt='bad hands, bad anatomy, ugly, deformed, (face asymmetry, eyes asymmetry, deformed eyes, deformed mouth, open mouth)',
+                negative_prompt='(bad hands, bad anatomy, deformed eyes, deformed mouth)+',
+                img_dims = [(1024,1024), (896,1152), (1152,896)],
+                aspect='portrait',
+                clip_skip=1, # 2
+                locked = ['refine_guidance_scale']
+            ),
+            offload=offload,
+            scheduler_setup=('DPM++ 2M SDE')#, {'lower_order_final':True})
+            #scheduler_setup=('Euler A', {'timestep_spacing': "trailing"}),
+            #scheduler_setup='Euler A',
+            
+        )
+
 class FluxSchnellManager(BaseFluxManager):
-    def __init__(self, offload=True):
+    def __init__(self, offload=False):
         super().__init__(
             model_name = 'flux_schnell',
             model_path = 'black-forest-labs/FLUX.1-schnell',
@@ -175,7 +180,7 @@ class FluxSchnellManager(BaseFluxManager):
                 strength = CfgItem(0, locked=True),#CfgItem(0.65, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 #refine_strength=CfgItem(0, locked=True),
-                locked=['denoise_blend',  'refine_guidance_scale','negative_prompt'] # 'refine_strength',
+                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
             #scheduler_setup='Euler',
@@ -187,7 +192,7 @@ class FluxSchnellManager(BaseFluxManager):
 
         
 class FluxDevManager(BaseFluxManager):
-    def __init__(self, offload=True):
+    def __init__(self, offload=False):
         super().__init__(
             model_name = 'flux_dev',
             model_path = 'black-forest-labs/FLUX.1-dev',
@@ -198,7 +203,7 @@ class FluxDevManager(BaseFluxManager):
                 #img_dims = [(1024,1024), (832,1216), (1216,832)],
                 img_dims = [(1024,1024), (896,1152), (1152,896)],
                 #refine_strength=CfgItem(0, locked=True),
-                locked=['denoise_blend',  'refine_guidance_scale','negative_prompt'] # 'refine_strength',
+                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
             #scheduler_setup='Euler',
@@ -210,7 +215,7 @@ class FluxDevManager(BaseFluxManager):
 # https://old.reddit.com/r/StableDiffusion/comments/1f83d0t/new_vitl14_clipl_text_encoder_finetune_for_flux1/
 # https://huggingface.co/zer0int/CLIP-GmP-ViT-L-14/tree/main
 class FluxSchnevManager(BaseFluxManager):
-    def __init__(self, offload=True):
+    def __init__(self, offload=False):
         super().__init__(
             model_name = 'flux_schnev',
             # model_path = cpaths.ROOT_DIR / 'extras/models/flux/flux-merged',
@@ -225,7 +230,7 @@ class FluxSchnevManager(BaseFluxManager):
                 #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
                 #refine_steps=CfgItem(0, locked=True),
                 #refine_strength=CfgItem(0, locked=True),
-                locked=['denoise_blend',  'refine_guidance_scale','negative_prompt'] # 'refine_strength',
+                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
             #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
@@ -251,10 +256,6 @@ AVAILABLE_MODELS = {
         'manager': ColorfulXLLightningManager,
         'desc': 'ColorfulXL Lightning' # (M, fast)
     },
-    'realvisxl_v4': {
-        'manager': RealVizXL4Manager,
-        'desc': 'RealVisXL V4.0' # (M, avg)
-    },
     # 'flux_schnell': {
     #     'manager': FluxSchnellManager,
     #     'desc': 'Flux Schnell' # (XLg, avg)
@@ -262,6 +263,10 @@ AVAILABLE_MODELS = {
     'juggernaut_xi': {
         'manager': JuggernautXIManager,
         'desc': 'Juggernaut XI' # (M, avg)
+    },
+    'realvisxl_v5': {
+        'manager': RealVizXL5Manager,
+        'desc': 'RealVisXL V5' # (M, avg)
     },
     'flux_dev': {
         'manager': FluxDevManager,
