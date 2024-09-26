@@ -521,8 +521,8 @@ class SingleStagePipeline:
                 self.base.disable_lora()
             self.adapter_weight = detail_weight
         
-        print('Active Adapters:', self.base.get_active_adapters())
-        print('All Adapters:', self.base.get_list_adapters())
+            print('Active Adapters:', self.base.get_active_adapters())
+            print('All Adapters:', self.base.get_list_adapters())
         return lora_scale
 
 
@@ -642,7 +642,19 @@ class SingleStagePipeline:
         
         print('_resize_image_frames input size:', init_wh, '->', dim_out)
         return resized_images
-
+    
+    def seed_call_kwargs(self, seed:int|None, call_kwargs:dict, n_images:int, ):
+        if seed == -1:
+            seeds = None
+            call_kwargsets = [{**call_kwargs, 'seed':None} for i in range(n_images)]
+        else:
+            np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
+            # could technically fail, but heat death of universe seems more likely
+            seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
+            call_kwargsets = [{**call_kwargs, 'seed':s} for s in seeds]
+        
+        return call_kwargsets, seeds
+    
     @torch.inference_mode()
     def generate_image(self, prompt:str, 
                        n_images:int=1,
@@ -678,13 +690,8 @@ class SingleStagePipeline:
                 BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
             elif n_images > 20:
                 BSZ *= 2
-
-            np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
-            # could technically fail, but heat death of universe seems more likely
-            seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
-
-            call_kwargsets = [{**call_kwargs, 'seed':s} for s in seeds]
-
+            
+            call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
             batchgen = self._batched_txt2img(prompt_encodings, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seeds, output_type='pil')
             
             for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
@@ -737,11 +744,8 @@ class SingleStagePipeline:
                 BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
             elif n_images > 20:
                 BSZ *= 2
-            np_rng = np.random.default_rng(call_kwargs.pop('seed', None))
-            seeds = list(set(np_rng.integers(1e9, 1e10, 32*n_images).tolist()))[:n_images]
-            #seeds = [seed + i for i in range(n_images)]
-            call_kwargsets = [{**call_kwargs, 'seed':s} for s in seeds]
-            
+
+            call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
             batchgen = self._batched_img2img(prompt_encodings, image, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seeds, output_type='pil')
             
             for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
@@ -806,7 +810,7 @@ class SingleStagePipeline:
         # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
         # the minimal representation of the prompt. If you 
         
-
+        # TODO: https://huggingface.co/THUDM/CogVideoX-5b-I2V
         fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
         
         negative_prompt=fkwg['negative_prompt']
@@ -1407,7 +1411,7 @@ class FluxBase(SingleStagePipeline):
             lora_dirpath = cpaths.ROOT_DIR/'extras/loras/flux'
         
         adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
-        
+        # https://civitai.green/user/nakif0968/models?types=LORA&baseModels=Flux.1+D&baseModels=Flux.1+S
         try:
             #loraops.set_lora_transformer(self.base, Path(lora_dirpath).joinpath(weight_name), adapter_name)
             lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
