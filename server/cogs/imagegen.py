@@ -36,7 +36,7 @@ event_logger = settings.logging.getLogger('event')
 
 # IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 # PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
-GUI_TIMEOUT = 10*60 # NOTE: limit is 15 minutes unless fixed
+GUI_TIMEOUT = 30*60 # NOTE: limit is 15 minutes unless webhook message is converted to message
 
 
 class Autocorrect:
@@ -180,14 +180,16 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         #self.igen = imgman.ColorfulXLLightningManager(offload=False)
         # self.igen = imgman.FluxSchnevManager(offload=False)
         self.igen = imgman.JuggernautXIManager(offload=False)
-        #self.igen = imgman.RealVizXL5Manager(offload=False)
         self.spell_check = Autocorrect()
-        
+        self.msg_views: dict[int, discord.ui.View] = {}
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
         await self.igen.unload_pipeline()
         #self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
+        for view in self.msg_views.values():
+            if not view.is_finished():
+                await view.on_timeout()
         stop_global_executors()
     
     async def cog_after_invoke(self, ctx: commands.Context) -> None:
@@ -196,6 +198,20 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         cmds_logger.info(f'(cog_after_invoke, {self.qualified_name})'
                          '- [{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args))
+    
+    @commands.Cog.listener('on_message_delete')
+    async def on_message_delete(self, message: discord.Message):
+        if message.id in self.msg_views:
+            view = self.msg_views[message.id]
+            
+            if not view.is_finished():
+                await view.on_timeout()
+            self.msg_views.pop(message.id)
+            #print(f'Message Deleted: {message.author} - "{message.content}"')
+            event_logger.info('(on_message_delete)'
+                                '- [DELETE] {a.display_name}({a.name}) message {message.content!r} view {view}'.format(a=message.author, message=message, view=view))
+        else:
+            print('Message without view deleted.')
 
     async def view_check_defer(self, ctx: commands.Context):
         needs_view = False
@@ -393,6 +409,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             if needs_view:
                 msg = await view.send(ctx, n_init_images = n_images, )
+                self.msg_views[msg.id] = view
             
             async for imbatch,kwbatch in async_gen(output):
                 await view.add_images(imbatch, call_kwargs=kwbatch)
@@ -484,6 +501,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                                                   aspect=aspect, refine_strength=refine_strength, seed=seed)
             if needs_view:
                 msg = await view.send(ctx, n_init_images = n_images)
+                self.msg_views[msg.id] = view
             
             async for imbatch,kwbatch in async_gen(output):
                 for kws in kwbatch:
@@ -639,11 +657,12 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                     
             msg  = await msg.edit(content=f"Seasoning...")
             
-            out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
+            out_imgpath = imgutil.save_animation_prompt(image_frames, prompt, ext='MP4', optimize=False)
            
             if needs_view:
                 view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
                 msg = await view.send(ctx, msg, out_imgpath, prompt)
+                self.msg_views[msg.id] = view
             
         #out_imgpath = save_image_prompt(image, prompt)
         return image_frames, out_imgpath
@@ -748,12 +767,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                     
             
             msg  = await msg.edit(content=f'Seasoning...')
-            out_imgpath = imgutil.save_gif_prompt(image_frames, prompt, optimize=False)
+            out_imgpath = imgutil.save_animation_prompt(image_frames, prompt, ext='MP4', optimize=False)
 
 
             if needs_view:
                 view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
                 msg = await view.send(ctx, msg, out_imgpath, prompt)
+                self.msg_views[msg.id] = view
             
         #out_imgpath = save_image_prompt(image, prompt)
         return image_frames, out_imgpath
