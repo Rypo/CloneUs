@@ -69,8 +69,12 @@ class Upsampler:#(ImageFormatter):
         model = ModelLoader('cuda').load_from_file(model_path)
         # make sure it's an image to image model
         assert isinstance(model, ImageModelDescriptor)
-        model.bfloat16().cuda().eval()
-        #model = model.eval().to('cuda', dtype=self.dtype)
+        
+        model = model.eval().to(self.device, dtype=self.dtype)
+        
+        for param in model.model.parameters():
+            param.requires_grad_(False)
+        
         return model
 
     def to(self, device: torch.device | str | None = None, dtype: torch.dtype | None = None):
