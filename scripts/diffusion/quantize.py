@@ -24,7 +24,7 @@ def release_memory():
 def quant_and_save(qtype:str, quants_dirpath:Path, skip:list[str] = None, delete_old: bool = True, model_id:str="black-forest-labs/FLUX.1-schnell"):
     flux_variant = 'schnell' if 'schnell' in model_id.lower() else 'dev'
 
-    text_enc_model_id = "black-forest-labs/FLUX.1-schnell"
+    text_enc_model_id = "black-forest-labs/FLUX.1-dev"
     # text encoder is identical for schnell/dev, avoid downloading twice
     
     if skip is None:
