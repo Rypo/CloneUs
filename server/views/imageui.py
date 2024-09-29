@@ -106,7 +106,7 @@ class ImagePrimaryView(discord.ui.View):
         
         self.images: list[Image.Image] # = []
         self.thumbs: list[Image.Image] # = []
-        self._file_cache: list[Image.Image] # = []
+        self._file_cache: list[Image.Image] = []
 
         self.img_count:int # = 0
 
@@ -133,7 +133,7 @@ class ImagePrimaryView(discord.ui.View):
 
     def cached_files(self, start:int=0, stop:int|None=None, ext='WebP', **kwargs):
         files = self._file_cache[start:stop]
-        asyncio.create_task(self._populate_cache(start, stop, ext=ext))
+        asyncio.create_task(self._populate_cache(start, stop, ext=ext, **kwargs))
         return files
     
     @property
@@ -276,7 +276,7 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
 
         self.images: list[Image.Image] = []
         self.thumbs: list[Image.Image] = []
-        self._file_cache: list[Image.Image] = []
+        #self._file_cache: list[Image.Image] = []
 
         self.img_count = 0
         
@@ -510,11 +510,11 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         if (ref_strength := kwargs.get('refine_strength')) is None:
             ref_strength = 0.30
         
-        
+        prompt = kwargs.get('prompt')
 
         hd_kwargs = {
             'imgurl': self.message.attachments[0].url,
-            'prompt': kwargs.get('prompt'),
+            'prompt': prompt,
             'imgfile': self.images[index], # bypass the download
             'refine_strength': ref_strength,
             'steps': kwargs.get('steps'),
@@ -527,9 +527,9 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         image = await asyncio.create_task(self.call_ctx.invoke(self.imgen.hd_upsample, **hd_kwargs)) 
         
         #await interaction.followup.send(file=to_bytes_file(image_file, kwargs['prompt']))
-        fpath = imgutil.save_image_prompt(image, kwargs['prompt'], ext='WebP', lossless=True)
-        ifile = imgutil.impath_to_file(fpath, description=kwargs['prompt'])
-        # ifile = imgutil.to_bfile(image, filestem=fpath.stem, description=kwargs['prompt'], ext='WebP', lossless=True)
+        fpath = imgutil.save_image_prompt(image, prompt, ext='WebP', lossless=True)
+        #ifile = imgutil.impath_to_file(fpath, description=prompt)
+        ifile = imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP', lossless=True)
         
         # if self.upsample_thread is None:
         #    self.upsample_thread = await self.call_ctx.channel.create_thread(name='Upsampled Images', message=self.message)
@@ -577,11 +577,11 @@ class GifUIView(ImagePrimaryView):
         self.gif_bytes:int
         self._bytes_limit = discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES
         
-        self._gif_bfile = None
-        self.gif_file_cacher: asyncio.Task = None
+        self._animated_bfile = None
+        self.gif_file_task: asyncio.Task = None
         self.optimized_images = None
 
-        self.ext: typing.Literal['GIF','MP4'] = 'GIF'
+        self.ext: typing.Literal['GIF','MP4'] = None
     
 
 
@@ -591,19 +591,38 @@ class GifUIView(ImagePrimaryView):
     def thumb_attrs(self, start:int=0, stop:int|None=None):
         return [{'image':img, 'filestem': f'{self.gif_filepath.stem}_thb', 'description':self.prompt} for img in self.thumbs[start:stop]] 
     
-    async def _set_gif_file(self):
-        self._gif_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext=self.ext)
-        #return self._gif_bfile
     
-    def gif_bfile(self):
+    def frames_bfile(self, ext:str=None):
         t0=time.monotonic()
-        if self._gif_bfile is None:
-            self._gif_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext=self.ext)
-        gbfile = copy.deepcopy(self._gif_bfile)
-        logger.debug(f'deep copy gif: {time.monotonic() - t0:0.2f}s')
+        if self._animated_bfile is None:
+            if ext is None:
+                ext = self.ext
+            self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext=self.ext)
+        gbfile = copy.deepcopy(self._animated_bfile)
+        t1 = time.monotonic()
+        if round(t1-t0,2) > 0:
+            logger.debug(f'deep copy gif: {t1 - t0:0.2f}s')
         return gbfile
     
+    async def delayed_gif(self, delay:float=1.0):
+        await asyncio.sleep(delay/2)
+        gif_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP', method=5, quality=90)#, lossless=True)
+        #gif_bfile = await asyncio.to_thread(imgutil.animation_to_bfile, image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='GIF')
         
+        self.gif_bytes = gif_bfile.fp.getbuffer().nbytes
+        logger.info(f'Animation Size - file: {self.gif_bytes/1e6:0.3f} MB | disk: {self.gif_filepath.stat().st_size/1e6:0.3f} MB')
+
+        if self.message.guild is not None:
+            self._bytes_limit = self.message.guild.filesize_limit  # 25*(1024**2)#2.5e7 # 25MB for non nitro
+
+        if self.gif_bytes > self._bytes_limit:
+            self.ext = 'MP4'
+        else:
+            self.ext = 'WebP' #'GIF'
+            self._animated_bfile = gif_bfile
+            await asyncio.sleep(delay/2)
+            self.message = await self.message.edit(content='', attachments=[self.frames_bfile()], view=self)
+
 
     async def send(self, ctx: commands.Context, message:discord.WebhookMessage, out_gifpath:Path, prompt: str):
         self.call_ctx = ctx
@@ -621,59 +640,26 @@ class GifUIView(ImagePrimaryView):
         # x - reduce size (w,h) of gif
         # x - use catbox hosting
         # x - return exploded view with the collapse button disabled. 
-        self.gif_bytes = len(self.gif_bfile().fp.read()) 
-        logger.info(f'Animation Size - file: {self.gif_bytes/1e6:0.3f} MB | disk: {self.gif_filepath.stat().st_size/1e6:0.3f} MB')
         
-        if self.message.guild is not None:
-            self._bytes_limit = self.message.guild.filesize_limit  # 25*(1024**2)#2.5e7 # 25MB for non nitro
+        self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='MP4')
+        # self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP')
+        mp4_bfile = copy.deepcopy(self._animated_bfile)
+        self.message = await self.message.edit(content='', attachments=[mp4_bfile], view=self) # set content to '' to clear "seasoning..."
         
-        #over_limit = 
+        self.gif_file_task = asyncio.create_task(self.delayed_gif(delay=0.5))
         
-        #self.grid_view = DynamicImageGridView(self, orphaned=False, timeout=None)
-        
-        if self.gif_bytes > self._bytes_limit:
-            self.message = await self.message.edit(content="Hwoo boy, that's a lotta bytes you got there.. Guess we doing MP4 now.", view=self) # Must send view=self for on_timeout to engage
-            self.ext = 'MP4'
-
-            #self.message = await self.refresh_view(grid_display=True)
-            
-        #else:
-        self.gif_file_cacher = asyncio.create_task(asyncio.gather(asyncio.sleep(0.1), self._set_gif_file()))
-        #asyncio.to_thread(imgutil.gif_to_bfile, image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt))
-        #tsk=asyncio.create_task(self.send_thb())
-        f0 = imgutil.to_bfile(self.images[0], filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP')
-        self.message = await self.message.edit(content='', attachments=[f0], view=self) # set content to '' to clear "seasoning..."
-        #self.message = await self.refresh_view(show_grid=False)
-        
-        #embed = discord.Embed(type='gifv').set_image(url = f'attachment://{file.filename}')
-        # set content to '' to clear "seasoning..."
         #self.message = await self.message.edit(content='', attachments=[discord.File(fp=self.gif_filepath, filename=self.gif_filepath.name, description=prompt)], view=self) #embed=self.embed, 
         self.message = await self.refresh_view(grid_display=False)
-        #self.gif_bfile = asyncio.create_task(asyncio.to_thread(imgutil.gif_to_bfile, image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt))
             
         self.timeout_warning.start()
-        #self.message.edit(content='', attachments=[discord.File(fp=out_gifpath, filename=out_gifpath.name, description=prompt)], view=self)
+
         return self.message
 
     async def refresh(self):
-        #tsk=asyncio.create_task(self.send_thb())
-        # asyncio.to_thread(
-        #msg_tsk = asyncio.create_task(self.message.edit(attachments=[imgutil.to_bfile(self.images[0], filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP')], view=self))
-        
-        img_file = self.gif_bfile()
-        #img_file = await self.agif_bfile()
-        
-        #self.message = await msg_tsk
-        #image_frames = self.optimized_images if self.optimized_images is not None else self.images
-        #img_file = await asyncio.to_thread(imgutil.gif_to_bfile, image_frames=image_frames, filestem=self.gif_filepath.stem, description=self.prompt)
-        #embed = discord.Embed(type='gifv').set_image(url=f'attachment://{img_file.filename}')
-        self.message = await self.message.edit(attachments=[img_file], view=self)#, embed=embed,) # set content to '' to clear "seasoning..."
-        #self.gif_bfile = asyncio.create_task(asyncio.to_thread(imgutil.gif_to_bfile, image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt))
-        #self.gif_file_cacher = asyncio.create_task(asyncio.to_thread(imgutil.gif_to_bfile, image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt))
-        #msg = await self.img_channel.send(files=files)
-        #self.message = await imgutil.try_send_gif(msg=self.message, gif_filepath=self.gif_filepath, prompt=self.prompt, view=self)
-        #discord.Embed(u)
-        #self.reset_timeouts()
+        if self.gif_file_task.done():
+            img_file = self.frames_bfile()
+            #embed = discord.Embed(type='gifv').set_image(url=f'attachment://{img_file.filename}')
+            self.message = await self.message.edit(attachments=[img_file], view=self)
         return self.message
        
     @discord.ui.button(label='\u200b', style=discord.ButtonStyle.secondary, disabled=False, emoji='↗️', row=0) # row=4 # 💢 ⛶  label='🗗︎', 
@@ -806,7 +792,7 @@ class DynamicImageGridView(discord.ui.View):
             for img_attrs in self.parent_view.thumb_attrs(offs, stop=stop):
                 yield imgutil.to_bfile(**img_attrs, ext=ext, **kwargs)
         else: 
-            for file in self.parent_view.cached_files(offs, stop, ext=ext):
+            for file in self.parent_view.cached_files(offs, stop, ext=ext, **kwargs):
                 yield file
 
     
@@ -825,7 +811,7 @@ class DynamicImageGridView(discord.ui.View):
         if index is None:
             index = self.cur_batchnum-1
         
-        props = dict(ext='JPEG', optimize=False, quality=30) if thumbs else dict(ext='WebP', lossless=True, plugin="opencv",) #  lossless=True, quality=0
+        props = dict(ext='JPEG', optimize=False, quality=30) if thumbs else dict(ext='WebP')#plugin="opencv",) #  lossless=True, quality=0
         
         
         #img_files = [file async for file in self.async_file_batch(self.attr_batch(thumbs=thumbs, index=index), **props)]
