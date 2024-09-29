@@ -343,6 +343,64 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         return await ctx.send(desc, file=file)
 
+    @commands.hybrid_command(name='morph')
+    async def morph(self, ctx: commands.Context, imgurl1: str, imgurl2:str, *,
+                    midframes:int=28, 
+                    imgfile1: discord.Attachment|None=None,
+                    imgfile2: discord.Attachment|None=None,
+                    ):
+        """Morph one image into another image.
+
+        Args:
+            imgurl1: Url of start image. Ignored if `imgfile1` is used. 
+            imgurl2: Url of end image. Ignored if `imgfile2` is used. 
+            midframes: The number of frames to add between the images. Default=28.
+            imgfile1: start image attachment. To use, write anything in `imgurl1` and drag+drop image. 
+            imgfile2: end image attachment. To use, write anything in `imgurl2` and drag+drop image. 
+        """
+        # manual conversion may be needed because discord transformer doesn't proc when function called internally (e.g. by GUI redo button)
+        #strength = cmd_tfms.percent_transform(strength)
+        #refine_strength = cmd_tfms.percent_transform(refine_strength)
+        
+        needs_view = await self.view_check_defer(ctx)
+        
+        # this may be passed a url string in drawUI config
+        image_url1 = imgutil.clean_discord_urls(imgfile1.url if isinstance(imgfile1, discord.Attachment) else imgurl1)
+        image_url2 = imgutil.clean_discord_urls(imgfile2.url if isinstance(imgfile2, discord.Attachment) else imgurl2)
+        
+        images:list[Image.Image] = []
+        for image_url in [image_url1,image_url2]:
+            image = await imgutil.aload_image(image_url, result_type='np')
+            if image.ndim > 3:
+                image = image[0] # gifs -> take first frame
+            
+            if image.shape[-1] > 3: # discard alpha channel
+                image = image[:, :, :3]
+
+            images.append(Image.fromarray(image))
+                
+        wh1 = images[0].size
+        wh2 = images[1].size
+        if wh1 != wh2:
+            images[0] = images[0].resize(wh2, resample=Image.Resampling.LANCZOS)
+        
+        images[0].thumbnail((1024,1024), resample=Image.Resampling.LANCZOS)
+        images[1].thumbnail((1024,1024), resample=Image.Resampling.LANCZOS)
+        w,h = images[1].size
+        
+        print(images[0].size,images[1].size)
+
+        async with self.bot.busy_status(activity='draw'):
+            fake_prompt = f'interpolation_n{midframes+2}_{w}x{h}'
+            image_frames = self.igen.interpolate(images=images, inter_frames = midframes, batch_size=1, allow_resize=True)
+            out_imgpath = imgutil.save_animation_prompt(image_frames, fake_prompt, ext='MP4', optimize=False)
+            if needs_view:
+                msg = await ctx.send('Morphed')
+                view = imageui.GifUIView(image_frames, timeout=GUI_TIMEOUT)
+                msg = await view.send(ctx, msg, out_imgpath, fake_prompt)
+                self.msg_views[msg.id] = view
+            
+
     @commands.hybrid_command(name='draw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _draw(self, ctx: commands.Context, prompt:commands.Range[str,1,1000], *, flags: cmd_flags.DrawFlags):
@@ -423,7 +481,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         Args:
             prompt: A description of what you want to infuse the image with.
-            imgurl: Url of image. Will be ignored if `imgfile` is used. 
+            imgurl: Url of image. Ignored if `imgfile` is used. 
             n: The number of redrawn images to produce from the image and prompt.
             imgfile: image attachment. To use, write anything in `imgurl` and drag+drop image. 
             steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
@@ -588,6 +646,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
             detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
+            midframes: The number of frames to add between each pair of images. Default=4.
             aspect: Image aspect ratio (shape). If None, will pick nearest to img if provided.
 
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
@@ -601,6 +660,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                   negative_prompt = flags.negprompt, 
                                   guidance_scale = flags.guidance, 
                                   detail_weight = flags.detail,
+                                  mid_frames = flags.midframes,
                                   aspect = flags.aspect, 
                                   fast = flags.fast,
                                   seed = flags.seed)
@@ -614,6 +674,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                       negative_prompt: str = None, 
                       guidance_scale: float = None, 
                       detail_weight: float = 0.,
+                      mid_frames: int = 4,
                       aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                       fast: bool = False,
                       seed: int = None
@@ -642,7 +703,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_frames, fwkg
             frame_gen = await self.igen.generate_frames(prompt=prompt, image=image, nframes=nframes, steps=steps, 
                                                     strength_end=strength_end,strength_start=strength_start, negative_prompt=negative_prompt, 
-                                                    guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect,
+                                                    guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, mid_frames=mid_frames,
                                                     seed=seed)
             
             cf = 0

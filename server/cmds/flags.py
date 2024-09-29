@@ -150,6 +150,7 @@ class AnimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     negprompt: str = commands.flag(default=None, aliases=['neg_prompt','negative_prompt'], converter=cmd_tfms.dash_to_empty)
     guidance: float = commands.flag(default=None, aliases=['guide', 'guidance_scale'])
     detail: float = commands.flag(default=0.0, aliases=['details', 'detail_weight'])
+    midframes:int = commands.flag(default=4)
     aspect: typing.Literal['square','portrait','landscape'] = commands.flag( default=None, aliases=['ar','orient', 'orientation']) # ['1:1', '13:19', 19:13]
     
     #dblend: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=None, aliases=['denoise_blend'],) 
