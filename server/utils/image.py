@@ -138,6 +138,10 @@ def to_bytes_file(image:Image.Image, prompt: str, ext:typing.Literal['PNG','WebP
 def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: typing.Literal['PNG','WebP','JPEG'] = 'WebP', **kwargs):
     sfx = f'.{ext.lower()}'
     
+    # discord thinks all .webp are animated. Rename as png, but keep webp all performance benefits
+    if sfx == '.webp':
+        sfx = '.png'
+    
     filename = filestem+sfx if filestem is not None else tempfile.NamedTemporaryFile(suffix=sfx).name
         
     with io.BytesIO() as imgbin:
@@ -158,16 +162,17 @@ def to_discord_file(image:Image.Image|str|Path, filestem:str=None, description:s
     
     return impath_to_file(img_path=image, description=description)
 
-def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, ext: typing.Literal['GIF','MP4']='GIF', **kwargs):
+def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, ext: typing.Literal['GIF','MP4','WebP']='GIF', **kwargs):
     sfx = f'.{ext.lower()}'
     filename = filestem+sfx if filestem is not None else tempfile.NamedTemporaryFile(suffix=sfx).name
     
     with io.BytesIO() as outbin:
-        if ext == 'GIF':
-            iio.imwrite(outbin, image_frames, extension=sfx, loop=kwargs.pop('loop', 0), **kwargs)
-        else:
-            iio.imwrite(outbin, image_frames, extension=sfx, fps=kwargs.pop('fps', 10), **kwargs)
+        if ext == 'MP4':
             # https://imageio.readthedocs.io/en/stable/_autosummary/imageio.plugins.ffmpeg.html#parameters-for-writing
+            iio.imwrite(outbin, image_frames, extension=sfx, fps=kwargs.pop('fps', 10), **kwargs)
+        else:
+            iio.imwrite(outbin, image_frames, extension=sfx, loop=kwargs.pop('loop', 0), **kwargs)
+        
         outbin.seek(0)
         return discord.File(fp=outbin, filename=filename, description=description)
 
@@ -308,3 +313,15 @@ def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = Non
     image = convert_imgarr(image, result_type)
 
     return image
+
+
+def print_image_info(image:Image.Image):
+    # https://pillow.readthedocs.io/en/stable/reference/Image.html#image-attributes
+    print('Info:', image.info)
+    print('is_animated:', getattr(image, "is_animated", False))
+    print('n_frames:', getattr(image, "n_frames", -1))
+    print('has_transparency_data:', getattr(image, "has_transparency_data", None))
+    print('format:', image.format)
+    print('mode:', image.mode)
+    print('size:', image.size)
+    print('palette:', image.palette)
