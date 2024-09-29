@@ -19,7 +19,6 @@ from tqdm.auto import tqdm
 import numpy as np
 import torch
 
-from cloneus.plugins.vision import quantops
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_grad_enabled(False)
 
@@ -66,7 +65,7 @@ from spandrel import ImageModelDescriptor, ModelLoader
 from compel import Compel, ReturnedEmbeddingsType
 
 from cloneus import cpaths
-from cloneus.plugins.vision import quantops,specialists,loraops, interpolate
+from cloneus.plugins.vision import quantops,specialists,loraops,interpolation
 from cloneus.plugins.vision.fluximg2img import FluxImg2ImgPipeline
 from cloneus.utils.common import release_memory, batched
 
@@ -405,6 +404,7 @@ class SingleStagePipeline:
         # specialists
         self.upsampler = None
         self.florence = None
+        self.interpolator = None
 
         # processors
         self.compeler = None
@@ -506,6 +506,18 @@ class SingleStagePipeline:
            
         return self.florence.caption(image, caption_type)
     
+    @torch.inference_mode()
+    def interpolate(self, images:list[Image.Image], inter_frames:int=4, batch_size=2, allow_resize:bool=True,):
+        if self.interpolator is None:
+            self.interpolator = specialists.Interpolator()
+        if len(images) == 2:
+            inter_frames = max(inter_frames, 28)
+            batch_size = 1
+            
+        frames = self.interpolator.interpolate_frames(images, inter_frames=inter_frames, batch_size=batch_size, allow_resize=allow_resize)
+        release_memory()
+        return [Image.fromarray(img) for img in frames]
+        
     @torch.inference_mode()
     def toggle_loras(self, detail_weight:float|None = None):
         lora_scale = None
@@ -801,6 +813,7 @@ class SingleStagePipeline:
                             guidance_scale: float = None, 
                             detail_weight: float = 0, 
                             aspect: typing.Literal['square','portrait','landscape'] = None, 
+                            mid_frames:int=0,
                             seed: int = None, 
                             **kwargs):   
         
@@ -855,13 +868,11 @@ class SingleStagePipeline:
             yield i
             
         image_frames += self.decode_latents(latents, height=h, width=w, )
-        # FIXME: this is producing waay to many frames. set nframes=20 and you'll get like 60
-        # 5 -> 33
-        # 10 -> 36
-        # 15 -> 42
-        # 20 -> 57
-        # 25 -> 72
-        image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
+        release_memory()
+        if mid_frames:
+            image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
+            
+            #image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
         yield image_frames
         release_memory()
     
@@ -963,7 +974,7 @@ class SingleStagePipeline:
     def _prepare_raw_latents(self, resized_images, seed):
         raw_image_latents = self.encode_images(resized_images, seed)
         
-        mot_mask_tensor = torch.from_numpy(interpolate.motion_mask(resized_images, px_thresh=0.02, qtile=90))
+        mot_mask_tensor = torch.from_numpy(interpolation.motion_mask(resized_images, px_thresh=0.02, qtile=90))
         #if raw_image_latents.ndim == 4:
         mot_mask_tensor = mot_mask_tensor.expand(1, 1, -1, -1)
 
@@ -978,7 +989,7 @@ class SingleStagePipeline:
     @torch.inference_mode()
     def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
         # flux will override this
-        blended_latents = interpolate.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
+        blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
         return blended_latents
 
   
@@ -1497,7 +1508,7 @@ class FluxBase(SingleStagePipeline):
     def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
         img_w,img_h = img_wh
         unpacked_latents = self.basei2i._unpack_latents(out_latents, img_h, img_w, self.basei2i.vae_scale_factor)
-        blended_latents = interpolate.blend_latents(raw_image_latents, unpacked_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
+        blended_latents = interpolation.blend_latents(raw_image_latents, unpacked_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
         packed_blended_latents = self._repack_latents(blended_latents, img_h, img_w)
         return packed_blended_latents
     

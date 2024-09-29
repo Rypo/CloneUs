@@ -3,21 +3,21 @@ import gc
 import re
 import time
 import glob
+import bisect
 import random
 import typing
 import string
+import warnings
 from pathlib import Path
+
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-from diffusers import FluxPipeline, FluxTransformer2DModel, DiffusionPipeline, FlowMatchEulerDiscreteScheduler
-from diffusers.utils import load_image
-import diffusers.utils as diffutils 
 
+from tqdm.auto import tqdm
 from transformers import  AutoProcessor, AutoModelForCausalLM, GenerationConfig
 
-from optimum import quanto
 import numpy as np
 import cv2
 
@@ -28,12 +28,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 from spandrel import ImageModelDescriptor, ModelLoader
 
-# from peft import LoraConfig, inject_adapter_in_model, set_peft_model_state_dict, get_peft_model
-import peft
 
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-from cloneus.plugins.vision import fluximg2img,fluxinpaint, loraops, quantops
 from cloneus import cpaths
 
 
@@ -629,4 +626,151 @@ class GridHelper:
     
 
 
+class Interpolator:
+    def __init__(self, model_name:str='film_net_fp16.pt', device:str='cuda:0', dtype=torch.float16) -> None:
+        self.device = torch.device(device)
+        self.dtype = dtype
+        
+        ext_modeldir = cpaths.ROOT_DIR/'extras/models'
+        self.model = self._load_model(ext_modeldir.joinpath(model_name))
 
+    
+    def _load_model(self, model_path:str|Path) -> torch.jit.RecursiveScriptModule:
+        try:
+            model:torch.jit.RecursiveScriptModule = torch.jit.load(model_path, map_location='cpu')
+            model.eval()
+            model.to(device=self.device, dtype=self.dtype)
+        except ValueError as e:
+            warnings.warn(f'{e}\nMissing model weights, falling back to torch.lerp. '
+                          'Please obtain the model from: https://github.com/dajes/frame-interpolation-pytorch/releases')
+            model = torch.lerp
+        return model
+
+    @staticmethod
+    def pad_batch(batch:np.ndarray, align:int):
+        """Pad image batch x so width and height divide by align.
+
+        Note: 
+            the pytorch source likes bitshifting apparently, but it just pads images to multiple of align, that's it
+            see here: https://github.com/google-research/frame-interpolation/blob/main/eval/interpolator.py#L30
+
+        Args:
+            batch: Image batch to align.
+            align: Number to align to.
+        """
+        # https://github.com/dajes/frame-interpolation-pytorch/blob/main/util.py
+        height, width = batch.shape[1:3]
+        height_to_pad = (align - height % align) if height % align != 0 else 0
+        width_to_pad = (align - width % align) if width % align != 0 else 0
+
+        crop_region = [height_to_pad >> 1, width_to_pad >> 1, height + (height_to_pad >> 1), width + (width_to_pad >> 1)]
+        batch = np.pad(batch, ((0, 0), (height_to_pad >> 1, height_to_pad - (height_to_pad >> 1)),
+                            (width_to_pad >> 1, width_to_pad - (width_to_pad >> 1)), (0, 0)), mode='constant')
+        return batch, crop_region
+    
+    @staticmethod
+    def images_to_npfloat(images:list[Image.Image]):
+        #image = np.stack([cv2.cvtColor(np.array(img), cv2.COLOR_BGR2RGB).astype(np.float32) / np.float32(255) for img in images],0)
+        if not isinstance(images, np.ndarray):
+            images = np.stack([np.array(img) for img in images], 0)
+        
+        image_batch = images.astype(np.float32) / np.float32(255.0)
+        
+        return image_batch
+        
+    def images_resize(self, images:list[Image.Image]|np.ndarray[np.uint8], align=64):
+        if isinstance(images, np.ndarray):
+            b,h,w,c = images.shape
+            # skip the go around if already compatible
+            if (h % align) == (w % align) == 0:
+                return self.images_to_npfloat(images)
+            
+            images = [Image.fromarray(img) for img in images]
+        
+        w,h = images[0].size
+
+        w_align = w + (align - w % align)
+        h_align = h + (align - h % align)
+        
+        images = [img.resize((w_align, h_align), resample=Image.Resampling.LANCZOS) for img in images]
+        
+        return self.images_to_npfloat(images)
+
+        
+    def images_crop(self, images:list[Image.Image]|np.ndarray[np.uint8], align=64):
+        image_batch = self.images_to_npfloat(images)
+        #image_batch, crop_region = pad_batch(np.expand_dims(image, axis=0), align)
+        image_batch, crop_region = self.pad_batch(image_batch, align)
+        return image_batch, crop_region
+    
+    @torch.inference_mode()
+    def interpolate_images(self, img1:Image.Image|np.ndarray, img2:Image.Image|np.ndarray, inter_frames:int=28, allow_resize:bool=True,):
+        img_batch = [img1,img2] if isinstance(img1, Image.Image) else np.stack([img1,img2], 0)
+        return self.interpolate_frames(images=img_batch, inter_frames=inter_frames, batch_size=1, allow_resize=allow_resize)
+
+    @torch.inference_mode()
+    def interpolate_frames(self, images:list[Image.Image], inter_frames:int=4, batch_size=2, allow_resize:bool=True,):
+        if allow_resize:
+            all_img_batch, crop_region = (self.images_resize(images, align=64), None)
+        else:
+            all_img_batch, crop_region = self.images_crop(images, align=64)
+        
+        all_img_batch = torch.from_numpy(all_img_batch).permute(0, 3, 1, 2)
+        
+        all_img_batch_1,all_img_batch_2 = all_img_batch[:-1], all_img_batch[1:]
+
+        
+        all_results = []
+        img1_batches = torch.split(all_img_batch_1, batch_size)
+        img2_batches = torch.split(all_img_batch_2, batch_size)
+        
+        pbar = tqdm(total=len(img1_batches)*inter_frames, desc='Interpolating frames')
+        
+        for img_batch_1,img_batch_2 in zip(img1_batches, img2_batches):
+            batchlen = img_batch_1.shape[0]
+            results = [
+                img_batch_1,
+                img_batch_2
+            ]
+            
+            idxes = [0, inter_frames + 1]
+            remains = list(range(1, inter_frames + 1))
+
+            splits = torch.linspace(0, 1, inter_frames + 2)
+
+            for _ in range(inter_frames):
+                starts = splits[idxes[:-1]]
+                ends = splits[idxes[1:]]
+                distances = ((splits[None, remains] - starts[:, None]) / (ends[:, None] - starts[:, None]) - .5).abs()
+                
+                start_i, step = np.unravel_index(torch.argmin(distances).item(), distances.shape)
+                end_i = start_i + 1
+
+                x0:torch.Tensor = results[start_i].to(device=self.device, dtype=self.dtype)
+                x1:torch.Tensor = results[end_i].to(device=self.device, dtype=self.dtype)
+
+                dt = x0.new_full((1, 1), (splits[remains[step]] - splits[idxes[start_i]])) / (splits[idxes[end_i]] - splits[idxes[start_i]])
+
+                prediction:torch.Tensor = self.model(x0, x1, dt)
+                
+                insert_position = bisect.bisect_left(idxes, remains[step])
+                idxes.insert(insert_position, remains[step])
+                results.insert(insert_position, prediction.clamp(0, 1).cpu().float())
+                del remains[step]
+                pbar.update(batchlen)
+
+            
+
+            all_results.append(torch.stack(results, 1))
+           
+        all_img_batch = torch.cat(all_results, 0).flatten(0,1)
+        
+        #frames = (all_img_batch * 255).to(torch.uint8).flip(1).permute(0, 2, 3, 1).numpy()
+        frames = (all_img_batch * 255).to(torch.uint8).permute(0, 2, 3, 1).numpy()
+        
+        if crop_region:
+            y1, x1, y2, x2 = crop_region
+            frames = frames[:, y1:y2, x1:x2, :]
+
+        pbar.close() 
+        return frames
