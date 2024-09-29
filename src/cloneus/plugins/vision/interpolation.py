@@ -70,6 +70,9 @@ def pil_to_np(images):
 
 
 def image_lerp(img_frames:list[Image.Image], total_frames=32, t0=0, t1=1, t_range=None, loop_back:bool = False, use_slerp:bool=False):
+    # TODO: https://github.com/dajes/frame-interpolation-pytorch/tree/main
+    # this could simplify things: https://docs.python.org/3/library/bisect.html#bisect.bisect_left
+    # https://github.com/dajes/frame-interpolation-pytorch/blob/main/inference.py
     np_imgs = pil_to_np(img_frames)
     img_pairs = list(zip(np_imgs, np_imgs[1:]))
     if loop_back:
