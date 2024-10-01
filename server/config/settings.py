@@ -8,7 +8,7 @@ import logging
 from logging.config import dictConfig
 
 import discord
-
+from colorama import Fore, Back, Style
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
 
@@ -70,8 +70,40 @@ BOT_PRESENCE = {
 def custom_presense(status_name: typing.Literal['online','idle','do_not_disturb'], state: str):
     return {'status':getattr(discord.Status, status_name), 'activity': discord.Activity(type=discord.ActivityType.custom, name=state, state=state)}
 
-# discord.utils._ColourFormatter.FORMATS
-# https://github.com/Rapptz/discord.py/blob/576ab269e84b4be80fff3091e56bac42fa0aa552/discord/utils.py#L1262
+class ColorFormatter(discord.utils._ColourFormatter):
+    # https://github.com/Rapptz/discord.py/blob/576ab269e84b4be80fff3091e56bac42fa0aa552/discord/utils.py#L1262
+    LEVEL_COLORS = [
+        (logging.DEBUG, Back.BLACK+Style.BRIGHT), #'\x1b[40;1m'),
+        (logging.INFO, Fore.BLUE+Style.BRIGHT), #'\x1b[34;1m'),
+        (logging.WARNING, Fore.YELLOW+Style.BRIGHT ),#'\x1b[33;1m'),
+        (logging.ERROR, Fore.RED),
+        (logging.CRITICAL, Back.RED), #'\x1b[41m'),
+    ]
+
+    fncol = Back.BLACK+Fore.GREEN+Style.DIM #Fore.MAGENTA
+    
+    FMT_STRING = ('[' + '{color}' + '%(levelname)-5s' + Style.RESET_ALL
+              + Fore.BLACK+Style.BRIGHT + ' @ ' + '%(asctime)s' + Style.RESET_ALL + ']'
+              #+ '_' + Fore.MAGENTA + '%(module)s' + Style.RESET_ALL + '_'
+              + '(' + fncol + '%(clsName)s' + '%(funcName)s' + Style.RESET_ALL + ')' + ' %(message)s')
+    
+    FORMATS = None
+
+    def __init__(self, fmt: str | None = None, datefmt: str | None = None, style: typing.Literal['%','{','$'] = "%", validate: bool = True, *, defaults: os.Mapping[str, typing.Any] | None = None) -> None:
+        super().__init__(fmt, datefmt, style, validate, defaults=defaults)
+        self.FORMATS = self.set_level_formats()
+
+    
+    def set_level_formats(self, fmt_string:str = None, level_colors:tuple[int, str]=None):
+        if level_colors is not None:
+            self.LEVEL_COLORS = level_colors
+        if fmt_string is not None:
+            self.FMT_STRING = fmt_string
+        
+        formats = {level: logging.Formatter(self.FMT_STRING.format(color=color), ('%H:%M:%S' if level < logging.WARNING else '%Y-%m-%d %H:%M:%S'))
+        for level, color in self.LEVEL_COLORS}
+        self.FORMATS = formats
+        return self.FORMATS
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -86,6 +118,9 @@ LOGGING_CONFIG = {
         "model": {
             "format": "%(levelname)-10s [%(asctime)-10s] %(name)-10s : %(message)s"
         },
+        "color_console": {
+            '()': lambda: ColorFormatter(defaults={'clsName':''})
+        },
     },
     "handlers": {
         "console": {
@@ -97,6 +132,11 @@ LOGGING_CONFIG = {
             "level": "WARNING",
             "class": "logging.StreamHandler",
             "formatter": "standard",
+        },
+        "color_console": {
+            "level": "DEBUG",
+            "class": "logging.StreamHandler",
+            "formatter": "color_console",
         },
         "file": {
             "level": "INFO",
@@ -139,6 +179,7 @@ LOGGING_CONFIG = {
         "model": {"handlers": ["modelfile"], "level": "INFO", "propagate": False},
         "cmds": {"handlers": ["cmdsfile"], "level": "INFO", "propagate": False},
         "event": {"handlers": ["eventfile"], "level": "INFO", "propagate": False},
+        "pconsole": {"handlers": ["color_console"], "filters": [], "level": "DEBUG", "propagate": False},
         "discord": {
             "handlers": ["console2", "file"],
             "level": "INFO",
@@ -165,5 +206,20 @@ def move_logs_lts(*logfilesnames):
 
 def setup_logging():
     move_logs_lts("model.log", "cmds.log", "event.log")
-    dictConfig(LOGGING_CONFIG)
+    #dictConfig(LOGGING_CONFIG)
 
+    old_factory = logging.getLogRecordFactory()
+    
+    def record_factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        clsName = ''
+        
+        if hasattr(record.args, 'get'):
+            if (cls := record.args.get('cls', '')):
+                clsName = cls.__class__.__name__+'.'
+        
+        record.clsName = clsName
+        return record
+    
+    logging.setLogRecordFactory(record_factory)
+    dictConfig(LOGGING_CONFIG)
