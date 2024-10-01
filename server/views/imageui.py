@@ -26,26 +26,7 @@ from PIL import Image
 from utils import image as imgutil
 from cloneus.utils import common as comutil
 
-def _local_logging_setup(level=logging.DEBUG):
-    # TODO: incorporate into server logging setup
-    from colorama import Fore, Back, Style
-    logger = logging.getLogger(__name__)
-    handler = logging.StreamHandler()
-    cfmt = discord.utils._ColourFormatter()
-    fncol = Back.BLACK+Fore.GREEN+Style.DIM #Fore.MAGENTA
-    fmtstr = ('[' + '{colour}' + '%(levelname)-5s' + Style.RESET_ALL
-              + Fore.BLACK+Style.BRIGHT + ' @ ' + '%(asctime)s' + Style.RESET_ALL + ']'
-              + '(' + fncol + '%(funcName)s' + Style.RESET_ALL + ')' + ' %(message)s')
-    
-    cfmt.FORMATS = {level: logging.Formatter(
-        fmtstr.format(colour=colour), ('%H:%M:%S' if level < logging.WARNING else '%Y-%m-%d %H:%M:%S'))
-        for level, colour in cfmt.LEVEL_COLOURS}
-    handler.setFormatter(cfmt)
-    logger.setLevel(level)
-    logger.addHandler(handler)
-    return logger
-
-logger = _local_logging_setup(logging.DEBUG)
+logger = logging.getLogger('pconsole')
 
 @contextmanager
 def button_disabled(button: discord.ui.Button, emoji_enabled:str, emoji_disabled:str = '⏳', exit_disabled:bool=False):
@@ -112,8 +93,8 @@ class ImagePrimaryView(discord.ui.View):
 
         self.grid_view: DynamicImageGridView # = None
         self.grid_display_active:bool # = False
-        
-        logger.debug(f'Init: {self}')
+        #logger.extra=dict(cls=self)
+        logger.debug(f'Init: {self}', extra=dict(cls=self))
         self.t_init = time.monotonic()
         self._time_last_refresh: float
         self._timeout_warning_visible = False
@@ -140,33 +121,9 @@ class ImagePrimaryView(discord.ui.View):
     def time_remaining(self):
         return self.timeout - (time.monotonic()-self._time_last_refresh)
 
-    async def reaction_toggle(self, on:bool=None, emoji:str='⏰'):
-        has_reaction = emoji in str(self.message.reactions)
-        # emoji in [r.emoji for r in self.message.reactions]:
-        # (react:= discord.utils.find(lambda r: r.emoji == emoji, self.message.reactions)):
-        if on is not None:
-            try:
-                if on and not has_reaction:
-                    await self.message.add_reaction('⏰')
-                    print(f'added react: {str(self.message.reactions)}')
-                    has_reaction = True
-            
-                if not on and has_reaction:
-                    await self.message.remove_reaction(emoji, self.call_ctx.bot.user)
-                    print(f'removed react: {str(self.message.reactions)}')
-                    has_reaction = False
-
-            except Exception as e:
-                print(e)
-        
-        return has_reaction
-
     @tasks.loop(seconds=90)
     async def timeout_warning(self, warn_begin:float = (5*60)):
         time_remaining = self.time_remaining
-        
-        #if time_remaining <= warn_at: 
-        #    await self.reaction_toggle(on=True)
         
         if time_remaining <= warn_begin:
             if time_remaining > 90:
@@ -176,8 +133,9 @@ class ImagePrimaryView(discord.ui.View):
                 #mins,secs = divmod(round(time_remaining), 60)
                 timeout_msg = "Timeout at {0} (— {1}m {2:02d}s )".format(timeout_time, *divmod(round(time_remaining), 60))
             else:
-                if self.timeout_warning.seconds > 45:
-                    self.timeout_warning.change_interval(seconds=45)
+                nxt_sec = max(15, self.timeout_warning.seconds//2)
+                if self.timeout_warning.seconds > nxt_sec:
+                    self.timeout_warning.change_interval(seconds=nxt_sec)
                 timeout_msg = f"⏰ Timeout in {time_remaining:0.1f}s"
             
             self.timeout_embed = self.timeout_embed.set_footer(text=f'{timeout_msg}')
@@ -185,16 +143,16 @@ class ImagePrimaryView(discord.ui.View):
             if self.img_count > 1:
                 self.message = await self.message.edit(embed=self.timeout_embed) # , suppress=False
             
-            logger.debug(f'Timeout in {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs["prompt"]!r})')
+            logger.debug(f'Timeout in {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs.get("prompt")!r})')
 
         
         if time_remaining <= (-3*60):
-            logger.warning(f'LATE TIMEOUT: {self} (prompt={self.call_ctx.kwargs["prompt"]!r})')
+            logger.warning(f'LATE TIMEOUT: {self} (prompt={self.call_ctx.kwargs.get("prompt")!r})', dict(cls=self))
             await self.on_timeout()
                 
 
     async def on_timeout(self) -> None:
-        logger.info(f'{self} Timeout ({time.monotonic()-self.t_init:0.2f}/{self.timeout}s)')
+        logger.info(f'{self} Timeout ({time.monotonic()-self.t_init:0.2f}/{self.timeout}s) : (prompt={self.call_ctx.kwargs.get("prompt")!r})', dict(cls=self))
         
         self.lock_ui()
         self.clear_items()
@@ -210,18 +168,15 @@ class ImagePrimaryView(discord.ui.View):
             await self.grid_view.on_timeout()
             self.grid_view.stop()
         
-        #await self.reaction_toggle(on=False)
             
         del self.images,self.thumbs
         self.stop()
        
 
-    async def reset_timeout(self):
-        #print('timeouts reset')
-        
+    async def reset_timeout(self):        
         self.timeout = self.timeout
         self._time_last_refresh = time.monotonic()
-        #await self.reaction_toggle(on=False)
+
         if self.message.embeds:
             self.message = await self.message.edit(embed=None)
         
@@ -311,8 +266,8 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
     
     async def send(self, ctx: commands.Context, n_init_images:int): #, kwargs:dict=None, image: Image.Image|None=None): #image: Image.Image|None, fpath: str|None):
         self.call_ctx = ctx
-        #self.bot: commands.Bot = self.call_ctx.bot
-        logger.debug(f'args, kwargs: {ctx.args} {ctx.kwargs}')
+        #self.bot: commands.Bot = self.call_ctx.bot        
+        logger.debug(f'args, kwargs: {ctx.args} {ctx.kwargs}', dict(cls=self))
 
         self.imgen = ctx.cog
         self.cmd_name = ctx.command.name
@@ -451,7 +406,6 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         if isinstance(image_url, discord.Attachment):
             image_url = image_url.url
         
-        # hd_config = {'refine_steps': kwargs.pop('refine_steps'), 'refine_strength':kwargs.pop('refine_strength')}
         if (ref_strength := kwargs.pop('refine_strength', None)) is None:
             ref_strength = 0.30
         
@@ -479,7 +433,8 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
                 aspect = None
             config['aspect'] = aspect
         
-        new_kwargs = self.kwarg_sets[self.cur_imgnum-1].copy()
+        old_kwargs = self.kwarg_sets[self.cur_imgnum-1]
+        new_kwargs = old_kwargs.copy()
         
         new_kwargs.update({
             'prompt':cm.vals['prompt'],
@@ -487,13 +442,25 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
             **config,
             **hd_config
         })
+        
         if image_url: #if self.is_redraw:
             #new_kwargs.update({'imgfile': cm.vals['image_url']})
             new_kwargs.update({'imgurl': cm.vals['image_url']})
         
-        #self.kwarg_sets.append(new_kwargs)
-        # NOTE: if decide to do this, remove the defer from on_submit
-        await self.redo(cm.submit_interaction, new_kwargs)
+        delta_kwargs = {}
+        for k in new_kwargs:
+            new_val, old_val = new_kwargs[k], old_kwargs[k]
+            if (new_val or old_val) and (new_val != old_val):
+                delta_kwargs[k] = new_val
+                
+        logger.debug(f'delta kwargs: {delta_kwargs}')
+        if list(delta_kwargs.keys()) == ['refine_strength']:
+            self.kwarg_sets[self.cur_imgnum-1]['refine_strength'] = delta_kwargs['refine_strength']
+            await cm.submit_interaction.response.defer()
+        else:
+            #self.kwarg_sets.append(new_kwargs)
+            # NOTE: if decide to do this, remove the defer from on_submit
+            await self.redo(cm.submit_interaction, new_kwargs)
     
 
     @discord.ui.button(label='HD', style=discord.ButtonStyle.green, disabled=True, emoji='⬇️', row=1) # 🆙
@@ -559,6 +526,7 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
     # @discord.ui.button(label='\u200b', style=discord.ButtonStyle.green, disabled=False, emoji='🛑', row=0) # row=4 # 💢 ⛶  label='🗗︎', 
     # async def halt_button(self, interaction:discord.Interaction, button: discord.ui.Button):
     #     await self.on_timeout()
+
 
 class GifUIView(ImagePrimaryView):
     def __init__(self,  images:list[Image.Image], *, timeout:float=None):
