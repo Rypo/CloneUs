@@ -2,6 +2,7 @@ import gc
 import time
 import typing
 import random
+import logging
 import warnings
 import itertools
 
@@ -27,6 +28,7 @@ from cloneus.plugins import youtube
 from cloneus.inference import genconfig, load as iload
 from cloneus.types import BatchGenerationOutput, GenerationOutput
 
+logger = logging.getLogger(__name__)
 @dataclass
 class ModelPathComponents:
     checkpoint_path: Path # modeldir_path
@@ -62,7 +64,7 @@ class ModelPathComponents:
         
 def dtype_to(dtype, to:typing.Literal['str','torch'], default=None):
     if dtype is None:
-        print('USING DEFAULT bf16, -- dtype_to')
+        logger.debug('USING DEFAULT bf16, -- dtype_to')
         dtype = default
     if isinstance(dtype,torch.dtype):
         if to=='torch':
@@ -253,7 +255,8 @@ class Cloneus(GenConfigUtilities):
         #self.torch_dtype = kwargs.pop('torch_dtype', dtype_to(self.cfg.dtype, 'torch', default=None))
         self.gen_config = self.load_genconfig(kwargs.pop('gen_config'), self.path_data)#self.load_genconfig(gen_config)
         self.ytm = kwargs.pop('ytm')#youtube.YouTubeManager()
-        
+        self.init_kwargs = kwargs
+
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         self._last_streamed_batch_values = {'input_text':'','author_prompts':[], 'output_texts':[], 'input_len': -1, 'output_lens': []}
 
@@ -270,7 +273,7 @@ class Cloneus(GenConfigUtilities):
         config = OmegaConf.load(path_data.config_path)
         config.update(**{k:v for k,v in kwargs.items() if v is not None}) # filter to avoid overwriting with None
                    
-        print(self.torch_dtype, config.attn_implementation) # Don't stop printing until fixed double call issue
+        logger.debug(self.torch_dtype, config.attn_implementation) # Don't stop printing until fixed double call issue
         
         # Try to overide even if model wasen't trained with flash attn
         if config.attn_implementation is None:
@@ -302,7 +305,7 @@ class Cloneus(GenConfigUtilities):
                 if x_eos in tokenizer.chat_template:
                     new_eos = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids(x_eos)]
                     if gen_config.eos_token_id != new_eos:
-                        print(f'Using {model_type} format - {x_eos} added. eos_token_id: ({gen_config.eos_token_id})')     
+                        logger.info(f'Using {model_type} format - {x_eos} added. eos_token_id: ({gen_config.eos_token_id})')     
                         gen_config.eos_token_id = new_eos
 
             # mistral models use [/INST] but it's NOT a single token, so can't be used in gc.eos_token_id.
@@ -362,8 +365,9 @@ class Cloneus(GenConfigUtilities):
         
     @iload.cleanup
     def load_model(self):
+        quant_method = self.init_kwargs.get('quant_method',None) # quant_method:typing.Literal['awq','merged','gptq','unsloth','aqlm','bnb4', ]=None
         self.unload_model(partial=True) # make sure all states are cleared first. If we want to preserve state, then should have called swap_model
-        self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
+        self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, quant_method=quant_method, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=None)
         
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path, trust_remote_code=True)
@@ -374,7 +378,7 @@ class Cloneus(GenConfigUtilities):
         self.base_has_system = tokenization.check_if_system(self.tokenizer) 
         self.base_needs_bos = self.base_tokenizer.chat_template and 'bos_token' not in self.base_tokenizer.chat_template
 
-        print('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {}, has_prompt: {}, tag_placement: {}'.format(
+        logger.info('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {}, has_prompt: {}, tag_placement: {}'.format(
             self.tokenizer.pad_token_id, self.gen_config.pad_token_id, 
             self.tokenizer.eos_token_id, self.gen_config.eos_token_id,
             self.base_has_system, (self.cfg.fprompt is not None), self.cfg.tag_placement,
@@ -452,11 +456,13 @@ class Cloneus(GenConfigUtilities):
     @iload.cleanup
     def swap_model(self, checkpoint_path:(str|Path), gen_config:GenerationConfig|Path=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None) -> None:
         # If the path is the same, assume that either want a dtype change or attn_impl change
+        logger.debug(f'init_kwargs: {self.init_kwargs}')
+        kwargs = {**self.init_kwargs, **dict(dtype=dtype, attn_implementation=attn_implementation)}
         if Path(checkpoint_path) == self.path_data.checkpoint_path:
             if dtype:
                 self.cast_dtype(dtype)
             if attn_implementation:
-                return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm, load=True)#.load_model()
+                return self.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, load=True, **kwargs)#.load_model()
                 
         cfg, path_data = self.config_path_data(checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
                 
@@ -466,7 +472,7 @@ class Cloneus(GenConfigUtilities):
         # If it can't be hotswapped, nuke and pave
         self.unload_model(partial=False)
         
-        return self.from_pretrained(checkpoint_path, gen_config=gen_config, dtype=dtype, attn_implementation=attn_implementation, ytm=self.ytm, load=True)#.load_model()
+        return self.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, load=True, **kwargs)#.load_model()
             
         
     def to_conversation_format(self, chat_history: list[tuple[str,str]]) -> list[dict[str,str]]:
@@ -478,7 +484,8 @@ class Cloneus(GenConfigUtilities):
         if author_seedtext is not None:
             text = self.to_seeded_text(chat_history, author_seedtext)
         else:
-            text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
+            # if there is no next author, then  we DON'T want to add a generation prompt. Just want to get the formatted chat text in it's present state 
+            text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=False) 
                 
         text = self.ytm.encode(text)
         
@@ -498,17 +505,26 @@ class Cloneus(GenConfigUtilities):
         if seedtext is None:
             seedtext = ''
         
+        
+        if seedtext:
+            # If there is actually starting text, we can rely on `continue_final_message` otherwise, if it's blank, it will fail
+            seeded_convo = self.to_conversation_format(chat_history + [(author, seedtext)] ) # to hf convo dict
+            author_seeded_text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
+            return author_seeded_text
+        
         seedtext_surrogate = '###_dummy_seedtext_###'
-        chat_history += [(author, seedtext_surrogate)]
-        text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
+        seeded_convo = self.to_conversation_format(chat_history + [(author, seedtext_surrogate)])
+        #chat_history += [(author, seedtext_surrogate)]
+        text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
+        text = text.replace(seedtext_surrogate,'')
         # split on dummy text to KEEP pre-content formatting but REMOVE post content formatting
         # this effectively removes the tag_sep dependency
         # which is important for models where the role has a special token before the content 
         # e.g. Llama-3: <|start_header_id|>(AUTHOR_TAG)<|end_header_id|>\n\n(CONTENT)<|eot_id|>
         # rather than requiring tag_sep = <|end_header_id|>, just don't use it all
         
-        text = text.split(seedtext_surrogate)[0] + seedtext
-        text = text.rstrip(' ') # IFF the formatted author_tag ends with a space ' ' should NOT trail with it
+        #text = text.split(seedtext_surrogate)[0] + seedtext
+        #text = text.rstrip(' ') # IFF the formatted author_tag ends with a space ' ' should NOT trail with it
         #text += self.apply_content_prefix(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
 
         return text
@@ -542,7 +558,9 @@ class Cloneus(GenConfigUtilities):
     def _proba_next_token(self, chat_history, top_k=5):
         #author_surrogate = '###_dummy_author_###'
         #formatted_author_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag, insert_raw=True)
-        base_input = self.to_text_input(chat_history)#+[(author_surrogate, 'ignored')]).split(formatted_author_surrogate)[0]
+        #base_input = self.to_text_input(chat_history)#+[(author_surrogate, 'ignored')]).split(formatted_author_surrogate)[0]
+        base_input = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
+        
         
         inputs = self.tokenizer(base_input, return_tensors="pt", add_special_tokens=False) # add_special_tokens=False
         outputs = self.model(**inputs.to(0))
@@ -551,6 +569,56 @@ class Cloneus(GenConfigUtilities):
         
         topkn = logprobs[:,-1,:].topk(top_k)
         return topkn.values.exp().detach(), self.tokenizer.convert_ids_to_tokens(topkn.indices.squeeze(0))
+    
+    @torch.inference_mode()
+    def _proba_subsequence(self, inputs: transformers.BatchEncoding, offset:int):
+        '''Get the probability of a (sub)sequence of tokens starting from offset'''
+        outputs = self.model(**inputs.to(0))
+        # logits to log probs, trim last to ignore future token prediction
+        out_logprobs = torch.log_softmax(outputs.logits, dim=-1, dtype=self.model.dtype)[:, :-1, :] # (b, seq-1, V)
+        # trim first BOS to align with logprobs, unsqueeze for gather
+        sequence_token_ids = inputs.input_ids[:, 1:, None] 
+        # take seq tokens from out_emb, flatten 1d
+        sequence_logprobs = out_logprobs.gather(-1, sequence_token_ids).squeeze() 
+        # trim off leading n tokens (i.e. len of previous chat history)
+        subseq_logprobs = sequence_logprobs[offset:] 
+        # sum over the subseq logs and exp for probs
+        subseq_proba = subseq_logprobs.sum().exp()
+        return subseq_proba
+    
+    @torch.inference_mode()
+    def author_probabilities(self, chat_history: list[tuple[str,str]], authors:list[str]=None)-> list[tuple[str,float]]:
+        '''For each author, return the probability they will be the next to respond given the chat context.
+
+        Args:
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
+            authors: A list of author names to calculate probabilities for. Defaults to all authors in user index if None.
+
+        Returns:
+            A list of tuples containing an author and their probability to be the next to respond, sorted desc by proba.
+        '''
+        # TODO: see if helps:
+        # https://github.com/huggingface/transformers/releases/tag/v4.44.0#:~:text=%F0%9F%93%A6-,Torch%20export%20for%20static%20cache,-pytorch%20team%20gave
+        if authors is None:
+            authors = useridx.get_users('dname')
+        
+        base_input = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), return_tensors='pt', tokenize=True)
+        base_input_len = base_input[:, 1:].numel() # skip first bos token as we do in proba_subseq (for clarity sake, could also just -1)
+        
+        seedtext_surrogate = '###_dummy_seedtext_###'
+        
+        author_sequenced_probas = {}
+        for author in authors:
+            # seed with author and dummy text (required, otherwise `continue_final_message` logic can't find the index])
+            seeded_convo = self.to_conversation_format(chat_history + [(author, seedtext_surrogate)] ) # to hf convo dict
+            author_seeded_text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
+            # remove added surrogate, tokenize
+            inputs = self.tokenizer(author_seeded_text.replace(seedtext_surrogate,''), return_tensors='pt', add_special_tokens=False)
+            author_sequenced_probas[author] = self._proba_subsequence(inputs, offset=base_input_len).item()
+        
+        author_probs = sorted(author_sequenced_probas.items(), key=lambda x: x[1], reverse=True)
+        torch.cuda.empty_cache()
+        return author_probs
 
     @torch.inference_mode()
     def _atag_shared_ntokens(self, formatted_atags:list[str]):
@@ -610,8 +678,9 @@ class Cloneus(GenConfigUtilities):
     
     #@iload.cleanup # this prevents vram blow up on repeat calls, but adds ~0.25s per call
     @torch.inference_mode()
-    def author_probabilities(self, chat_history: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
-        '''For each author, return the probability they will be the next to respond given the chat context.
+    def _batched_author_probabilities(self, chat_history: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
+        '''[DEPRECATED]
+        For each author, return the probability they will be the next to respond given the chat context.
 
         Args:
             chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
@@ -620,6 +689,9 @@ class Cloneus(GenConfigUtilities):
         Returns:
             A list of tuples containing an author and their probability to be the next to respond.
         '''
+        # NOTE: Batching makes this problem *much* more difficult than it needs to be.
+        # this function is deprecated until further notice.
+
 
         # Pros over old method:
         # - It's actually correct (?)
@@ -733,41 +805,13 @@ class Cloneus(GenConfigUtilities):
                 output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_()
                 output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
 
-        print(('TRUE' if true_batch_generate else 'MOCK' ) + f' BATCH RUN TIME: {time.perf_counter()-t0:0.2f}s')
+        logger.debug(('TRUE' if true_batch_generate else 'MOCK' ) + f' BATCH RUN TIME: {time.perf_counter()-t0:0.2f}s')
         #print('Raw Batch Outputs:\n', self.tokenizer.batch_decode(outputs, skip_special_tokens=False))
         
         # use last input_len for all. Shouldn't differ by more than a few tokens as long as author_tags are reasonable
         return output_texts,input_len
     
 
-
-
-    # def _get_batched_inputs(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None) -> tuple[str, list[str]]:
-    #     # Need to be a little bit careful about how we combine previous context + author context
-    #     # to_text_input(previous_context) + to_text_input((author,seed)) is not necessarily the same as to_text_input(previous_context+(author,seed))
-    #     # because some chat_templates use index0 or otherwise for special behavior
-    #     # simple but inefficent way is to_text_input(previous_context+(author,seed)) for each author. better way is split and replace
-    #     author_surrogate = '###_dummy_author_###'
-    #     seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
-    #     base_surrogate = self.to_text_input(chat_history, author_seedtext=(author_surrogate, seedtext_surrogate))
-        
-    #     fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
-        
-    #     input_context, fmt_dummy_seedtext = base_surrogate.split(fmt_auth_surrogate)
-    #     authseed_template = fmt_auth_surrogate+fmt_dummy_seedtext
-        
-    #     if seed_text is None: 
-    #         seed_text = ''
-        
-    #     author_prompts = [authseed_template
-    #                       .replace(fmt_auth_surrogate, useridx.format_author_tag(u, self.cfg.author_tag))
-    #                       # trimming off post seed_text content is handled by (to_text_input -> to_seeded_text), it's safe to replace rather than split[0].append
-    #                       .replace(seedtext_surrogate, seed_text if seed_text is not None else '') 
-    #                       # IFF the formatted author_tag/seedtext ends with a space ' ' should NOT trail with it
-    #                       .rstrip(' ')  
-    #                       for u in seed_authors]
-        
-    #     return input_context, author_prompts
     
     @torch.inference_mode()
     def batch_generate(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None, return_tuple: bool = False) -> list[str] | BatchGenerationOutput:
@@ -983,7 +1027,7 @@ class Cloneus(GenConfigUtilities):
         inputs = self.base_tokenizer(input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)
         input_len = inputs.pop('length')[0].item()
         
-        with self.model.disable_adapter(), torch.cuda.amp.autocast(dtype=self.base_dtype):
+        with self.model.disable_adapter(), torch.amp.autocast("cuda", dtype=self.base_dtype):
             output = self.model.generate(**inputs.to(0), generation_config=self.base_gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
         
         out_tokens = output[0,input_len:]
@@ -1025,7 +1069,7 @@ class Cloneus(GenConfigUtilities):
 
         genkwargs = dict(inputs.to(0), generation_config=self.base_gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
         
-        with self.model.disable_adapter(), torch.cuda.amp.autocast(dtype=self.base_dtype):
+        with self.model.disable_adapter(), torch.amp.autocast("cuda",dtype=self.base_dtype):
             thread = Thread(target=self.model.generate, kwargs=genkwargs)
             thread.start()
             generated_text = ""
