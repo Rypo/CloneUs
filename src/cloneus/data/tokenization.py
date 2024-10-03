@@ -111,7 +111,7 @@ def bos_chat_template(tokenizer):
     # Phi-3 medium requires BOS, but will not add as special token or in chat template.
     # it's unclear if this is a bug or intentional
     chat_template = tokenizer.chat_template
-    if chat_template and 'bos_token' not in chat_template and tokenizer.bos_token not in chat_template:
+    if chat_template and ('bos_token' not in chat_template) and (tokenizer.bos_token is not None) and (tokenizer.bos_token not in chat_template):
         print(r'NOTE: bos_token not in chat template. {{ bos_token }} will be prepended to chat_template')
         chat_template = "{{ bos_token }}"+tokenizer.chat_template
 
@@ -167,6 +167,9 @@ def batchsafe_tokenizer(tokenizer):
 def set_tokenizer_inference(tokenizer, ensure_bos:bool = True,):
     tokenizer.padding_side = 'left'
     
+    # Hermes-2-Theta-Llama-3-8B breaks on batched unless pad=eos. Need batch for author probas
+    # by default, pad = <|end_of_text|> (llama-3's eos token) but needs to be <eot_id>
+    # there was a reason why I did this check, but I don't remember which model(s) it was necessary for
     if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.unk_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     

@@ -239,7 +239,7 @@ class ChatMlHybridSpecialTokens:
     @property
     def chat_template(self):
         return (
-            f"{{{{'{self.bos_token}'}}}}"
+            (f"{{{{'{self.bos_token}'}}}}" if self.bos_token is not None else '')+ # Qwen = no bos
             "{% for message in messages %}"
             f"{{{{'{self.bot_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
             "{% endfor %}"
