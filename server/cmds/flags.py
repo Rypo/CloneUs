@@ -11,7 +11,7 @@ from . import transformers as cmd_tfms
 # Just use "words" in place of "tokens". It's a convenient lie.
 class GenerationFlags(commands.FlagConverter):
     # alias: typing.Literal['contrastive_search','multinomial_sampling', 'greedy_decoding', 'beam_search_decoding','beam_search_multinomial_sampling', 'diverse_beam_search_decoding']
-    preset: typing.Literal['ms','cs','gd','bsd','bsms','dbsd'] = commands.flag(default=None, name='preset', description='Reset values to default preset state. ("ms" and "cs" are best)')
+    preset: typing.Literal['ms','cs','gd','bsd','bsms','dbsd', 'mp'] = commands.flag(default=None, name='preset', description='Reset values to default preset state. ("ms","mp", and "cs" are best)')
     
     max_new_tokens: Range[int, 0, ]             = commands.flag(default=None, description='Maximum allowed number of words to generate (default: 256)')
     min_new_tokens: Range[int, 0, ]             = commands.flag(default=None, description='Minimum allowed number of words to generate (default: 0)')
@@ -57,9 +57,9 @@ class GenerationFlags(commands.FlagConverter):
     #use_cache: bool = commands.flag(default=True, description='Whether to use past key/values attentions for decoding.')
     #encoder_repetition_penalty: float = commands.flag(default=1.0, description='Parameter for encoder repetition penalty.')
 # Where to find some reasonable ranges:
-# - https://github.com/oobabooga/text-generation-webui/blob/8f12fb028dff4e133460fe10ef49d3f90167b313/modules/ui_parameters.py#L77
+# - https://github.com/oobabooga/text-generation-webui/blob/dev/modules/ui_parameters.py
 class GenerationExtendedFlags(commands.FlagConverter):
-    preset: typing.Literal['random','miro','dyna'] = commands.flag(default=None, description='Set values to default preset state')
+    preset: typing.Literal['random','miro','dyna', 'xtc'] = commands.flag(default=None, description='Set values to default preset state')
     temperature_last: bool                  = commands.flag(default=None, description='Apply temp after filtering. This + high_tep + min_p = creative but coherent (default: False)') # False
     
     dynamic_temperature: bool               = commands.flag(default=None, description='Enable dynamic temperature - auto picks temp from [low, high] using cross-entropy (default: False)') # False
@@ -80,9 +80,11 @@ class GenerationExtendedFlags(commands.FlagConverter):
     frequency_penalty: float | None         = commands.flag(default=None, description='Like repetition_penalty, but gets stronger each time a word is repeated (default: 0)') # 0
     presence_penalty: float | None          = commands.flag(default=None, description='Like repetition_penalty, but penalty is added rather than multiplied by score (default: 0)') # 0
     repetition_penalty_range: int           = commands.flag(default=None, description='Number of most recent tokens considered in repetition penalty. 0=full context window (default: 0)' ) # 0, -- 1024
-    
-    
-    
+    # https://github.com/oobabooga/text-generation-webui/pull/6335
+    xtc_threshold: Range[float, 0, 1]       = commands.flag(default=None, description='Minimum probablity to mark tokens as a "top choice" (default: 0.1)') # If 2 or more tokens have probability above this threshold, consider removing all but the last one. 
+    xtc_probability: Range[float, 0, 1]     = commands.flag(default=None, description='Probablity of excluding top choices. Enables when > 0. (default: 0)') # 0.5 
+    # recommend: Min-P = 0.02, XTC threshold = 0.1, XTC probability = 0.5, DRY (multiplier 0.8),
+    dry_multiplier: Range[float, 0, ]       = commands.flag(default=None, description='DRY penalty weight. Enables when > 0. (default: 0.0)') #0.8
 
 
 
@@ -173,24 +175,3 @@ class ReanimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
 
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
     aseed: int = commands.flag(default=None, aliases=['animation_seed'],) 
-
-# class RedrawFlags(commands.FlagConverter):
-#     # image_url: str = commands.flag(
-#     #     description="Image URL. Square = Best results. 1024x1024 = ideal (512x512 = Turbo ideal).")
-#     # prompt: str = commands.flag(
-#     #     description="A description of the image to be generated.")
-#     steps: int = commands.flag(
-#         default=None, description="Num of iterations to run. Increase = ⬆Quality, ⬆Run Time. Default=50 (Turbo: Default=4).")
-#     #strength: commands.Range[float, 0, 100] = commands.flag(
-#     strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
-#         default=80, description="How much to change input image. 0 = Change Nothing. 100=Change Entirely. Default=80")
-    
-#     neg_prompt: str = commands.flag(
-#         default=None, description="Description of what you DON'T want. Usually comma sep list of words. Default=None (Turbo ignores).")
-#     guidance: float = commands.flag(
-#         default=10.0, description="Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default=10.0 (Turbo ignores).")
-#     denoise_blend: app_commands.Transform[float, cmd_tfms.PercentTransformer]  = commands.flag( # commands.Range[float, 0, 100]
-#         default=None, description="Percent of `steps` for Base stage before Refine stage. ⬇Quality, ⬇Run Time. Default=None (Turbo ignores).")
-    
-#     refine_strength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(
-#         default=30, description="Refinement stage alteration power. 0 = Alter Nothing. 100=Alter Everything. Default=30")

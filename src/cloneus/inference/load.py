@@ -15,11 +15,13 @@ from transformers import (
     AwqConfig,
 )
 import transformers
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 
 from cloneus.data import tokenization
+from cloneus.plugins import sampler_hijack
+
 def cleanup(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -28,7 +30,7 @@ def cleanup(func):
         finally:
             torch.cuda.empty_cache()
             gc.collect()
-    return wrapper  
+    return wrapper
 
 
 def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer:bool=False, ensure_bos:bool = True, *inputs, **kwargs):
@@ -41,6 +43,8 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
 
     tokenizer = tokenization.set_tokenizer_inference(tokenizer, ensure_bos=ensure_bos)
+    
+    sampler_hijack.hijack_samplers(tokenizer) # this enables XTC, DRY sampling methods
 
     return tokenizer
 
@@ -120,13 +124,15 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
     return llm
 
 
-def load_unsloth(checkpoint_dirpath, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     from unsloth import FastLanguageModel
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
-    warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
+    #print('NAME OR PATH',f'{tokenizer.name_or_path=}')
+    #warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
     # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
+    peft_config = PeftConfig.from_pretrained(checkpoint_dirpath)
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = checkpoint_dirpath,
+        model_name = peft_config.base_model_name_or_path,
         max_seq_length = tokenizer.model_max_length,
         dtype = dtype,
         load_in_4bit = True,
@@ -136,6 +142,12 @@ def load_unsloth(checkpoint_dirpath, dtype=None, attn_implementation:typing.Lite
 
     )
     
+    # From https://github.com/huggingface/peft/issues/184
+    # Now add PEFT adapters
+    #model.enable_input_require_grads()
+    model = PeftModelForCausalLM(model, peft_config)
+    # Patch it as well!
+    model = FastLanguageModel.patch_peft_model(model, False)
     FastLanguageModel.for_inference(model)
 
     return model, tokenizer
@@ -190,7 +202,7 @@ def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','me
             #raise ValueError('Unable to determine model type from model_savedir path')
 
 
-def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PeftModelForCausalLM, PreTrainedTokenizer]:
+def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PeftModelForCausalLM, PreTrainedTokenizerBase]:
     t0=time.perf_counter()
     quant_config = None
     if quant_method=='bnb4':
@@ -214,7 +226,7 @@ def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, att
     print(f'load_peft: {time.perf_counter()-t0:0.2f}s')
     return model, tokenizer
 
-def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizer]:
+def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
     t0=time.perf_counter()
     
     quant_config = None
@@ -260,7 +272,7 @@ def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16,
     return model, tokenizer
 
 
-def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizer]:
+def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
     if quant_config is None:
         quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
     
