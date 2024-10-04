@@ -1,6 +1,11 @@
 import os
+import sys
+import time
+import signal
+import psutil
 import typing
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 import uvloop
 import discord
@@ -20,9 +25,33 @@ Commands that accept arguments can be called with either prefix.
 '''
 
 
-logger = settings.logging.getLogger('bot')
+logger = logging.getLogger('bot')
 
 DYN_GLOB = '*.py'  if settings.TESTING else '[!_]*.py'
+
+def hard_reset():
+    """Restarts the current program, with file objects and descriptors cleanup"""
+    # https://stackoverflow.com/a/33334183
+    # see also:
+    # https://gist.github.com/plieningerweb/39e47584337a516f56da105365a2e4c6
+    # https://stackoverflow.com/questions/72715121/how-to-restart-a-python-script
+    # https://stackoverflow.com/questions/11329917/restart-python-script-from-within-itself
+    
+    os.environ['REBOOT_REQUESTED'] = '1'
+    
+    try:
+        p = psutil.Process(os.getpid())
+        #time.sleep(3.0)
+        #p.send_signal(signal.SIGINT)
+        for handler in p.open_files():# + p.net_connections():
+            os.close(handler.fd)
+        p.send_signal(signal.SIGINT)
+
+    except Exception as e:
+        logger.error(e, exc_info=e)
+    #finally:
+        # python = sys.executable
+        # os.execl(python, python, *sys.argv)
 
 class BotUs(commands.Bot):
     def __init__(self):
@@ -159,15 +188,26 @@ async def main(bot=None):
         msg = await interaction.followup.send(f'Reloaded: {cog}', ephemeral=True, wait=True)
         await msg.delete(delay=1)
     
-
-    @bot.command(name='restart')
-    async def restart(ctx: commands.Context):
-        '''Reload all command extentions'''
-        os.environ['EAGER_LOAD'] = '1'
-        await ctx.send('Restarting...', delete_after=3)
-        await bot.toggle_extensions('cogs', 'reload')
-        os.environ.pop('EAGER_LOAD')
-
+    
+    @bot.command(name='restart', aliases=['reboot'])
+    async def restart(ctx: commands.Context, spec: typing.Literal["-h", "-s",]='-h'):
+        '''Nuke and Pave. All state will be lost.
+        
+        Args:
+            spec: type of reboot (options "-h" ard, "-s" oft)
+                "-h" - hard restart, complete shutdown and reboot
+                "-s" - soft restart, attempt to reload without shutting down everything
+        '''
+        if spec == '-s':
+            os.environ['EAGER_LOAD'] = '1'
+            msg = await ctx.send('Attempting soft reboot..')
+            await bot.toggle_extensions('cogs', 'reload')
+            os.environ.pop('EAGER_LOAD')
+            await msg.edit('Done.', delete_after=3)
+        elif spec == '-h':
+            await ctx.send('⚠ Reboot Request Received... Razing and Rebuilding to Remedy RuhRos.')
+            await bot.toggle_extensions('cogs', 'off')
+            hard_reset()
 
     @bot.command(name='gsync', aliases=['sync'])
     #@commands.guild_only()
@@ -256,7 +296,13 @@ def run_main():
         for task in asyncio.all_tasks(bot.loop):
            print(task.get_name())
            task.cancel()
-
+        
+        if 'REBOOT_REQUESTED' in os.environ:
+            logger.info(f'REBOOT_REQUESTED. Running: {sys.argv}')
+            os.environ.pop('REBOOT_REQUESTED')
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+        
         # nothing to do here
         # `asyncio.run` handles the loop cleanup
         # and `self.start` closes all sockets and the HTTPClient instance.
@@ -270,5 +316,3 @@ if __name__ == '__main__':
     # main()
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     run_main()
-    #main_thread = Thread(target=main)
-    #main_thread.run()
