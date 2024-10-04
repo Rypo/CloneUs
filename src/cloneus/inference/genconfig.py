@@ -41,7 +41,7 @@ class GenOpts:
     suppress_tokens: list[int] = None
     begin_suppress_tokens: list[int] = None
     guidance_scale: float = None
-    stop_strings: str| list[str] = None # TODO: use in place of custom stopword logic
+    stop_strings: str| list[str] = None
     token_healing: bool = False
     cache_implementation: str =  None # "quantized"
     cache_config: transformers.CacheConfig|dict= None # transformers.QuantizedCacheConfig('HQQ', nbits=4, compute_dtype=torch.bfloat16, device='cuda')
@@ -54,6 +54,7 @@ class GenOpts:
 # src: https://github.com/oobabooga/text-generation-webui/blob/81f603d09fab9afad9fa54f123c57c187bc115df/extensions/openai/typing.py#L28
 # src2: https://github.com/oobabooga/text-generation-webui/blob/81f603d09fab9afad9fa54f123c57c187bc115df/modules/presets.py#L13
 # desc: https://github.com/oobabooga/text-generation-webui/wiki/03-%E2%80%90-Parameters-Tab#parameters-description
+# updated params, descs: https://github.com/oobabooga/text-generation-webui/blob/dev/modules/ui_parameters.py
 @dataclass
 class GenOptsExtended(GenOpts):
     '''Transformers Generation Config with added oobabooga text-generation-webui config options'''
@@ -78,7 +79,14 @@ class GenOptsExtended(GenOpts):
     mirostat_mode: int = 0 # 0 or 2
     mirostat_tau: float = 5
     mirostat_eta: float = 0.1
+
+    dry_multiplier: float = 0.0 # 0.8, ~ penalty weight, activator of DRY
+    dry_base: float = 1.75 # pentalty--seqlength scaling factor 
+    dry_allowed_length: int = 2 # max permitted repeats before pentalty applied
+    dry_sequence_breakers: list[str] = field(default_factory=lambda: ['"\\n", ":", "\\"", "*"'])
     
+    xtc_threshold: float = 0.1
+    xtc_probability: float = 0
     # def to_a_dict(self):
     #     return asdict(self)
     #seed: int = -1
@@ -162,16 +170,7 @@ def randomize_preset(gen_config:GenerationConfig):
     #pprint.PrettyPrinter(indent=4, width=1, sort_dicts=False).pprint(remove_defaults(state))
     return gen_config# #*[generate_params[k] for k in presets_params()]
 
-GENMODE_PRESETS = {
-    'ms': 'multinomial_sampling',
-    'cs': 'contrastive_search',
-    'gd': 'greedy_decoding',
-    'dyna': 'dynamic_temperature',
-    'miro': 'mirostat',
-    'bsd': 'beam_search_decoding',
-    'bsms': 'beam_search_multinomial_sampling',
-    'dbsd': 'diverse_beam_search_decoding'
- }
+
 
 def load_gen_config(gen_config_path:str|Path=None, gen_config_name:str="generation_config.json"):
     if gen_config_path is None:
@@ -197,7 +196,7 @@ def load_gen_config(gen_config_path:str|Path=None, gen_config_name:str="generati
     return gen_config
 
 
-def preset_gen_config(preset:typing.Literal['ms','cs','gd','miro','dyna', 'bsd','bsms','dbsd'], pad_token_id:int, eos_token_id:int|list[int], **kwargs):
+def preset_gen_config(preset:typing.Literal['ms','cs','gd','mp', 'miro','dyna','xtc', 'bsd','bsms','dbsd'], pad_token_id:int, eos_token_id:int|list[int], **kwargs):
     '''Returns a GenerationConfig with the minimum relevant argments for the preset.
     
     Any kwargs that are not used for the preset are ignored.
@@ -244,17 +243,36 @@ def preset_gen_config(preset:typing.Literal['ms','cs','gd','miro','dyna', 'bsd',
     
     elif preset_name in ['gd','greedy_decoding']:
         genconfig = GenerationConfig(do_sample=False, **shared_args)
-    
+    elif preset_name in ['mp', 'minp']:
+        min_p = kwargs.get('min_p',0.1)# = 0.1
+        temperature = kwargs.get('temperature', 1.5)
+        
+        genconfig = GenerationConfig(do_sample=True, temperature=temperature, min_p = min_p, **shared_args)
     elif preset_name in ['miro', 'mirostat']:
+        # decent explaination of tau, eta: https://old.reddit.com/r/LocalLLaMA/comments/1furllv/which_llm_models_is_the_funniest_one_as_in_the/lq2povc/
         mirostat_mode = 2 # 0 or 2
-
+        
         genconfig = GenerationConfig(do_sample=True, mirostat_mode=mirostat_mode, mirostat_tau=mirostat_tau, mirostat_eta=mirostat_eta, **shared_args)
 
     elif preset_name in ['dyna', 'dynamic_temperature']:
-        dynamic_temperature = True # 0 or 2
-
-
+        dynamic_temperature = True
         genconfig = GenerationConfig(do_sample=True, dynamic_temperature=dynamic_temperature, dynatemp_low=dynatemp_low, dynatemp_high=dynatemp_high, dynatemp_exponent=dynatemp_exponent, **shared_args)
+    
+    elif preset_name in ['xtc', 'exclude_top_choice']:
+        # https://github.com/oobabooga/text-generation-webui/pull/6335
+        # https://www.reddit.com/r/LocalLLaMA/comments/1ev8n2s/exclude_top_choices_xtc_a_sampler_that_boosts/
+        dry_multiplier = kwargs.get('dry_multiplier',  0.8)
+        dry_sequence_breakers = kwargs.get('dry_sequence_breakers', default_gc.dry_sequence_breakers)
+        xtc_threshold = kwargs.get('xtc_threshold',  0.1)
+        xtc_probability = kwargs.get('xtc_probability',  0.5)
+        temperature = kwargs.get('temperature',  1)
+        min_p = kwargs.get('min_p',  0.1)
+        
+        repetition_penalty = kwargs.get('repetition_penalty', 1.0 )
+
+        shared_args = {**shared_args, **{'repetition_penalty':repetition_penalty}}
+
+        genconfig = GenerationConfig(do_sample=True, dry_multiplier=dry_multiplier, xtc_threshold=xtc_threshold, xtc_probability=xtc_probability, min_p=min_p, dry_sequence_breakers=dry_sequence_breakers, **shared_args)
 
     elif preset_name in ['bsd', 'beam_search_decoding']:
         genconfig = GenerationConfig(do_sample=False, num_beams=num_beams, early_stopping=early_stopping, **shared_args)
@@ -278,30 +296,3 @@ def preset_gen_config(preset:typing.Literal['ms','cs','gd','miro','dyna', 'bsd',
         raise ValueError(f'unknown preset "{preset}"')
     
     return genconfig
-
-class WordListCriteria(StoppingCriteria):
-    # https://discuss.huggingface.co/t/implimentation-of-stopping-criteria-list/20040/19
-    # https://github.com/nestordemeure/stop_word/blob/main/stop_word_criteria.py
-    def __init__(self, stop_token_ids: list[torch.Tensor], words:list[str]):
-        self.stop_token_ids = stop_token_ids
-        self.words = words
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
-        for stop_ids in self.stop_token_ids:
-            if torch.all(input_ids[0, -stop_ids.shape[0]:] == stop_ids): 
-                return True
-        return False
-    
-    @classmethod
-    def from_words(cls, words:list[str], tokenizer:transformers.PreTrainedTokenizer, device=0):
-        # NOTE: The intentional space prefix on words. Different tokens may be used at sentence start vs first mid/end.
-        # This is paricularily problematic when \n is part of a stop word
-        # To normalize for this, add a space prefix and trim it off [0,1:]
-        
-        stop_token_ids = [tokenizer(' ' + x, return_tensors='pt', add_special_tokens=False)['input_ids'][0,1:].to(device) for x in words]
-        return cls(stop_token_ids, words)
-    
-    def trim_stopwords(self, text:str):
-        for word in self.words:
-            text=text.removesuffix(word)
-        return text

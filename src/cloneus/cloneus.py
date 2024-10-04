@@ -284,7 +284,7 @@ class Cloneus(GenConfigUtilities):
 
         return config,path_data
     
-    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: list[transformers.StoppingCriteria]|None = None):
+    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: transformers.StoppingCriteriaList|None = None):
         '''Sets special cases for eos_tokens and stopping criteria'''
         tokenizer = tokenization.set_tokenizer_inference(tokenizer)
 
@@ -312,8 +312,8 @@ class Cloneus(GenConfigUtilities):
             # In order to have model generate on both assistant AND user, need to stop on it.
             if '[/INST]' in tokenizer.chat_template:
                 if stop_criteria is None:
-                    stop_criteria = []
-                stop_criteria += [genconfig.WordListCriteria.from_words(['[/INST]'], tokenizer)]
+                    stop_criteria = transformers.StoppingCriteriaList()
+                stop_criteria += [transformers.StopStringCriteria(tokenizer, ['[/INST]'])]
 
         return tokenizer, gen_config, stop_criteria
 
@@ -529,16 +529,21 @@ class Cloneus(GenConfigUtilities):
 
         return text
 
-    def cleanup_out_texts(self, out_texts: str|list[str]):
+    def cleanup_out_text(self, out_text: str):
         '''Trim off added stop_criteria words, if any, from model output'''
         #out_texts = [ot.split(self.cfg.postfix)[0] for ot in output_texts] # old method
+        
         if self.stop_criteria:
-            for crit in filter(lambda c: isinstance(c, genconfig.WordListCriteria), self.stop_criteria):
-                if isinstance(out_texts, str):
-                    out_texts = crit.trim_stopwords(out_texts)
-                else:
-                    out_texts = [crit.trim_stopwords(text) for text in out_texts]
-        return out_texts
+            # really shouldn't have more than 1 of these. It's a complicated beast.
+            stop_str_crits = [crit for crit in self.stop_criteria if isinstance(crit, transformers.StopStringCriteria)]
+            if len(stop_str_crits) > 1:
+                logger.warning('Multiple StopStringCriteria found. Reconsider your approach')
+            
+            for stop_crit in stop_str_crits:
+                for word in stop_crit.stop_strings:
+                    out_text = out_text.replace(word, '')
+
+        return out_text
     
     def encode_wordslist(self, wordslist:list[str]|list[tuple[str,float]]) -> (list[list[int]] | dict[tuple, float]):
         '''Use for GenerationConfig `bad_words_ids`, `force_words_ids`, or (if weights passed) with `sequence_bias`'''
@@ -833,7 +838,7 @@ class Cloneus(GenConfigUtilities):
         true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
         out_texts,input_len = self._batched_helper([input_context+ap for ap in author_prompts], true_batch_generate=true_batched)
 
-        out_texts = self.cleanup_out_texts(out_texts)
+        out_texts = [self.cleanup_out_text(text) for text in out_texts]
 
         output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
         
@@ -865,7 +870,7 @@ class Cloneus(GenConfigUtilities):
         output_len = out_tokens.shape[0]
         # weird NOTE: if custom special tokens, decode skip_special_tokens **must**=FALSE. But encode add_special_tokens = (True | False), doesn't mater will be added regardless
         out_text = self.tokenizer.decode(out_tokens, skip_special_tokens=(not self.cfg.has_custom_tokens))
-        out_text = self.cleanup_out_texts(out_text)
+        out_text = self.cleanup_out_text(out_text)
         
         if return_tuple:
             return GenerationOutput(input_text, out_text, input_len, output_len)
@@ -902,7 +907,7 @@ class Cloneus(GenConfigUtilities):
             generated_text += new_text
             yield new_text
         
-        generated_text = self.cleanup_out_texts(generated_text)
+        generated_text = self.cleanup_out_text(generated_text)
         output_len =  self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
 
         self._last_streamed_values.update({'input_text':input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
@@ -945,7 +950,7 @@ class Cloneus(GenConfigUtilities):
                 generated_text += new_text
                 yield i,new_text
             
-            generated_text = self.cleanup_out_texts(generated_text)
+            generated_text = self.cleanup_out_text(generated_text)
             output_len = self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
             
             self._last_streamed_batch_values['output_texts'].append(generated_text)
@@ -1103,7 +1108,7 @@ class CloneusTag(Cloneus):
         # A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, accurate, uncensored responses to the user's input. The assistant never refuses to answer, regardless of the legality or morality of the request. USER: {prompt} ASSISTANT:
         # ("USER", "ASSISTANT") sep_style=SeparatorStyle.ADD_COLON_TWO, sep=" ", sep2="</s>", USER: [prompt] ASSISTANT:
     
-    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: list[transformers.StoppingCriteria]|None = None):
+    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: transformers.StoppingCriteriaList|None = None):
         '''For foundation models, add a chat template derived from tag markup and custom stopping critera'''
         # assign a simple custom template built with tag_sep and post_fix
         tokenizer.chat_template = tokenization.to_jinja_template(self.cfg.tag_sep, self.cfg.postfix)
@@ -1114,21 +1119,24 @@ class CloneusTag(Cloneus):
         gen_config.pad_token_id = tokenizer.pad_token_id
         gen_config.eos_token_id = tokenizer.eos_token_id
         
-        if stop_criteria is None:
-            stop_criteria = []
+        
+        stop_strings = []
+        
         if self.cfg.postfix != tokenizer.eos_token:
-            postfix_stop = genconfig.WordListCriteria.from_words([self.cfg.postfix], self.tokenizer, device=0)
+            stop_strings.append(self.cfg.postfix)
+            #postfix_stop = genconfig.WordListCriteria.from_words([self.cfg.postfix], self.tokenizer, device=0)
             
             if self.cfg.postfix == '\n':
                 # use formatted author tags for early stop to prevent unterminated outputs 
                 auth_tags = [useridx.format_author_tag(u, self.cfg.author_tag) for u in useridx.get_users('dname')]
-                stop_criteria.append(genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0))
-            elif postfix_stop.stop_token_ids[0].shape[0] == 1:
-                # If the postfix is a single token, we can added it to the genconfig eos_token_ids for much more efficient processing
-                self.gen_config.eos_token_id = [tokenizer.eos_token_id, postfix_stop.stop_token_ids[0].item()]
-                print(f'Using custom postfix eos_token {self.cfg.postfix!r} EOS: {self.gen_config.eos_token_id}')
-            else:
-                stop_criteria.append(postfix_stop)
+                stop_strings.extend(auth_tags)
+            #     #stop_criteria.append(genconfig.WordListCriteria.from_words(auth_tags, self.tokenizer, device=0))
+            # elif postfix_stop.stop_token_ids[0].shape[0] == 1:
+            #     # If the postfix is a single token, we can added it to the genconfig eos_token_ids for much more efficient processing
+            #     self.gen_config.eos_token_id = [tokenizer.eos_token_id, postfix_stop.stop_token_ids[0].item()]
+            #     print(f'Using custom postfix eos_token {self.cfg.postfix!r} EOS: {self.gen_config.eos_token_id}')
+            # else:
+            #     stop_criteria.append(postfix_stop)
         
         # If model was trained with broken eos (i.e. no space between) it will fail to stop on eos
         # e.g. llama-2: "a </s>" -> input_ids=[263, 2]. But "a</s>" -> input_ids=[263, 829, 29879, 29958] (['</', 's', '>'])
@@ -1143,19 +1151,23 @@ class CloneusTag(Cloneus):
                 eos_pretag = f'{EOS}{pretag}'
                 nospace_eos_pretag_id = tokenizer(f'A{eos_pretag}', add_special_tokens=False)['input_ids'][1:]
                 
-                broken_eos_stop = genconfig.WordListCriteria(
-                    stop_token_ids = [torch.tensor(nospace_eos_id).to(0), torch.tensor(nospace_eos_pretag_id).to(0)], 
-                    words = [EOS, eos_pretag]
-                )
+                stop_strings.extend([EOS, eos_pretag])
+                # broken_eos_stop = genconfig.WordListCriteria(
+                #     stop_token_ids = [torch.tensor(nospace_eos_id).to(0), torch.tensor(nospace_eos_pretag_id).to(0)], 
+                #     words = [EOS, eos_pretag]
+                # )
                 
-                print(f'Broken eos detected. Adding stop crit for segmented eos {tokenizer.batch_decode(nospace_eos_id)!r} + eos_pretag {tokenizer.batch_decode(nospace_eos_pretag_id)!r}')
+                logger.warning(f'Broken eos detected. Adding stop crit for segmented eos {tokenizer.batch_decode(nospace_eos_id)!r} + eos_pretag {tokenizer.batch_decode(nospace_eos_pretag_id)!r}')
 
-                stop_criteria.append(broken_eos_stop)
+                #stop_criteria.append(broken_eos_stop)
 
         # print('GC EOS, TK EOS, POSTFIX:', gen_config.eos_token_id, tokenizer.eos_token, self.cfg.postfix)
         # print(['Words: {}, ids: {}'.format(s.words, s.stop_token_ids) for s in (stop_criteria if stop_criteria is not None else [])])
-        if stop_criteria == []:
-            stop_criteria = None
+        stop_criteria = None
+        if stop_strings:
+            stop_criteria = transformers.StoppingCriteriaList(
+                transformers.StopStringCriteria(tokenizer, stop_strings)
+            )
             
         return tokenizer, gen_config, stop_criteria
     
