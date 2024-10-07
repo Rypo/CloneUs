@@ -121,6 +121,9 @@ LOGGING_CONFIG = {
         "color_console": {
             '()': lambda: ColorFormatter(defaults={'clsName':''})
         },
+        "struct": {
+            'format': '%(message)s'
+        },
     },
     "handlers": {
         "console": {
@@ -173,6 +176,13 @@ LOGGING_CONFIG = {
             "mode": "w",
             "formatter": "verbose",
         },
+        "cmds_jsonl": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "filename": LOGS_DIR/"struct_cmds.jsonl",
+            "mode": "a",
+            "formatter": "struct",
+        },
     },
     "loggers": {
         "bot": {"handlers": ["console"], "level": "INFO", "propagate": False},
@@ -180,6 +190,8 @@ LOGGING_CONFIG = {
         "cmds": {"handlers": ["cmdsfile"], "level": "INFO", "propagate": False},
         "event": {"handlers": ["eventfile"], "level": "INFO", "propagate": False},
         "pconsole": {"handlers": ["color_console"], "filters": [], "level": "DEBUG", "propagate": False},
+        "struct_cmds": {"handlers": ["cmds_jsonl"], "level": "DEBUG", "propagate": False},
+
         "discord": {
             "handlers": ["console2", "file"],
             "level": "INFO",
@@ -190,6 +202,7 @@ LOGGING_CONFIG = {
 
 def move_logs_lts(*logfilesnames):
     '''Move last run's logs to a daily and merge all file'''
+    # TODO: RotatingFileHandler
     for logfile in logfilesnames:
         mlogs: Path = LOGS_DIR/logfile
         

@@ -6,17 +6,19 @@ import psutil
 import typing
 import asyncio
 import logging
+import datetime
 from contextlib import asynccontextmanager
 import uvloop
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cloneus.data import useridx
+# NOTE: Do not import from cloneus in this file. It seems to break logging in the package.
+#from cloneus.data import useridx
 
 import config.settings as settings
 
-
+import ujson as json
 
 DESC = '''A bot that fills in when your friends go AWOL (and other things).
 
@@ -26,7 +28,7 @@ Commands that accept arguments can be called with either prefix.
 
 
 logger = logging.getLogger('bot')
-
+struct_logger = logging.getLogger('struct_cmds')
 DYN_GLOB = '*.py'  if settings.TESTING else '[!_]*.py'
 
 def hard_reset():
@@ -72,6 +74,8 @@ class BotUs(commands.Bot):
         print('ready')
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         await self.toggle_extensions(extdir='cogs', state='on')
+        if os.environ.pop('MESSAGE_ON_START', None):
+            await self.get_channel(settings.CHANNEL_ID).send('I. am. REBORN.')
     
     def _get_presence(self):
         text_up = self._operational_state['chat']
@@ -172,6 +176,68 @@ class BotUs(commands.Bot):
             logger.error(f'In {ctx.command.qualified_name}:', exc_info=error.original)
             await ctx.send(f'An error occurred: {error}')
 
+    async def on_app_command_completion(self, interaction:discord.Interaction, command:app_commands.Command):
+        # app_commands.ContextMenu
+        data = {
+            'log_time': datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S%z'),
+            'dev': settings.TESTING,
+        }
+
+        idata = {
+            'interaction.data':interaction.data,
+            'interaction.id':interaction.id,
+            'interaction.created_at':interaction.created_at.strftime('%Y-%m-%d %H:%M:%S%z'),
+            'interaction.type':interaction.type,
+            'interaction.user':{'id':interaction.user.id, 'name':interaction.user.name, 'global_name':interaction.user.global_name},
+            'interaction.guild_id':interaction.guild_id,
+            'interaction.channel_id':interaction.channel_id,
+            'interaction.application_id':interaction.application_id,
+            
+            'interaction.context_types':interaction.context.to_array(),
+            'interaction.extras':interaction.extras,
+            #'interaction.command': interaction.command.to_dict(self.tree),
+            #'interaction.command_failed':interaction.command_failed,
+        }
+        data.update(idata)
+
+        if interaction.message is not None:
+            i_msg_data = {
+                'interaction.message': {
+                    'id':interaction.message.id,
+                    'type':interaction.message.type,
+                    'created_at':interaction.message.created_at.strftime('%Y-%m-%d %H:%M:%S%z'),
+                    'author.id':interaction.message.author.id,
+                    'application_id':interaction.message.application_id,
+                    'content':interaction.message.content,
+                    'pinned':interaction.message.pinned,
+                    'webhook_id':interaction.message.webhook_id,
+                    'attachments': [attachment.to_dict() for attachment in interaction.message.attachments],
+                    'reactions': [{'reaction': str(react), 'count':react.count} for react in  interaction.message.reactions],
+                    'components': [component.to_dict() for component in interaction.message.components],
+                    'mentions': [{'user_id':user.id} for user in interaction.message.mentions]
+            }}
+            data.update(i_msg_data)
+        # 'command': command.to_dict(self.tree),
+        #param_types = dict(subcommand = 1, subcommand_group = 2, string = 3, integer = 4, boolean = 5, user = 6, channel = 7, role = 8, mentionable = 9, number = 10, attachment = 11,)
+        cmd_data = {
+            'command.module':command.module,
+            'command.name': command.name,
+            'command.description': command.description,
+            'command.parameters': [{'name': param.name, 
+                                    'type': param.type, 
+                                    'default': (str(param.default) if param.required else param.default), 
+                                    'required': param.required} 
+                                    for param in command.parameters],
+            #'command': command.to_dict(self.tree), 
+            #'options': [param.to_dict() for param in self._params.values()],
+            'command.extras':command.extras,
+        }
+
+        data.update(cmd_data)
+        
+        #data.update(ctx_data)
+        struct_logger.info(json.dumps(data))
+        
 
 async def main(bot=None):
     cog_list = [c.stem.lower() for c in settings.COGS_DIR.glob(DYN_GLOB) if c.stem != '__init__']
@@ -205,7 +271,7 @@ async def main(bot=None):
             os.environ.pop('EAGER_LOAD')
             await msg.edit('Done.', delete_after=3)
         elif spec == '-h':
-            await ctx.send('⚠ Reboot Request Received... Razing and Rebuilding to Remedy RuhRos.')
+            await ctx.send('⚠️ **Reboot Request Received** ⚠️ Razing and Rebuilding to Remedy RuhRos...')
             await bot.toggle_extensions('cogs', 'off')
             hard_reset()
 
@@ -300,6 +366,8 @@ def run_main():
         if 'REBOOT_REQUESTED' in os.environ:
             logger.info(f'REBOOT_REQUESTED. Running: {sys.argv}')
             os.environ.pop('REBOOT_REQUESTED')
+            os.environ['MESSAGE_ON_START'] = '1'
+            
             python = sys.executable
             os.execl(python, python, *sys.argv)
         
@@ -312,7 +380,8 @@ if __name__ == '__main__':
     #from threading import Thread
     settings._init_dirs()
     settings.setup_logging()
-    useridx.check_author_initials()
+    
+    #useridx.check_author_initials()
     # main()
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     run_main()
