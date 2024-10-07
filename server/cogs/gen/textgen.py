@@ -527,8 +527,22 @@ class TextGen(commands.Cog, SetConfig):
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
 
+    @commands.hybrid_command(name='ubot')
+    @app_commands.choices(user=cmd_choices.AUTHOR_DISPLAY_NAMES)
+    async def user_bot(self, ctx, user: str, seed_text: str = None ):
+        """Call a bot by the authors username 
+        
+        Args:
+            user: the username of bot author
+            seed_text: Text to start off responses with.
+        """
+        
+        if self.streaming_mode:
+            return await self.streambot(ctx, user, seed_text)
+        
+        return await self.anybot(ctx, user, seed_text=seed_text)
 
-    @commands.hybrid_command(name='ibot')
+    @commands.hybrid_command(name='mbot')
     @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def initials_bot(self, ctx: commands.Context, author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer], *, seed_text: str=None):
         """Call one or more bots using author initials
