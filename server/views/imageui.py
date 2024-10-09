@@ -143,7 +143,9 @@ class ImagePrimaryView(discord.ui.View):
             if self.img_count > 1:
                 self.message = await self.message.edit(embed=self.timeout_embed) # , suppress=False
             
-            logger.debug(f'Timeout in {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs.get("prompt")!r})')
+            # use embed as a proxy to avoid logging every time
+            if self.message.embeds:
+                logger.info(f'Timeout init. {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs.get("prompt")!r})')
 
         
         if time_remaining <= (-3*60):
