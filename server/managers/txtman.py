@@ -7,7 +7,7 @@ from functools import cached_property
 import random
 import typing
 
-
+import torch
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -23,11 +23,10 @@ from cloneus.plugins import youtube
 
 def get_gpu_memory():
     try:
-        output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,nounits,noheader'])
-        output = output.decode('utf-8').strip().split(',')
-        vram_used = int(output[0])
-        vram_total = int(output[1])
-        #return f'{vram_used}MiB / {vram_total}MiB'
+        memfree,memtotal = torch.cuda.mem_get_info()
+        vram_total = round(memtotal / (1024**2))
+        vram_used = round((memtotal-memfree) / (1024**2))
+        
         return vram_used, vram_total
     except (subprocess.CalledProcessError, IndexError, ValueError) as e:
         print(e)
