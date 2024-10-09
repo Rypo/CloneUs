@@ -1,6 +1,7 @@
 import gc
 import os
 import json
+import logging
 import warnings
 import argparse
 from omegaconf import OmegaConf
@@ -12,6 +13,8 @@ import cloneus.training.trainer as mtrain
 import cloneus.training.model as mllm
 from cloneus.data import dataset, tokenization, useridx
 from cloneus.types import cpaths
+
+logger = logging.getLogger('scripts')
 
 def safe_train(trainer:mtrain.Trainer, checkpoint_path=None):
     torch.cuda.empty_cache()
@@ -58,15 +61,15 @@ def verify_config(cfg):
     
     if cfg.tag_placement == 'replace_role':
         if any([cfg.tag_sep is not None, cfg.postfix is not None]):
-            print("NOTE: tag_placement == 'replace_role' does not use postfix/tag_sep -- postfix, tag_sep will be set to None")
+            logger.warning("tag_placement == 'replace_role' does not use postfix/tag_sep -- postfix, tag_sep will be set to None")
             cfg.tag_sep = None 
             cfg.postfix = None 
     elif cfg.tag_placement == 'content_prefix':
         if cfg.postfix is not None:
-            print("NOTE: tag_placement == 'content_prefix' does not use postfix -- postfix will be set to None")
+            logger.warning("tag_placement == 'content_prefix' does not use postfix -- postfix will be set to None")
             cfg.postfix = None
         if cfg.tag_sep is None:
-            print("NOTE: tag_placement == 'content_prefix' uses tag_sep but found None. Setting to a single space ' '. To avoid this behavior, set to an empty string `tag_sep=''` ")
+            logger.warning("tag_placement == 'content_prefix' uses tag_sep but found None. Setting to a single space ' '. To avoid this behavior, set to an empty string `tag_sep=''` ")
             cfg.tag_sep = ' '
     elif cfg.tag_placement == 'tag_only':
         if any([cfg.author_tag is None, cfg.tag_sep is None, cfg.postfix is None]):
@@ -79,7 +82,7 @@ def verify_config(cfg):
         if cfg.lora_use_dora:
             raise ValueError('Unsloth does not support DoRA training. Set lora_use_dora: false to use unsloth')
         if cfg.lora_target_modules == 'all-linear':
-            print('NOTE: Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
+            logger.warning('NOTE: Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
             cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
     if cfg.dataset.name != 'max_tokens':
@@ -91,7 +94,6 @@ def verify_config(cfg):
 def main(args):
     # Decent example for HfArgumentParser
     # https://github.com/huggingface/trl/blob/main/examples/scripts/sft.py
-    
     config_filepath = args.config if args.config else cpaths.ROOT_DIR/'config'/'train'/'train_config.yaml'
     cfg = OmegaConf.load(config_filepath)
     
@@ -112,7 +114,7 @@ def main(args):
     
     if resume_ckpt:
         cfg = OmegaConf.load(resume_cfgpath)
-        print(f'Resuming training from: {resume_ckpt}')
+        logger.info(f'Resuming training from: {resume_ckpt}')
         cfg.resume_from_checkpoint = os.path.relpath(resume_ckpt, cpaths.ROOT_DIR)
     
     verify_config(cfg)
@@ -157,7 +159,7 @@ def main(args):
         save_strategy=('epoch' if cfg.num_epochs > 1 and (isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer) else 'steps'), #-- TODO Think about better solution
         group_by_length=(cfg.group_by_length and not cfg.use_sft_trainer),
         #torch_compile=True,
-        report_to="wandb", # https://github.com/gpuopenanalytics/pynvml/issues/53#issuecomment-2139513510 -- wandb handles with exception now: https://github.com/wandb/wandb/pull/7815/commits/0240a990b0d3815af72da583df1670031c6eb946
+        report_to="wandb",
         save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
         resume_from_checkpoint=resume_ckpt,
     )
@@ -208,7 +210,7 @@ def main(args):
         train_loss = penult_state.get('loss', penult_state.get('train_loss'))
         cfg.update(train_loss=train_loss, eval_loss=trainer.state.log_history[-1].get('eval_loss'))
     except IndexError as e:
-        print(e)
+        logger.error('Failed to add loss information to config', exc_info=e)
     
     OmegaConf.save(cfg, os.path.join(train_args.output_dir, 'config.yaml'))
 

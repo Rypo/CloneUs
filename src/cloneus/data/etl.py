@@ -2,6 +2,7 @@ import sys
 import json
 import urllib
 import typing
+import logging
 import warnings
 import itertools
 
@@ -10,6 +11,8 @@ import pandas as pd
 
 from cloneus.data import useridx
 from cloneus.plugins import youtube
+
+logger = logging.getLogger(__name__)
 
 def ask_fill_fnames(display_names: list[str]):
     n_missing = len(display_names)
@@ -108,10 +111,10 @@ def get_make_userindex(df_chat, msg_threshold=0.005, excluded_users:list[str] = 
         hits = df_chat[username_column].isin(all_names).sum()
         samples = df_chat.shape[0]
         
-        print(f'({hits}/{samples}) messages have usernames matching existing user index')
+        logger.info(f'({hits}/{samples}) messages have usernames matching existing user index')
         
         if hits/samples < 0.5:
-            print(r'Usernames do not match existing users.json. Creating ephemeral user index...')
+            logger.warning(r'Usernames do not match existing users.json. Creating ephemeral user index...')
             user_data_map = user_index_from_chat(df_chat, msg_threshold=msg_threshold, excluded_users=excluded_users, bot_usernames=bot_usernames)
         else:
             user_data_map = useridx.get_users(include_bot=True)
@@ -232,11 +235,11 @@ def process_csv(chat_csv:str, youtube_encode_fetch:bool|tuple[bool,bool]=True, f
     data_source = data_source_format(df_chat)
 
     if data_source == 'discord':
-        print('Using format: Discord')
+        logger.info('Using format: Discord')
         return process_discord_chat(df_chat, cmd_prefixes=filter_prefixes, youtube_encode_fetch=youtube_encode_fetch)
     
     if data_source == 'other':
-        print('Using format: Other')
+        logger.info('Using format: Other')
         return process_other_chat(df_chat, youtube_encode_fetch, merge_window=merge_window)
     
     
@@ -316,7 +319,7 @@ def _process_chat(df_chat:pd.DataFrame, data_source:typing.Literal['discord','ot
 
 
     nrec_final = df_chat.shape[0]
-    print(
+    logger.info(
         f'Init Record Count: {nrec_init}\n'
         #f'Drop Discord links: {nrec_init-nrec_drop_discapp} records\n'
         #f'Drop Targeted: {nrec_drop_discapp-nrec_drop_targeted} records\n'
@@ -385,13 +388,13 @@ def assign_split(df_chat:pd.DataFrame, eval_frac: (float|typing.Literal['after_b
         if df_chat['Date'].isna().any():
             df_chat['split'] = 'train'
             df_chat.iloc[-n_eval:, -1] = 'eval'
-            print(f'Using last {n_eval} messages for evaluation set')
+            logger.info(f'Using last {n_eval} messages for evaluation set')
         else:
             eval_start_date = df_chat['Date'].iloc[-n_eval]
             df_chat.loc[:, 'split'] = (df_chat['Date'] < eval_start_date).apply(lambda x: 'train' if x else 'eval')
             n_date_eval = (df_chat['split']=='eval').sum()
             assert n_date_eval == n_eval, f'Bad split assignment! Eval set size missmatch: {n_date_eval} != {n_eval}'
-            print(f'Using messages after {eval_start_date} for eval set. n_messages = {n_date_eval}')
+            logger.info(f'Using messages after {eval_start_date} for eval set. n_messages = {n_date_eval}')
     
     return df_chat
 
@@ -451,7 +454,7 @@ def label_chat_sessions(df_proc: pd.DataFrame, hours_between_sessions:(int|list[
     chatgrps = {h: delineate_sessions(df_chats, h, min_session_length) for h in hours_between_sessions}
     
     for h1,h2 in itertools.combinations(hours_between_sessions, 2):
-        print(f'({h1}h, {h2}h) - duplicate grouped items:',(chatgrps[h1]==chatgrps[h2]).sum())
+        logger.info(f'({h1}h, {h2}h) - duplicate grouped items: {(chatgrps[h1]==chatgrps[h2]).sum()}',)
         # Not the number of identical groups, number of items assigned same group at that index
         # TODO: Duplicate groups would be more useful to know
     

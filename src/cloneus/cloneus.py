@@ -29,6 +29,9 @@ from cloneus.inference import genconfig, load as iload
 from cloneus.types import BatchGenerationOutput, GenerationOutput
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+
 @dataclass
 class ModelPathComponents:
     checkpoint_path: Path # modeldir_path
@@ -456,7 +459,7 @@ class Cloneus(GenConfigUtilities):
     @iload.cleanup
     def swap_model(self, checkpoint_path:(str|Path), gen_config:GenerationConfig|Path=None, dtype=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]=None) -> None:
         # If the path is the same, assume that either want a dtype change or attn_impl change
-        logger.debug(f'init_kwargs: {self.init_kwargs}')
+        logger.debug(f'init_kwargs: {str(self.init_kwargs)}')
         kwargs = {**self.init_kwargs, **dict(dtype=dtype, attn_implementation=attn_implementation)}
         if Path(checkpoint_path) == self.path_data.checkpoint_path:
             if dtype:
@@ -1003,7 +1006,8 @@ class Cloneus(GenConfigUtilities):
         input_text = self.base_tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
 
         #print('chat_content:',chat_content)
-        print(f'input_text: {input_text!r}',)
+        #print(f'getEffectiveLevel: {logger.getEffectiveLevel()} | logger.root: {logger.root}', logger.__dict__)
+        logger.info(f'input_text: {input_text!r}',)
         
         return input_text
 
