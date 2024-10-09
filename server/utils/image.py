@@ -21,7 +21,7 @@ import numpy as np
 import aiohttp
 import requests
 from PIL import Image, UnidentifiedImageError
-import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png
+import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png # imageio.plugins.freeimage.download()
 import pygifsicle # sudo apt install gifsicle
 
 
@@ -78,16 +78,18 @@ def prompt_to_fpath(prompt:str, ext:typing.Literal['PNG','WebP','JPEG', 'GIF', '
         return out_imgpath
     return Path(fname)
 
-def save_animation_prompt(frames:list[Image.Image], prompt:str, ext: typing.Literal['GIF','MP4']='MP4', optimize:bool=False,):
+def save_animation_prompt(frames:list[Image.Image], prompt:str, ext: typing.Literal['GIF','MP4']='MP4', optimize:bool=False, imgmeta:dict=None):
     out_imgpath = prompt_to_fpath(prompt, ext=ext, bidx=None, writable=True)
     sfx = f'.{ext.lower()}'
+    if imgmeta is None:
+        imgmeta = {}
     
     if ext == 'GIF':
-        iio.imwrite(out_imgpath, frames, extension=sfx, loop=0)
+        iio.imwrite(out_imgpath, frames, extension=sfx, loop=0, duration=imgmeta.get('duration', None))
         if optimize:
             pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
     else:
-        iio.imwrite(out_imgpath, frames, extension=sfx, fps=10)
+        iio.imwrite(out_imgpath, frames, extension=sfx, fps=imgmeta.get('fps', 10))
     
     with PROMPT_FILE.open('a') as f:
         f.write(f'{out_imgpath.name} : {prompt!r}\n')
@@ -243,7 +245,7 @@ def img_bytestream(image_url:str, random_ua:bool=True):
     headers = {"User-Agent": random.choice(USER_AGENTS)} if random_ua else None
     rsp = requests.get(image_url, stream=True, headers=headers)
     rsp.raise_for_status()
-    return rsp.raw
+    return rsp.raw.read()
 
 async def async_img_bytestream(image_url, random_ua:bool=True):
     headers = {"User-Agent": random.choice(USER_AGENTS)} if random_ua else None
@@ -285,17 +287,23 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
     simage_uri = str(image_uri)
     if simage_uri.startswith("http://") or simage_uri.startswith("https://"):
         imbytes = await async_img_bytestream(image_uri)
+        imeta = iio.immeta(imbytes)
         image = iio.imread(imbytes)
     else:
         try:
+            imeta = iio.immeta(imbytes)
             image = iio.imread(image_uri)
         except HTTPError as e:
             print(e)
-            image = iio.imread(img_bytestream(image_uri).read())
+            imbytes = img_bytestream(image_uri)
+
+            imeta = iio.immeta(imbytes)
+            image = iio.imread(imbytes)
+            
     
     image = convert_imgarr(image, result_type)
 
-    return image
+    return image, imeta
 
 def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = None):
     '''Fetch an image, UA spoof if necessary
@@ -308,7 +316,7 @@ def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = Non
         image = iio.imread(image_uri)
     except HTTPError as e:
         print(e)
-        image = iio.imread(img_bytestream(image_uri).read())
+        image = iio.imread(img_bytestream(image_uri))
     
     image = convert_imgarr(image, result_type)
 

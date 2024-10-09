@@ -6,6 +6,7 @@ import math
 import time
 import random
 import typing
+import logging
 import itertools
 import functools
 from pathlib import Path
@@ -69,7 +70,7 @@ from cloneus.plugins.vision import quantops,specialists,loraops,interpolation
 from cloneus.plugins.vision.fluximg2img import FluxImg2ImgPipeline
 from cloneus.utils.common import release_memory, batched
 
-
+logger = logging.getLogger(__name__)
 SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
 # other: [(1280, 768),(768, 1280),]
 
@@ -405,12 +406,16 @@ class SingleStagePipeline:
         self.upsampler = None
         self.florence = None
         self.interpolator = None
+        self.vqa = None
 
         # processors
         self.compeler = None
         
-    # def set_seed(self, seed:int|None = None):
-    #     self.global_seed = seed
+    def pbar_config(self, **kwargs):
+        if self.base is not None:
+            self.base.set_progress_bar_config(**kwargs)
+        if self.basei2i is not None:
+            self.basei2i.set_progress_bar_config(**kwargs)
     
     def load_lora(self, weight_name:str = 'detail-tweaker-xl.safetensors', lora_dirpath:Path=None):
         pass
@@ -425,6 +430,8 @@ class SingleStagePipeline:
         self.compeler = None
         self.upsampler = None
         self.florence = None
+        self.interpolator = None
+        self.vqa = None
         self.initial_scheduler_config = None
         self.scheduler_kwargs = None
         release_memory()
@@ -503,8 +510,19 @@ class SingleStagePipeline:
     def caption(self, image:Image.Image, caption_type:typing.Literal['brief', 'detailed', 'verbose']):
         if self.florence is None:
             self.florence = specialists.Florence(offload=True)
-           
-        return self.florence.caption(image, caption_type)
+        
+        resp = self.florence.caption(image, caption_type)
+        release_memory() 
+        return resp
+    
+    @torch.inference_mode()    
+    def vqa_chat(self, prompt:str=None, images:np.ndarray=None,  frames_as_video:bool=True, img_metas:list[dict]=None):
+        if self.vqa is None:
+            self.vqa = specialists.VQA(offload=True)
+        
+        resp = self.vqa.chat(prompt=prompt, images=images, frames_as_video=frames_as_video, img_metas=img_metas)
+        release_memory()   
+        return resp
     
     @torch.inference_mode()
     def interpolate(self, images:list[Image.Image], inter_frames:int=4, batch_size=2, allow_resize:bool=True,):
@@ -513,7 +531,14 @@ class SingleStagePipeline:
         if len(images) == 2:
             inter_frames = max(inter_frames, 28)
             batch_size = 1
-            
+            if images[0].size != images[1].size:
+                images[0] = images[0].resize(images[1].size, resample=Image.Resampling.LANCZOS)
+        
+        init_wh = images[1].size
+        dim_out = self.config.nearest_dims(init_wh, dim_choices=SDXL_DIMS, use_hf_sbr=False)
+        if init_wh[0]*init_wh[1] > dim_out[0]*dim_out[1]:
+            images = [img.resize(dim_out, resample=Image.Resampling.LANCZOS) for img in images]
+
         frames = self.interpolator.interpolate_frames(images, inter_frames=inter_frames, batch_size=batch_size, allow_resize=allow_resize)
         release_memory()
         return [Image.fromarray(img) for img in frames]

@@ -3,6 +3,7 @@ import io
 
 import typing
 import asyncio
+import logging
 import datetime
 import functools
 from pathlib import Path
@@ -27,11 +28,11 @@ from utils import image as imgutil
 from views import imageui
 from run import BotUs
 
-bot_logger = settings.logging.getLogger('bot')
-model_logger = settings.logging.getLogger('model')
-cmds_logger = settings.logging.getLogger('cmds')
-event_logger = settings.logging.getLogger('event')
-
+bot_logger = logging.getLogger('bot')
+model_logger = logging.getLogger('model')
+cmds_logger = logging.getLogger('cmds')
+event_logger = logging.getLogger('event')
+color_logger = logging.getLogger('pconsole') 
 # Resource: https://github.com/CyberTimon/Stable-Diffusion-Discord-Bot/blob/main/bot.py
 
 # IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
@@ -282,6 +283,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if not self.igen.is_ready:
             msg = await ctx.send('Warming up drawing skills...', silent=True)
             await self.igen.load_pipeline()
+            # FIXME: Reeable once not redirecting
+            self.igen.pbar_config(disable=True)
         
         await self.bot.report_state('draw', ready=True)
 
@@ -332,7 +335,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         image_url = imgutil.clean_discord_urls(imgurl, True)#imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)
         # test for gif/mp4/animated file
 
-        image = await imgutil.aload_image(image_url, result_type='np')
+        image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
         
         if image.ndim > 3:
             image = image[0] # gifs
@@ -342,7 +345,79 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         file = None if text_only else imgutil.to_bfile(image, description=desc)
 
         return await ctx.send(desc, file=file)
+    
+    @commands.hybrid_command(name='ichat')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    async def imgchat(self, ctx: commands.Context, prompt:str=None, imgurls:str=None, ):
+        """Chat with model about an image, gif (.mp4), or multiple images.
+        
+        Note: prompt defaults to the following if not specificed:
+            If imgurls is 1 non-animated image: 
+                'Describe this image.'
+            If imgurls is 1 animated image
+                'Describe this video.'
+            If imgurls is >1 non-animated image
+                'Identify the similarities between these images.'
 
+        Args:
+            prompt: What to ask about the image(s) or gif. Default = "Describe this {image|video}."
+            imgurls: URL(s) of the image or gif/mp4. If multiple, separated them with a space.
+        """
+
+        if prompt is None and imgurls is None:
+            return await ctx.send('You need to set at least 1 of `imgurls` and `prompt`, preferably both', ephemeral=True)
+                
+        if imgurls is None:
+            await ctx.defer()
+            await asyncio.sleep(1)
+            desc = await self.igen.vqa_chat(prompt=prompt, images=None)
+            return await ctx.send(desc)
+                
+        
+        img_urls = imgurls.split()
+        frames_as_video = len(img_urls)==1
+        
+        color_logger.debug(f'{img_urls=}, {frames_as_video=}, {prompt=}, {imgurls=}')
+
+        image_urls = []
+        for image_url in img_urls:
+            image_url = imgutil.clean_discord_urls(image_url.strip())
+            try:
+                image_url = imgutil.tenor_fix(url=image_url)
+            except ValueError:
+                return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
+            image_urls.append(image_url)
+        
+        await ctx.defer()
+        await asyncio.sleep(1)
+        
+        if prompt is not None:
+            prompt = await self.validate_prompt(ctx, prompt)
+            if prompt == '<CANCEL>':
+                return await ctx.send('Canceled', silent=True, delete_after=1)
+
+        images,img_metas = [], []
+        bfiles = [] 
+        for url in image_urls:
+            image, imgmeta = await imgutil.aload_image(url, result_type='np')
+        
+            if image.shape[-1] > 3: # discard alpha channel
+                image = image[..., :3]
+            
+            images.append(image.squeeze())
+            img_metas.append(imgmeta)
+
+            if image.ndim > 3:
+                bfiles.append(imgutil.animation_to_bfile(image, ext='MP4', fps=imgmeta.get('fps', 10)))
+            else:
+                bfiles.append(imgutil.to_bfile(Image.fromarray(image), ext='JPEG'))
+
+
+        desc = await self.igen.vqa_chat(prompt=prompt, images=images, frames_as_video=frames_as_video, img_metas=img_metas)
+
+        #file = None if text_only else imgutil.to_bfile(image, description=desc)
+        return await ctx.send(desc, files=bfiles)
+    
     @commands.hybrid_command(name='morph')
     async def morph(self, ctx: commands.Context, imgurl1: str, imgurl2:str, *,
                     midframes:int=28, 
@@ -370,7 +445,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         images:list[Image.Image] = []
         for image_url in [image_url1,image_url2]:
-            image = await imgutil.aload_image(image_url, result_type='np')
+            image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
             if image.ndim > 3:
                 image = image[0] # gifs -> take first frame
             
@@ -378,19 +453,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 image = image[:, :, :3]
 
             images.append(Image.fromarray(image))
-                
-        wh1 = images[0].size
-        wh2 = images[1].size
-        if wh1 != wh2:
-            images[0] = images[0].resize(wh2, resample=Image.Resampling.LANCZOS)
         
-        images[0].thumbnail((1024,1024), resample=Image.Resampling.LANCZOS)
-        images[1].thumbnail((1024,1024), resample=Image.Resampling.LANCZOS)
-        w,h = images[1].size
-        
-        print(images[0].size,images[1].size)
+        print(images[0].size, images[1].size)
 
         async with self.bot.busy_status(activity='draw'):
+            w,h = images[0].size
             fake_prompt = f'interpolation_n{midframes+2}_{w}x{h}'
             image_frames = self.igen.interpolate(images=images, inter_frames = midframes, batch_size=1, allow_resize=True)
             out_imgpath = imgutil.save_animation_prompt(image_frames, fake_prompt, ext='MP4', optimize=False)
@@ -476,7 +543,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
     @commands.hybrid_command(name='redraw')
     @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def _redraw(self, ctx: commands.Context, imgurl:str, prompt: commands.Range[str,1,1000],  *, flags: cmd_flags.RedrawFlags):
+    async def _redraw(self, ctx: commands.Context, prompt: commands.Range[str,1,1000], imgurl:str, *, flags: cmd_flags.RedrawFlags):
         """Remix an image from a text prompt and image.
 
         Args:
@@ -539,9 +606,11 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # this may be passed a url string in drawUI config
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile, discord.Attachment) else imgurl)
         
-        image = await imgutil.aload_image(image_url, result_type='np')
+        image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
         if image.ndim > 3:
             image = image[0] # gifs -> take first frame
+        if image.shape[-1] > 3: # discard alpha channel
+            image = image[:, :, :3]
         
         image = Image.fromarray(image)
         
@@ -609,7 +678,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             image = imgfile # get a little cheeky here to bypass the download
         else:
             image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
-            image = await imgutil.aload_image(image_url)
+            image, imgmeta = await imgutil.aload_image(image_url)
         
         prompt = await self.validate_prompt(ctx, prompt)
         if prompt == '<CANCEL>':
@@ -690,7 +759,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         image = None
         if imgurl is not None:
             image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
-            image = await imgutil.aload_image(image_url, result_type=None)
+            image, imgmeta = await imgutil.aload_image(image_url, result_type=None)
         
         prompt = await self.validate_prompt(ctx, prompt)
         if prompt == '<CANCEL>':
@@ -785,7 +854,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
         
         
-        gif_array = await imgutil.aload_image(image_url, result_type='np') #iio.imread(image_url)
+        gif_array, imgmeta = await imgutil.aload_image(image_url, result_type='np') #iio.imread(image_url)
         
         if gif_array.ndim < 4:
             return await ctx.send('You passed a non-animated image url. Did you mean to call `/animate`?', ephemeral=True)
@@ -828,7 +897,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                     
             
             msg  = await msg.edit(content=f'Seasoning...')
-            out_imgpath = imgutil.save_animation_prompt(image_frames, prompt, ext='MP4', optimize=False)
+            out_imgpath = imgutil.save_animation_prompt(image_frames, prompt, ext='MP4', optimize=False, imgmeta=imgmeta)
 
 
             if needs_view:

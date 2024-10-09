@@ -3,12 +3,15 @@ import gc
 import re
 import time
 import glob
+import pprint
 import bisect
 import random
 import typing
 import string
+import tempfile
 import warnings
 from pathlib import Path
+        
 
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -16,10 +19,11 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 from tqdm.auto import tqdm
-from transformers import  AutoProcessor, AutoModelForCausalLM, GenerationConfig
+from transformers import  AutoProcessor, AutoModelForCausalLM, GenerationConfig, Qwen2VLForConditionalGeneration
 
 import numpy as np
 import cv2
+import imageio.v3 as iio
 
 import matplotlib.figure as mpf
 import matplotlib.pyplot as plt
@@ -32,7 +36,7 @@ from spandrel import ImageModelDescriptor, ModelLoader
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 from cloneus import cpaths
-
+from cloneus.plugins.vision.qwen_vl_utils import process_vision_info
 
 def fig_to_np(fig:mpf.Figure):
     with io.BytesIO() as buff:
@@ -258,7 +262,7 @@ class SAM2:
         self._update_image(image)
 
         with torch.autocast(self.device, self.torch_dtype):
-            masks, scores, logits = self.predictor.predict(np.array(point_coords, ndmin=2), np.array(point_label), multimask_output=multimask_output)
+            masks, scores, logits = self.predictor.predict(np.array(point_coords, ndmin=2), np.array(point_label, ndmin=1), multimask_output=multimask_output)
         
         return self._sorted_output(masks,scores,logits)
     
@@ -774,3 +778,202 @@ class Interpolator:
 
         pbar.close() 
         return frames
+    
+
+class VQA:
+    def __init__(self, torch_dtype = torch.bfloat16, device="cuda:0", offload:bool=True, max_context:int=2) -> None:
+        # https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct
+        self.torch_dtype = torch_dtype
+        self.device = torch.device(device)
+        self.offload = offload
+        self.max_context = max_context
+        
+        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+            "Qwen/Qwen2-VL-2B-Instruct",
+            torch_dtype=self.torch_dtype,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+            use_safetensors=True,).eval()
+        
+        self.min_pixels = 256 * 28 * 28
+        self.max_pixels = 1280 * 28 * 28
+        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct", min_pixels = self.min_pixels, max_pixels = self.max_pixels)
+
+        self.max_new_tokens = 256 #128
+        self.default_prompt = {
+            'image': 'Describe this image.',
+            'video': 'Describe this video.',
+            'multi_image': 'Identify the similarities between these images.'
+        }
+        #self._tmp_files:list[tempfile._TemporaryFileWrapper[bytes]] = []
+        self.context = []
+
+    def to(self, *args, **kwargs):
+        _=self.model.to(*args, **kwargs)
+        return self
+
+    def clear_context(self):
+        self.context = []
+        # for fd in self._tmp_files:
+        #     print('FD CLOSED:', fd.closed)
+        #     fd.close()
+            #print('TMP FILE STILL EXISTS:', Path(fd.name).exists())
+    
+    def get_tmpfile(self, frames:np.ndarray|list[Image.Image], ext:typing.Literal['JPG','MP4'], fps=10):
+        sfx = f'.{ext.lower()}'
+        kwgs = {} if ext == 'JPG' else {'fps':fps}
+
+        with tempfile.NamedTemporaryFile(suffix=sfx, delete=False) as tmp_file:
+            iio.imwrite(tmp_file, frames, extension=sfx, **kwgs)
+        
+        #self._tmp_files.append(tmp_file)
+        
+        return Path(tmp_file.name).as_uri()
+    
+    def format_message(self, prompt:str, mode:typing.Literal['text', 'video', 'image', 'multi_image'], data_uri:str|list[str]=None) -> dict:        
+        if mode == 'text':
+            if prompt is None:
+                raise ValueError('Prompt is required when missing Images')
+            
+            return {"role": "user", "content": [{"type": "text", "text": prompt}]}
+        
+        message = {
+            'role': 'user', 
+            #"content": [],
+        }
+        assert isinstance(data_uri, (list, str)), 'BAD TYPE'
+
+        if mode =='video':
+            message['content'] = [{"type": "video", "video": data_uri, "max_pixels": 360 * 420, "fps": 1.0,}]
+        elif mode =='multi_image':
+            message['content'] = [{"type": "image", "image": uri} for uri in data_uri]
+        
+        elif mode =='image':
+            message['content'] = [{"type": "image", "image": data_uri,}]
+        else:
+            raise ValueError('Bad Args')
+            
+        if prompt is None:
+            prompt = self.default_prompt[mode]
+        
+        message['content'].append({"type": "text", "text": prompt})
+        # import pprint
+        # print('MESSAGE:')
+        # pprint.pprint(message)
+        return message
+
+    def chat(self, prompt:str=None, images:np.ndarray|list[np.ndarray]=None, frames_as_video:bool=True, img_metas:list[dict] = None):
+        # TODO: Unify this + format_message, no sense in checking twice.
+        file_uri = None
+        if img_metas is None:
+            img_metas = [{}]
+        
+        
+        print('CONTEXT:')
+        pprint.pprint(self.context)
+
+        if images is None:
+            if prompt is None:
+                raise ValueError('No images provided. In text mode, `prompt` is required')
+            
+            message = self.format_message(prompt=prompt, mode = 'text', data_uri=None)
+            self.context.append(message)
+
+            out_text = self.process(self.context)[0]
+            self.context.append({'role': 'assistant', "content": [{"type": "text", "text": out_text}],})
+            
+            return out_text
+
+        # Reset context on new images
+        self.clear_context()
+        
+        if frames_as_video:
+            images = np.concatenate(images).squeeze()
+            
+            if images.ndim == 3:
+                mode = 'image'
+                file_uri = self.get_tmpfile(images, ext='JPG')
+            else:
+                mode = 'video'
+                file_uri = self.get_tmpfile(images, ext='MP4', fps=img_metas[0].get('fps', 10)) # can just use first since >1 video not supported
+        else:
+            mode = 'multi_image'
+            file_uri = [self.get_tmpfile(img, ext='JPG') for img in images]
+
+        
+        if prompt is None:
+            prompt = self.default_prompt[mode]
+
+        message = self.format_message(prompt=prompt, mode=mode, data_uri=file_uri)
+        self.context.append(message)
+
+        out_text = self.process(self.context)[0]
+        self.context.append({'role': 'assistant', "content": [{"type": "text", "text": out_text}],})
+        
+
+        return out_text
+
+
+    @torch.inference_mode()
+    def process(self, conversations:list[dict]|list[list[dict]]) -> list[str]:
+        if isinstance(conversations[0], dict):
+            conversations = [conversations]
+        # Preparation for inference
+        texts = [
+            self.processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
+            for convo in conversations
+        ]
+        image_inputs, video_inputs = process_vision_info(conversations)
+        inputs = self.processor(
+            text=texts,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        
+        if self.offload:
+            self.model.to(self.device)
+        
+        # Inference
+        generated_ids = self.model.generate(**inputs.to(self.device), max_new_tokens=self.max_new_tokens)
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_texts = self.processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        if self.offload:
+            self.model.to('cpu')
+        
+        return output_texts
+
+    def batch_process(self, messages:list[list[dict]]):
+        # Preparation for batch inference
+        texts = [
+            self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+            for msg in messages
+        ]
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self.processor(
+            text=texts,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        if self.offload:
+            self.model.to(self.device)
+
+        # Batch Inference
+        generated_ids = self.model.generate(**inputs.to(self.device), max_new_tokens=self.max_new_tokens)
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_texts = self.processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        if self.offload:
+            self.model.to('cpu')
+        return output_texts
+        
