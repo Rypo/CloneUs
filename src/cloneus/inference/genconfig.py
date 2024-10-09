@@ -1,7 +1,9 @@
 import typing
 import random
-from dataclasses import dataclass, asdict, field
+import logging
 from pathlib import Path
+from dataclasses import dataclass, asdict, field
+
 import numpy as np
 import torch
 import transformers
@@ -11,6 +13,7 @@ from cloneus.plugins.sampler_hijack import hijack_samplers
 
 hijack_samplers()
 
+logger = logging.getLogger(__name__)
 # THIS IS THE SINGLE SOURCE OF TRUTH NOW
 @dataclass
 class GenOpts:
@@ -83,7 +86,7 @@ class GenOptsExtended(GenOpts):
     dry_multiplier: float = 0.0 # 0.8, ~ penalty weight, activator of DRY
     dry_base: float = 1.75 # pentalty--seqlength scaling factor 
     dry_allowed_length: int = 2 # max permitted repeats before pentalty applied
-    dry_sequence_breakers: list[str] = field(default_factory=lambda: ['"\\n", ":", "\\"", "*"'])
+    dry_sequence_breakers: list[str] = None# field(default_factory=lambda: ['"\\n", ":", "\\"", "*"'])
     
     xtc_threshold: float = 0.1
     xtc_probability: float = 0
@@ -174,7 +177,7 @@ def randomize_preset(gen_config:GenerationConfig):
 
 def load_gen_config(gen_config_path:str|Path=None, gen_config_name:str="generation_config.json"):
     if gen_config_path is None:
-        print('using GenOptsExtended defaults (multinomial_sampling)')
+        logger.debug('using GenOptsExtended defaults (multinomial_sampling)')
         #gce = asdict(GenOptsExtended())
         return GenerationConfig.from_dict(GenOptsExtended().to_dict())
     gen_config_path = Path(gen_config_path)
@@ -187,9 +190,13 @@ def load_gen_config(gen_config_path:str|Path=None, gen_config_name:str="generati
     
     try:
         gen_config = GenerationConfig.from_pretrained(gen_config_path, config_file_name=gen_config_name, local_files_only=True)
-        print(f'Found GenerationConfig: {gen_config_path/gen_config_name}')
+        logger.info(f'Found GenerationConfig: {gen_config_path/gen_config_name}')
     except OSError as e:
-        print('No existing GenerationConfig found, using GenOpts defaults (multinomial_sampling)')
+        # Try to fall back to default
+        if gen_config_name != "generation_config.json":
+            return load_gen_config(gen_config_path, gen_config_name="generation_config.json")
+        #print(e)
+        logger.info('No existing GenerationConfig found, using GenOpts defaults (multinomial_sampling)')
         #gen_config = GenerationConfig.from_dict(asdict(GenOpts())) 
         gen_config = GenerationConfig.from_dict(GenOptsExtended().to_dict())
 
