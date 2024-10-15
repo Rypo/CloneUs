@@ -36,7 +36,7 @@ from managers.msgman import MessageManager
 
 from run import BotUs
 
-from .gencfg import SetConfig
+from .gencfg import SetTextConfig
 
 # Determine if initials based commmands can be used.
 
@@ -46,7 +46,7 @@ cmds_logger = settings.logging.getLogger('cmds')
 event_logger = settings.logging.getLogger('event')
 
 
-class TextGen(commands.Cog, SetConfig):
+class TextGen(commands.Cog, SetTextConfig):
     '''Imitate a user or chat with the base model.'''
     def __init__(self, bot: BotUs, pstore:io_utils.PersistentStorage, clomgr: CloneusManager, msgmgr:MessageManager):
         self.bot = bot

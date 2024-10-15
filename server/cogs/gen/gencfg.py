@@ -33,7 +33,7 @@ STATE_CONFIG = OmegaConf.create(dict(
 ))
 
 
-class SetConfig:#(commands.HybridGroup): # name='set', description='Change something about the bot'):
+class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change something about the bot'):
     clomgr: CloneusManager
     msgmgr: MessageManager
     streaming_mode: bool = False
@@ -64,17 +64,17 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
     @commands.is_owner()
     async def fullauto(self, ctx: commands.Context, autonomous: bool = None):
         self.msgmgr.autonomous = autonomous if autonomous is not None else (not self.msgmgr.autonomous)
-        await self.set_autoreply(ctx, auto_mode = 'rbest')
+        await self.tset_autoreply(ctx, auto_mode = 'rbest')
         await ctx.send(f'full auto: {self.msgmgr.autonomous}', ephemeral=True)
 
-    @commands.hybrid_group(name='set')#, fallback='arg')#, description='Quick set a value', aliases=[])
-    async def setarg(self, ctx: commands.Context):
-        '''(GROUP). call `!help set` to see sub-commands.'''
+    @commands.hybrid_group(name='tset')#, fallback='arg')#, description='Quick set a value', aliases=[])
+    async def tsetarg(self, ctx: commands.Context):
+        '''(GROUP). Text settings. call `!help tset` to see sub-commands.'''
         if ctx.invoked_subcommand is None:
             await ctx.send(f"{ctx.subcommand_passed} does not belong to genmode")
     
-    @setarg.command(name='streaming')
-    async def set_streaming(self, ctx: commands.Context, enabled:bool = True):
+    @tsetarg.command(name='streaming')
+    async def tset_streaming(self, ctx: commands.Context, enabled:bool = True):
         '''Turn streaming text output on/off.
 
         If enabled, bot will update messages in place via edits
@@ -93,8 +93,8 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         
         await ctx.send('\n'.join(msgs))
     
-    @setarg.command(name='speaking')
-    async def set_speaking(self, ctx: commands.Context, enabled:bool = True):
+    @tsetarg.command(name='speaking')
+    async def tset_speaking(self, ctx: commands.Context, enabled:bool = True):
         '''Turn text-to-speech on/off.
 
         If enabled, bot will speak messages. 
@@ -109,8 +109,8 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.tts_mode = enabled
         await ctx.send(f'TTS mode: {"en" if self.tts_mode else "dis"}abled.')
 
-    @setarg.command(name='youtube')
-    async def set_youtube(self, ctx: commands.Context, enabled:bool = None):
+    @tsetarg.command(name='youtube')
+    async def tset_youtube(self, ctx: commands.Context, enabled:bool = None):
         '''Turn youtube link parsing on/off.
 
         Args:
@@ -121,8 +121,8 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.clomgr.ytm.enabled = enabled
         await ctx.send(f'YouTube link parsing: {"en" if enabled else "dis"}abled.')
 
-    @setarg.command(name='ctxlimit')
-    async def set_ctxlimit(self, ctx: commands.Context, limit: int):
+    @tsetarg.command(name='ctxlimit')
+    async def tset_ctxlimit(self, ctx: commands.Context, limit: int):
         """Set the maximum number of messages the bot can store in context. (Default: 31)
         
         Setting limit > Default will increase the *capacity* but will NOT add
@@ -137,9 +137,9 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.msgmgr.message_cache_limit = limit
         await ctx.send(f"Updated limit: ({prv_limit} -> {self.msgmgr.message_cache_limit})")
 
-    @setarg.command(name='alias')
+    @tsetarg.command(name='alias')
     @app_commands.choices(author=cmd_choices.AUTHOR_DISPLAY_NAMES)
-    async def set_alias(self, ctx: commands.Context, author:str=None):
+    async def tset_alias(self, ctx: commands.Context, author:str=None):
         '''Change who the bot sees you as in the context.
 
         Args:
@@ -158,9 +158,9 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.clomgr.user_aliases = self.user_aliases
         return await ctx.send(msg)
     
-    @setarg.command(name='autoreply')
+    @tsetarg.command(name='autoreply')
     @app_commands.choices(auto_mode=cmd_choices.AUTO_MODES)
-    async def set_autoreply(self, ctx: commands.Context, auto_mode: str = 'rbest', 
+    async def tset_autoreply(self, ctx: commands.Context, auto_mode: str = 'rbest', 
                         author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer] = None,):
         """When set, bot will automatically respond after *every* (non-command) user message.
         
@@ -207,9 +207,9 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
 
 
     
-    @setarg.command(name='model')
+    @tsetarg.command(name='model')
     @app_commands.choices(version=cmd_choices.MODEL_GENERATIONS)
-    async def set_model(self, ctx: commands.Context, version: app_commands.Choice[str]):
+    async def tset_model(self, ctx: commands.Context, version: app_commands.Choice[str]):
         """Pick your favorite past model by its wildest lines
         
         Args:
@@ -222,8 +222,8 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')
         await self.clomgr.bot.report_state('chat', ready=True)
     
-    @setarg.command(name='randomode')
-    async def set_randomode(self, ctx: commands.Context, change_rate: int = 5, fast_proba: float = 0.5, announce:bool=True):
+    @tsetarg.command(name='randomode')
+    async def tset_randomode(self, ctx: commands.Context, change_rate: int = 5, fast_proba: float = 0.5, announce:bool=True):
         """Enabled random swapping between trained models mid conversation.
         
         Args:
@@ -246,9 +246,9 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         self.clomgr.model_randomization = self.model_randomization
         return await ctx.send(msg)
 
-    @setarg.command(name='era')
+    @tsetarg.command(name='era')
     @app_commands.choices(period=cmd_choices.MODEL_YEARS)
-    async def set_era(self, ctx: commands.Context, period: app_commands.Choice[str]):
+    async def tset_era(self, ctx: commands.Context, period: app_commands.Choice[str]):
         """Wind back the clock and talk to our past selves.
         
         Args:
@@ -269,8 +269,8 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         await ctx.send(f"Traveled back to {period_msg}. _Paradoxes will void warranty_")
 
     
-    @setarg.command(name='wordrules')
-    async def set_wordrules(self, ctx: commands.Context, *, flags: cmd_flags.WordRuleFlags):
+    @tsetarg.command(name='wordrules')
+    async def tset_wordrules(self, ctx: commands.Context, *, flags: cmd_flags.WordRuleFlags):
         """Set word rules. To clear, pass '' (empty string).
         
         Note: incompatible with streaming mode.
@@ -303,8 +303,8 @@ class SetConfig:#(commands.HybridGroup): # name='set', description='Change somet
         
         return await ctx.send('\n'.join(msgs))
 
-    @setarg.command(name='sysmsg')
-    async def set_sysmsg(self, ctx: commands.Context, system_msg: str=None):
+    @tsetarg.command(name='sysmsg')
+    async def tset_sysmsg(self, ctx: commands.Context, system_msg: str=None):
         """Set the default system message for calls to /ask and /chat.
         
         Args:

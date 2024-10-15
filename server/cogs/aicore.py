@@ -144,7 +144,7 @@ class AICore(commands.Cog):
             try:
                 self.msgmgr.remove_message(message)
             except ValueError:
-                print('Message not in context')
+                pass
             print(f'Message Deleted: {message.author} - "{message.content}"')
             event_logger.info('(on_raw_message_delete)'
                              '- [DELETE] {a.display_name}({a.name}) message {message.content!r}'.format(a=message.author, message=message))
@@ -199,13 +199,12 @@ class AICore(commands.Cog):
         await paged_changelog.send(ctx)
 
     
-    @commands.command('status')
+    @commands.command('tstatus', aliases=['status'])
     async def status_report(self, ctx: commands.Context):
         '''Check bot status.'''
         # ✅⚠❌🛑💯🟥🟨🟩⬛✔🗯💭💬👁‍🗨🗨
-        
-        #gconf_settings = self.model.get_genconf(verbose=False)
-        #vram_use, vram_total = get_gpu_memory()
+        # TODO: move this command back to TextGen, have !status display brief version of !tstatus + !istatus 
+
         statuses = [
             *self.clomgr.list_status(self.pstore.get('youtube_quota',0)),
             ('Message Context', len(self.msgmgr.get_mcache(ctx)), f' / {self.msgmgr.message_cache_limit}'), # Note: this show the _unmerged_ length.
