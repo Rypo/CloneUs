@@ -17,7 +17,7 @@ from cmds import (
 
 from managers.txtman import CloneusManager
 from managers.msgman import MessageManager
-
+from utils.reporting import StatusItem
 
 
 class ConfigManager:
@@ -54,9 +54,9 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
 
     def argsettings(self):
         return [
-            ('Streaming', self.streaming_mode,''),
-            ('TTS mode', self.tts_mode,''),
-            ('Auto reply mode', self.auto_reply_mode if self.auto_reply_mode else False, (f'({self._display_initials})') if self.auto_reply_mode else ''),
+            StatusItem('Streaming', self.streaming_mode),
+            StatusItem('TTS mode', self.tts_mode),
+            StatusItem('Auto reply mode', self.auto_reply_mode if self.auto_reply_mode else False, (f'({self._display_initials})' if self.auto_reply_mode else '')),
             #('Fully autonomous', self.autonomous if self.autonomous else False,'')
          ]
     

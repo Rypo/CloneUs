@@ -1,11 +1,12 @@
 import re
 import gc
-import datetime
-import subprocess
-from pathlib import Path
-from functools import cached_property
 import random
 import typing
+import logging
+import datetime
+from pathlib import Path
+from functools import cached_property
+
 
 import torch
 import discord
@@ -14,6 +15,7 @@ from discord.ext import commands, tasks
 
 import config.settings as settings
 from utils import text as text_utils, io as io_utils
+from utils.reporting import StatusItem
 
 from utils.globthread import wrap_async_executor
 
@@ -21,19 +23,10 @@ from cloneus import Cloneus
 from cloneus.data import useridx
 from cloneus.plugins import youtube
 
-def get_gpu_memory():
-    try:
-        memfree,memtotal = torch.cuda.mem_get_info()
-        vram_total = round(memtotal / (1024**2))
-        vram_used = round((memtotal-memfree) / (1024**2))
-        
-        return vram_used, vram_total
-    except (subprocess.CalledProcessError, IndexError, ValueError) as e:
-        print(e)
-        return 0,0
 
 
-model_logger = settings.logging.getLogger('model')
+
+model_logger = logging.getLogger('server.model')
 
 
 class CloneusManager():
@@ -75,35 +68,41 @@ class CloneusManager():
             return [c for c in self.all_checkpoints if self.clo.path_data.base_model_alias in str(c)]
         return []
     
-    def list_status(self, stored_yt_quota=0):
+    def list_status(self):
         '''Check bot status.'''
         # ✅⚠❌🛑💯🟥🟨🟩⬛✔🗯💭💬👁‍🗨🗨
+
         gconf_settings = self.clo.get_genconfig(verbose=False)
         gconf_settings.pop('ban_words_ids',None)
         gconf_settings.pop('sequence_bias',None)
-        vram_use, vram_total = get_gpu_memory()
-        model_name,checkpoint='',''
+        
+        model_name,run_path,checkpoint='','',''
         if self.clo:
-            model_name = self.clo.path_data.run_path.relative_to(settings.RUNS_DIR)
+            model_relpath = self.clo.path_data.run_path.relative_to(settings.RUNS_DIR)
+            model_name = model_relpath.parts[0]
+            run_path = model_relpath.relative_to(model_name)
             checkpoint = self.clo.path_data.checkpoint_name
-        statuses = [
-            ('Bot status', 'Up' if self.is_ready else 'Down', " ✔" if self.is_ready else " ✖"),
-            ('Model', model_name, f"/{checkpoint}"),
-            ('Tag placement', self.clo.cfg.tag_placement, f""),
-            ('Flash_dtype', f'{self.clo.cfg.attn_implementation}', f' - {self.clo.torch_dtype}'),
-            ('vRAM usage', f'{vram_use:,}MiB', f' / {vram_total:,}MiB'),
-            ('YouTube quota', self.yt_session_quota+stored_yt_quota,' / 10000',),
-            ('Latency', f'{round(self.bot.latency * 1000)}ms',''),
-            ('Generation mode', self.clo.gen_mode,''),
-            ('', '\n'.join([f'- {k}: {v}' for k,v in gconf_settings.items()]),''),
-            
+        
+        status = [
+            StatusItem('Text status', 'Up' if self.is_ready else 'Down', " ✔" if self.is_ready else " ✖"),
+            StatusItem('Model', model_name),
+            StatusItem('Checkpoint', str(run_path), f"/{checkpoint}", advanced=True),
+            StatusItem('Tag placement', self.clo.cfg.tag_placement, advanced=True),
+            StatusItem('Flash_dtype', f'{self.clo.cfg.attn_implementation}', f' - {self.clo.torch_dtype}', advanced=True),
+            #StatusItem('vRAM usage', f'{vram_use:,}MiB', f' / {vram_total:,}MiB'),
+            #StatusItem('Latency', f'{round(self.bot.latency * 1000)}ms'),
+            StatusItem('Generation mode', self.clo.gen_mode),
+            StatusItem('','', extra='\n'.join([f'- {k}: {v}' for k,v in gconf_settings.items()])),
+            #StatusItem('YouTube quota', self.yt_session_quota+stored_yt_quota, ' / 10000',),
         ]
+            
+        
         if self.banned_words:
-            statuses.append(('Word Bans','', self.banned_words))
+            status.append(StatusItem('Word Bans','', self.banned_words))
         if self.weighted_words:
-            statuses.append(('Word Weights','',self.weighted_words))
+            status.append(StatusItem('Word Weights','',self.weighted_words))
 
-        return statuses
+        return status
     
     @wrap_async_executor
     def unload(self):

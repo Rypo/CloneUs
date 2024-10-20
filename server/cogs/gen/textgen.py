@@ -6,7 +6,7 @@ import itertools
 import typing
 import asyncio
 import datetime
-
+import logging
 import functools
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from cloneus.data import useridx
 import config.settings as settings
 from utils import text as text_utils, io as io_utils
 from utils.command import check_up
-
+from utils.reporting import StatusItem
 from utils.globthread import wrap_async_executor, stop_global_executors
 
 from views import contextview as cview
@@ -41,21 +41,23 @@ from .gencfg import SetTextConfig
 # Determine if initials based commmands can be used.
 
 
-#model_logger = settings.logging.getLogger('model')
-cmds_logger = settings.logging.getLogger('cmds')
-event_logger = settings.logging.getLogger('event')
+
+cmds_logger = logging.getLogger('server.cmds')
+event_logger = logging.getLogger('server.event')
 
 
 class TextGen(commands.Cog, SetTextConfig):
     '''Imitate a user or chat with the base model.'''
-    def __init__(self, bot: BotUs, pstore:io_utils.PersistentStorage, clomgr: CloneusManager, msgmgr:MessageManager):
+    def __init__(self, bot: BotUs):#, pstore:io_utils.PersistentStorage, clomgr: CloneusManager, msgmgr:MessageManager):
         self.bot = bot
-        self.clomgr = clomgr
-        self.msgmgr = msgmgr
-        self.pstore = pstore #io_utils.PersistentStorage()
+        self.clomgr = CloneusManager(bot,)#,clomgr
+        self.msgmgr = MessageManager(bot, n_init_messages=15, message_cache_limit=31)#msgmgr
+        self.pstore = self.bot.pstore #io_utils.PersistentStorage()
         self.ctx_menu = app_commands.ContextMenu(name='🔂 Redo (Text)', callback=self._cm_redo,)
         self.bot.tree.add_command(self.ctx_menu, override=True)
         self.init_model = settings.ACTIVE_MODEL_CKPT
+        
+        self._log_extra = {'cog_name': self.qualified_name}
 
     @property
     def youtube_quota(self):
@@ -66,6 +68,8 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.bot.wait_until_ready()
         self.pstore.update(youtube_quota = self.pstore.get('youtube_quota', 0))
         #self.bot.tree.add_command(self.ctx_menu)
+        await self.msgmgr.set_default(self.bot.get_channel(settings.CHANNEL_ID))
+        
         self.clomgr._preload(self.init_model, gen_config='best_generation_config.json')
         
 
@@ -82,8 +86,8 @@ class TextGen(commands.Cog, SetTextConfig):
         cmd_status = 'FAIL' if ctx.command_failed else 'PASS'
         pos_args = [a for a in ctx.args[2:] if a]
 
-        cmds_logger.info(f'(cog_after_invoke, {self.qualified_name})'
-                         '- [{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args))
+        cmds_logger.info(#f'(cog_after_invoke, {self.qualified_name})'
+                         '[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
 
 
 
@@ -105,10 +109,16 @@ class TextGen(commands.Cog, SetTextConfig):
                     await self.auto_respond(message_cache)
 
         #human_proc = self.auto_reply_mode and context_updated        
-
-        mstat = "ADD" if context_updated else "SKIP"
-        event_logger.info('(on_message)'
-                        '- [{mstat}] {a.display_name}({a.name}) message {message.content!r}'.format(mstat=mstat, a=message.author, message=message))
+        
+        # if context_updated:
+        #     mstat = "ADD"
+        #     lvl = logging.INFO
+        # else:
+        #      mstat = "SKIP"
+        #      lvl = logging.DEBUG
+        mstat,lvl = ("ADD", logging.INFO) if context_updated else ("SKIP", logging.DEBUG)
+        event_logger.log(lvl, #f'(on_message, {self.qualified_name})'
+                        '[{mstat}] {a.display_name}({a.name}) message {message.content!r}'.format(mstat=mstat, a=message.author, message=message), extra=self._log_extra)
 
 
 
@@ -143,14 +153,31 @@ class TextGen(commands.Cog, SetTextConfig):
                 await reaction.remove(self.bot.user)
 
         
-        event_logger.info('(on_reaction_add)'
+        event_logger.info(f'(on_reaction_add, {self.qualified_name})'
                          f'- [REACT] {user.display_name}({user.name}) ADD "{reaction.emoji}" '
                          'TO {a.display_name}({a.name}) message {reaction.message.content!r}'.format(a=reaction.message.author, reaction=reaction))
                         
 
 
+    def status_list(self, keep_advanced:bool=True, ctx: commands.Context = None):
+        if ctx is None:
+            ctx = self.msgmgr.default_channel
+        status = [
+            *self.clomgr.list_status(),
+            StatusItem('','','---'),
+            StatusItem('Message context', len(self.msgmgr.get_mcache(ctx)), f' / {self.msgmgr.message_cache_limit}'), # Note: this show the _unmerged_ length.
+            StatusItem('YouTube quota', self.youtube_quota, ' / 10000',), # self.clomgr.yt_session_quota+self.pstore.get('youtube_quota', 0)
+            #('Messages bot cached', len(self.bot.cached_messages)),
+            #StatusItem('','','---'),
+            *self.argsettings()
+        ]
+        return [s for s in status if keep_advanced or not s.advanced]
 
-
+    @commands.command('tstatus')
+    async def tstatus_report(self, ctx: commands.Context):
+        '''Full text model status report.'''
+        msg = '\n'.join(stat.md() for stat in self.status_list(keep_advanced=True, ctx=ctx))
+        await ctx.send(msg)
 
     @commands.cooldown(1, 10, commands.BucketType.guild)    
     @commands.command(name='txtup', aliases=['textup','tup'])
@@ -701,7 +728,6 @@ class TextGen(commands.Cog, SetTextConfig):
         #return formatted_prompt
 
 
-# async def setup(bot):
-#     load_nowait = bool(os.getenv('EAGER_LOAD',False))
-    
-#     await bot.add_cog(TextGen(bot, load_nowait=load_nowait))
+async def setup(bot):
+    #load_nowait = bool(os.getenv('EAGER_LOAD',False))
+    await bot.add_cog(TextGen(bot))#, load_nowait=load_nowait))

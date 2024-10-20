@@ -23,20 +23,18 @@ import config.settings as settings
 
 from cmds import transformers as cmd_tfms, choices as cmd_choices, flags as cmd_flags
 from utils.command import check_up
+from utils.reporting import StatusItem
 from utils.globthread import stop_global_executors, wrap_async_executor, async_gen
 from utils import image as imgutil
 from views import imageui
 from run import BotUs
 
 bot_logger = logging.getLogger('bot')
-model_logger = logging.getLogger('model')
-cmds_logger = logging.getLogger('cmds')
-event_logger = logging.getLogger('event')
+cmds_logger = logging.getLogger('server.cmds')
+event_logger = logging.getLogger('server.event')
 color_logger = logging.getLogger('pconsole') 
 # Resource: https://github.com/CyberTimon/Stable-Diffusion-Discord-Bot/blob/main/bot.py
 
-# IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
-# PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
 GUI_TIMEOUT = 30*60 # NOTE: limit is 15 minutes unless webhook message is converted to message
 
 
@@ -127,7 +125,7 @@ class SetImageConfig:
     
     @commands.hybrid_group(name='iset')#, fallback='arg')#, description='Quick set a value', aliases=[])
     async def isetarg(self, ctx: commands.Context):
-        '''(GROUP). call `!help set` to see sub-commands.'''
+        '''(GROUP). Image Settings. call `!help set` to see sub-commands.'''
         if ctx.invoked_subcommand is None:
             await ctx.send(f"{ctx.subcommand_passed} does not belong to iset")
     
@@ -184,6 +182,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
 
+        self._log_extra = {'cog_name': self.qualified_name}
+
     async def cog_unload(self):
         await self.bot.wait_until_ready()
         await self.igen.unload_pipeline()
@@ -197,8 +197,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         cmd_status = 'FAIL' if ctx.command_failed else 'PASS'
         pos_args = [a for a in ctx.args[2:] if a]
         
-        cmds_logger.info(f'(cog_after_invoke, {self.qualified_name})'
-                         '- [{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args))
+        cmds_logger.info(#f'(cog_after_invoke, {self.qualified_name})'
+                         '[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
     
     @commands.Cog.listener('on_message_delete')
     async def on_message_delete(self, message: discord.Message):
@@ -209,14 +209,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 await view.on_timeout()
             self.msg_views.pop(message.id)
             #print(f'Message Deleted: {message.author} - "{message.content}"')
-            event_logger.info('(on_message_delete)'
-                                '- [DELETE] {a.display_name}({a.name}) message {message.content!r} view {view}'.format(a=message.author, message=message, view=view))
+            event_logger.info(#'(on_message_delete)'
+                                '[DELETE] {a.display_name}({a.name}) message {message.content!r} view {view}'.format(a=message.author, message=message, view=view), extra=self._log_extra)
         else:
             print('Message without view deleted.')
 
     async def view_check_defer(self, ctx: commands.Context):
         needs_view = False
-        if not ctx.interaction.response.is_done():
+        if ctx.interaction is None or not ctx.interaction.response.is_done():
             await ctx.defer()
             await asyncio.sleep(1)
             needs_view = True
@@ -260,20 +260,29 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             await msg.delete()
         return prompt_new
 
-
-    @commands.command(name='istatus', aliases=['iinfo','imginfo', 'imageinfo'])
-    async def istatus_report(self, ctx: commands.Context):
-        '''Display image model info'''
+    def status_list(self, keep_advanced:bool=True, ctx=None):
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
-        msg = model_alias + (' ✅' if self.igen.is_ready else ' ❌')
-        msg += f'\nOffload: {self.igen.offload}'
-        # if self.igen.global_seed is not None:
-        #     msg += '\n' + f'Image Seed: {self.igen.global_seed}'
-
-        msg += self.igen.config.to_md()
+        keymap=None if keep_advanced else {'guidance_scale':'guidance', 'negative_prompt':'negprompt'}
+        status = [
+            StatusItem('Image status', ('Up' if self.igen.is_ready else 'Down'), " ✔" if self.igen.is_ready else " ✖"),
+            #StatusItem('Model', model_alias, f' (offload: {self.igen.offload})'),#(' ✅' if self.igen.is_ready else ' ❌')),
+            StatusItem('Model', model_alias),#(' ✅' if self.igen.is_ready else ' ❌')),
+            StatusItem('offload', self.igen.offload), # Note: this show the _unmerged_ length.
+            # StatusItem('','---',''),
+            #StatusItem('Default settings', value=None, advanced=True),
+            StatusItem('Default settings', '', extra=self.igen.config.to_md(keymap)), # .strip()
+            
+            #StatusItem(, value=None),
+        ]
         if self.igen.is_ready:
-            msg += '\n' + '```json\n' + 'Scheduler ' + self.igen.base.scheduler.to_json_string() + '\n```'
+            status.append(StatusItem('```json\n' + 'Scheduler ' + self.igen.base.scheduler.to_json_string() + '\n```', value=None, advanced=True))
         
+        return [s for s in status if keep_advanced or not s.advanced]
+    
+    @commands.command(name='istatus')
+    async def istatus_report(self, ctx: commands.Context):
+        '''Full image model status report.'''
+        msg = '\n'.join(stat.md() for stat in self.status_list(keep_advanced=True))
         return await ctx.send(msg)
     
     @commands.command(name='imgup', aliases=['iup','imageup'])
@@ -283,14 +292,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if not self.igen.is_ready:
             msg = await ctx.send('Warming up drawing skills...', silent=True)
             await self.igen.load_pipeline()
-            # FIXME: Reeable once not redirecting
-            self.igen.pbar_config(disable=True)
+            # Disable if redirecting
+            #self.igen.pbar_config(disable=True)
         
         await self.bot.report_state('draw', ready=True)
 
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         complete_msg = f'{model_alias} (offload={self.igen.offload}) all fired up'
-        complete_msg += self.igen.config.to_md()
+        complete_msg += self.igen.config.to_md(keymap={'guidance_scale':'guidance', 'negative_prompt':'negprompt'})
 
         return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
         
