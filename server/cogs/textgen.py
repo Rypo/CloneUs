@@ -36,7 +36,7 @@ from managers.msgman import MessageManager
 
 from run import BotUs
 
-from .gencfg import SetTextConfig
+from .gen.gencfg import SetTextConfig
 
 # Determine if initials based commmands can be used.
 
