@@ -214,12 +214,15 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         else:
             print('Message without view deleted.')
 
-    async def view_check_defer(self, ctx: commands.Context):
-        needs_view = False
-        if ctx.interaction is None or not ctx.interaction.response.is_done():
+    async def view_check_defer(self, ctx: commands.Context, view=None):
+        needs_view = (view is None or view.message is None)
+        # interact = ctx if isinstance(ctx, discord.Interaction) else ctx.interaction
+        
+        if ctx.interaction and not ctx.interaction.response.is_done():
             await ctx.defer()
             await asyncio.sleep(1)
-            needs_view = True
+            
+        
         return needs_view
     
     def fix_prompt(self, prompt:str, check_spelling:bool = True):
@@ -498,7 +501,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         """
         # dblend: Percent of `steps` for Base before Refine stage. ⬇Quality, ⬇Run Time. Default=None (SDXL Only).
         # flags can't be created by drawUI, so need to separate out draw/redraw functionality
-        view = imageui.DrawUIView(timeout=GUI_TIMEOUT)
+        #view = imageui.DrawUIView(timeout=GUI_TIMEOUT)
+        
         return await self.draw(ctx, prompt, 
                                n_images = flags.n,
                                steps = flags.steps, 
@@ -510,7 +514,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                refine_strength = flags.hdstrength, 
                                fast = flags.fast,
                                seed = flags.seed,
-                               _view = view
+                               _view = None
                                )
         
     async def draw(self, ctx: commands.Context, prompt:str, *,
@@ -528,8 +532,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                    _view: imageui.DrawUIView = None,
                    ):
         refine_strength = cmd_tfms.percent_transform(refine_strength)
-        needs_view = await self.view_check_defer(ctx)
-        view = _view
+        
+        view = imageui.DrawUIView(timeout=GUI_TIMEOUT) if _view is None else _view
+        needs_view = await self.view_check_defer(ctx, view)
 
         prompt = await self.validate_prompt(ctx, prompt)
         if prompt == '<CANCEL>':
@@ -573,7 +578,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
         """
         # hdsteps: High Definition steps. If > 0, image is upscaled 1.5x and refined. Default=0. Usually < 3.
-        view = imageui.DrawUIView(timeout=GUI_TIMEOUT)
+        
         return await self.redraw(ctx, prompt, imgurl, 
                                  n_images=flags.n,
                                  imgfile=flags.imgfile, 
@@ -587,7 +592,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  refine_strength = flags.hdstrength, 
                                  fast = flags.fast,
                                  seed = flags.seed,
-                                 _view = view
+                                 _view = None
                                  )
 
     async def redraw(self, ctx: commands.Context, prompt: str, imgurl:str, *, 
@@ -610,8 +615,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         strength = cmd_tfms.percent_transform(strength)
         refine_strength = cmd_tfms.percent_transform(refine_strength)
         
-        needs_view = await self.view_check_defer(ctx)
-        view = _view
+        view = imageui.DrawUIView(timeout=GUI_TIMEOUT) if _view is None else _view
+        needs_view = await self.view_check_defer(ctx, view)
+        
         # this may be passed a url string in drawUI config
         image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile, discord.Attachment) else imgurl)
         
@@ -682,7 +688,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                           seed: int = None,
                           ):
         refine_strength = cmd_tfms.percent_transform(refine_strength)
+        
         needs_view = await self.view_check_defer(ctx)
+        
         if isinstance(imgfile, Image.Image):
             image = imgfile # get a little cheeky here to bypass the download
         else:

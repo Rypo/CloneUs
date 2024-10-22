@@ -100,7 +100,7 @@ class WordRuleFlags(commands.FlagConverter):
     #force_words: str = commands.flag(name='force_words', default=None, description='(non-functional) A comma separated list of forced words')
     weighted_words: app_commands.Transform[str, cmd_tfms.WordListTransformer]  = commands.flag(name='weighted_words', default=None,) 
 
-class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+class DrawFlags(commands.FlagConverter):
     #prompt: str
     n: Range[int, 1, ] = commands.flag(default=1, aliases=['n_images'])
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])
@@ -114,7 +114,7 @@ class DrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     seed: int = commands.flag(default=None, aliases=['random_seed'],) 
 
 
-class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+class RedrawFlags(commands.FlagConverter):
     # imgfile: discord.Attachment
     # prompt: str
     n: Range[int, 1, ] = commands.flag(default=1, aliases=['n_images'])
@@ -131,7 +131,7 @@ class RedrawFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     fast: bool = commands.flag(default=False, aliases=['lq'],) 
     seed: int = commands.flag(default=None, aliases=['random_seed'],) 
 
-class UpsampleFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+class UpsampleFlags(commands.FlagConverter):
     # imgfile: discord.Attachment
     # prompt: str
     hdstrength: app_commands.Transform[float, cmd_tfms.PercentTransformer] = commands.flag(default=0.3,  aliases=['refine_strength'])
@@ -142,7 +142,7 @@ class UpsampleFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     seed: int = commands.flag(default=None, aliases=['random_seed'],) 
 
 
-class AnimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+class AnimateFlags(commands.FlagConverter):
     # prompt: str
     # imgurl: str = None
     nframes: int = commands.flag(default=11, aliases=['nf'])
@@ -160,7 +160,7 @@ class AnimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
     seed: int = commands.flag(default=None, aliases=['random_seed'],) 
 
 
-class ReanimateFlags(commands.FlagConverter, delimiter=' ', prefix='--'):
+class ReanimateFlags(commands.FlagConverter):
     # imgurl: str
     # prompt: str
     steps: int = commands.flag(default=None, aliases=['num_inference_steps'])

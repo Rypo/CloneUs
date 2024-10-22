@@ -271,10 +271,10 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         #self.bot: commands.Bot = self.call_ctx.bot        
         logger.debug(f'args, kwargs: {ctx.args} {ctx.kwargs}', dict(cls=self))
 
-        self.imgen = ctx.cog
+        self.imgen = ctx.command.cog #ctx.cog
         self.cmd_name = ctx.command.name
         self.call_fn = self.imgen.redraw if self.cmd_name=='redraw' else self.imgen.draw
-        self.init_flags = self.call_ctx.kwargs['flags']
+        self.init_flags = self.call_ctx.kwargs.get('flags', {})
         
         self.message: discord.WebhookMessage = await ctx.send(view=self)
         self._time_last_refresh = time.monotonic()
@@ -326,7 +326,11 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         fast_files = []
         for i,image in enumerate(images):
             kwgs = call_kwargs[i]
-            kwgs.update(fast=self.init_flags.fast)
+            try:
+                kwgs.update(fast=self.call_ctx.kwargs['flags'].fast)
+            except Exception as e:
+                print(e)
+                kwgs.update(fast=False)
             self.kwarg_sets.append(kwgs)
             prompt = kwgs['prompt']
             
