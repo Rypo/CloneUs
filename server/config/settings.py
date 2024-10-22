@@ -5,6 +5,7 @@ import random
 import typing
 from pathlib import Path
 import logging
+import logging.handlers
 from logging.config import dictConfig
 
 import discord
@@ -12,11 +13,6 @@ from colorama import Fore, Back, Style
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
 
-TESTING = bool(os.getenv('TESTING', 0))
-print(f'Testing: {TESTING}')
-SHOW_CHANGELOG = not TESTING
-
-PFX = 'DEV_' if TESTING else ''
 
 SERVER_ROOT = Path(__file__).parent.parent
 
@@ -26,11 +22,17 @@ RUNS_DIR = ROOT_DIR / 'runs/full'
 
 CONFIG_DIR = SERVER_ROOT / 'config'
 COGS_DIR = SERVER_ROOT / 'cogs'
-APPS_DIR = SERVER_ROOT / 'appcmds'
-VIEWS_DIR = SERVER_ROOT / 'views'
+RES_DIR = SERVER_ROOT / 'res'
+
+DISCORD_SESSION_INTERACTIVE = int(os.getenv('DISCORD_SESSION_INTERACTIVE', 1))
+TESTING = int(os.getenv('TESTING', 0))
+print(f'Testing: {bool(TESTING)}, Interactive: {bool(DISCORD_SESSION_INTERACTIVE)}', )
+SHOW_CHANGELOG = not TESTING
+
+PFX = 'DEV_' if TESTING else ''
 
 LOGS_DIR = SERVER_ROOT / 'logs' / ('dev' if TESTING else 'prod')
-RES_DIR = SERVER_ROOT / 'res'
+
 
 load_dotenv(ROOT_DIR.joinpath('.env'))
 
@@ -104,6 +106,99 @@ class ColorFormatter(discord.utils._ColourFormatter):
         for level, color in self.LEVEL_COLORS}
         self.FORMATS = formats
         return self.FORMATS
+    
+
+class TimedDirRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    def namer(self, default_name):
+        # logs/dev/foo.log.YYYY-mm-dd -> logs/dev/daily/foo_YYYY-mm-dd.log
+        pdir, fname = os.path.split(default_name)
+        stem, sfx, date = fname.rsplit('.', maxsplit=2)
+        new_name = os.path.join(pdir, 'daily', f'{stem}_{date}.{sfx}')
+        
+        return new_name
+
+
+class RoutingFileHandler(logging.Handler):#logging.handlers.TimedRotatingFileHandler):
+    HANDLERS: dict[str, logging.handlers.BaseRotatingHandler] = {}
+
+    # https://pyformat.info/
+    GFMTR = logging.Formatter("{levelname:10s} [{asctime:10s}] {name:10s} : ({funcName}, {cog_name}) - {message}", style='{', defaults={'cog_name':'COG'})
+    VFMTR = logging.Formatter("{levelname:10s} - {asctime} - {module:15s} : {message}", style='{')
+    
+    for route in ['cmds','event','model']:
+        _rhand = TimedDirRotatingFileHandler(filename=str(LOGS_DIR/f"{route}.log"), when='midnight')
+        
+        _rhand.setFormatter(GFMTR)
+        HANDLERS[route] = _rhand
+    
+    for route in ['infos']:
+        _rhand = logging.handlers.RotatingFileHandler(filename=str(LOGS_DIR/f"{route}.log"), mode='w') # Note: this never actually rotates, maxBytes=0.
+        _rhand.setFormatter(VFMTR)
+        HANDLERS[route] = _rhand
+    
+    def route_record(self, record:logging.LogRecord):
+        if record.funcName.startswith('on_'):
+            return self.HANDLERS['event']
+        elif record.funcName.startswith('cog_'):
+            return self.HANDLERS['cmds']
+        elif 'managers' in record.pathname:
+            return self.HANDLERS['model']
+        
+        return self.HANDLERS['infos']
+
+    def emit(self, record:logging.LogRecord):
+        # first, check extra={'route':'...'}, fallback name suffix (e.g. server.cmds)
+        route = getattr(record, 'route', record.name.split('.')[-1])
+        # route plain server without .sfx to infos
+        if route=='sever':
+            route = 'infos'
+        # if neither in extra nor name in routes, attempt to infer
+        handler = self.HANDLERS.get(route, self.route_record(record))
+        
+        handler.emit(record)
+
+class RoutingFilter(logging.Filter):
+    def __init__(self, dest:typing.Literal['model','event','cmds'], name: str = "") -> None:
+        super().__init__(name)
+        self.dest = dest
+        self.filter_map = {
+            'model': self._model_like,
+            'event': self._event_like,
+            'cmds': self._cmds_like,
+        }
+
+    def _event_like(self, record:logging.LogRecord):
+        return record.funcName.startswith('on_')
+    def _cmds_like(self, record:logging.LogRecord):
+        return record.funcName.startswith('cog_')
+    def _model_like(self, record:logging.LogRecord):
+        print(f'{record.module=}, {record.filename=}, {record.pathname=}')
+        return 'managers' in record.pathname
+
+    def filter(self, record:logging.LogRecord):
+        name_filter = super().filter(record)
+        
+        # if set via extra={'route':'...'}
+        if (route:=getattr(record, 'route', None)) is not None:
+            print('RECORD GETATTR ROUTE:', route)
+            return name_filter and route==self.dest
+        
+        # if name ends with [cmds,model,event] e.g. server.cmds
+        if (route:=record.name.split('.')[-1]) in self.filter_map:
+            print('RECORD NAME SPLIT ROUTE:', route)
+            return name_filter and route==self.dest# self.filter_map[route](record)
+        
+        print('RECORD DEST DEFAULT:', self.dest)
+        # use the assigned default
+        return name_filter and self.filter_map[self.dest](record)
+
+class MaxSeverityFilter(logging.Filter):
+    def __init__(self, name: str = "", max_level=logging.WARNING) -> None:
+        super().__init__(name)
+        self.max_level = max_level
+
+    def filter(self, record):
+        return super().filter(record) and record.levelno <= self.max_level
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -113,24 +208,26 @@ LOGGING_CONFIG = {
             "format": "%(levelname)-10s - %(asctime)s - %(module)-15s : %(message)s"
         },
         "standard": {
-            "format": "%(levelname)-10s - %(name)-15s : %(message)s"
+            "format": "%(levelname)-10s - %(name)-15s : %(message)s" 
+            #"format": "%(levelname)-10s [%(asctime)-10s] %(name)-10s : %(message)s"
         },
-        "model": {
-            "format": "%(levelname)-10s [%(asctime)-10s] %(name)-10s : %(message)s"
-        },
-        "color_console": {
+        "colorized": {
             '()': lambda: ColorFormatter(defaults={'clsName':''})
+        },
+        "plain": {
+            "format": '[%(levelname)-5s @ %(asctime)s]'+'(%(clsName)s'+'%(funcName)s)'+' %(message)s',
+            "datefmt": '%Y-%m-%d %H:%M:%S'
         },
         "struct": {
             'format': '%(message)s'
         },
     },
-    "handlers": {
-        "console": {
-            "level": "DEBUG",
-            "class": "logging.StreamHandler",
-            "formatter": "standard",
+    "filters": {
+        "warnings_and_below": {
+            "()" : lambda: MaxSeverityFilter('server', logging.WARNING),
         },
+    },
+    "handlers": {
         "console2": {
             "level": "WARNING",
             "class": "logging.StreamHandler",
@@ -139,7 +236,12 @@ LOGGING_CONFIG = {
         "color_console": {
             "level": "DEBUG",
             "class": "logging.StreamHandler",
-            "formatter": "color_console",
+            "formatter": "colorized",
+        },
+        "plain_console": {
+            "level": "DEBUG",
+            "class": "logging.StreamHandler",
+            "formatter": "plain",
         },
         "file": {
             "level": "INFO",
@@ -148,34 +250,21 @@ LOGGING_CONFIG = {
             "mode": "w",
             "formatter": "verbose",
         },
-        "modelfile": {
+        "routefile":{
+            '()': RoutingFileHandler,#lambda: RoutingFileHandler(logging.INFO),
             "level": "INFO",
-            "class": "logging.FileHandler",
-            "filename": LOGS_DIR/"model.log",
-            "mode": "w",
-            "formatter": "model",
-        },
-        "cmdsfile": {
-            "level": "INFO",
-            "class": "logging.FileHandler",
-            "filename": LOGS_DIR/"cmds.log",
-            "mode": "w",
-            "formatter": "model",
-        },
-        "eventfile": {
-            "level": "INFO",
-            "class": "logging.FileHandler",
-            "filename": LOGS_DIR/"event.log",
-            "mode": "w",
-            "formatter": "model",
+            "filters":['warnings_and_below'],
+            
         },
         "errfile": {
             "level": "ERROR",
             "class": "logging.FileHandler",
-            "filename": LOGS_DIR/"errors.log",
+            "filename": str(LOGS_DIR/"errors.log"),
             "mode": "w",
             "formatter": "verbose",
         },
+
+        # structured
         "cmds_jsonl": {
             "level": "DEBUG",
             "class": "logging.FileHandler",
@@ -183,14 +272,23 @@ LOGGING_CONFIG = {
             "mode": "a",
             "formatter": "struct",
         },
+        "cmd_cache_jsonl": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "filename": LOGS_DIR/"cmd_cache.jsonl",
+            "mode": "a",
+            "formatter": "struct",
+        },
     },
     "loggers": {
-        "bot": {"handlers": ["console"], "level": "INFO", "propagate": False},
-        "model": {"handlers": ["modelfile"], "level": "INFO", "propagate": False},
-        "cmds": {"handlers": ["cmdsfile"], "level": "INFO", "propagate": False},
-        "event": {"handlers": ["eventfile"], "level": "INFO", "propagate": False},
-        "pconsole": {"handlers": ["color_console"], "filters": [], "level": "DEBUG", "propagate": False},
+       
+        "server": {"handlers": ["errfile","routefile"], "level": "INFO", "propagate": False},
+
+        "pconsole": {"handlers": (["color_console"] if DISCORD_SESSION_INTERACTIVE else ["plain_console"]), # , 
+                     "filters": [], "level": "DEBUG", "propagate": False},
+        
         "struct_cmds": {"handlers": ["cmds_jsonl"], "level": "DEBUG", "propagate": False},
+        "cmd_cacher": {"handlers": ["cmd_cache_jsonl"], "level": "DEBUG", "propagate": False},
 
         "discord": {
             "handlers": ["console2", "file"],
@@ -200,25 +298,9 @@ LOGGING_CONFIG = {
     },
 }
 
-def move_logs_lts(*logfilesnames):
-    '''Move last run's logs to a daily and merge all file'''
-    # TODO: RotatingFileHandler
-    for logfile in logfilesnames:
-        mlogs: Path = LOGS_DIR/logfile
-        
-        if mlogs.exists():
-            plogs = mlogs.read_text()
-
-            if (match := re.search(r'\[(\d{4}-\d{2}-\d{2})',plogs)):
-                date = match.group(1)
-                with open(mlogs.parent.joinpath('daily', f'{mlogs.stem}_{date}{mlogs.suffix}'), 'a') as f:
-                    f.write(plogs)
-            
-            with open(mlogs.parent.joinpath(f'all_{logfile}'), 'a') as f:
-                f.write(plogs)
 
 def setup_logging():
-    move_logs_lts("model.log", "cmds.log", "event.log")
+    #move_logs_lts("model.log", "cmds.log", "event.log")
     #dictConfig(LOGGING_CONFIG)
 
     old_factory = logging.getLogRecordFactory()
