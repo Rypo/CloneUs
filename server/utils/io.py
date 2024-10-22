@@ -1,6 +1,7 @@
 import re
 import typing
 import datetime
+import subprocess
 from enum import Enum
 from pathlib import Path
 
@@ -93,8 +94,12 @@ def find_checkpoints(search_path: Path, include_pattern:str|re.Pattern=None, exc
 
 class PersistentStorage:
     def __init__(self, pstore_file=None) -> None:
-        import config.settings as settings
-        self.pstore_file = pstore_file if pstore_file is not None else settings.CONFIG_DIR/'persistent_storage.yaml'
+        if pstore_file is None:
+            import config.settings as settings
+            pstore_file = settings.CONFIG_DIR/'persistent_storage.yaml'
+        
+        self.pstore_file = pstore_file
+        
         try:
             self.persistent_storage = OmegaConf.load(self.pstore_file)
         except FileNotFoundError:
@@ -129,3 +134,16 @@ class PersistentStorage:
         # since doing dict.fromkeys, it inits to null (None), so, .get is finding it and returning None
         value = self.today_store.get(key, default)
         return value if value is not None else default
+
+
+
+def tail(f:str|Path, n:int, offset:int=0):
+    # https://stackoverflow.com/a/136280
+    try:
+        out = subprocess.run(["tail", "-n", f'{n+offset}', str(f)], capture_output=True, check=True, text=True)
+    except subprocess.CalledProcessError as e:
+        l1 = Path(f).open('r').readline() # try to read a line for a better Error message if missing
+        raise e # else raise processError
+    
+    end = -offset if offset else None
+    return out.stdout.splitlines()[:end]

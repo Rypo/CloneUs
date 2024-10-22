@@ -2,12 +2,15 @@ import os
 import sys
 import time
 import signal
+import discord.ext.tasks
 import psutil
 import typing
 import asyncio
 import logging
+import argparse
 import datetime
 from contextlib import asynccontextmanager
+import ujson as json
 import uvloop
 import discord
 from discord import app_commands
@@ -16,9 +19,9 @@ from discord.ext import commands
 # NOTE: Do not import from cloneus in this file. It seems to break logging in the package.
 #from cloneus.data import useridx
 
-import config.settings as settings
 
-import ujson as json
+import discord.ext
+import utils.io as io_utils
 
 DESC = '''A bot that fills in when your friends go AWOL (and other things).
 
@@ -27,11 +30,12 @@ Commands that accept arguments can be called with either prefix.
 '''
 
 
-logger = logging.getLogger('bot')
+logger = logging.getLogger('server')
 struct_logger = logging.getLogger('struct_cmds')
-DYN_GLOB = '*.py'  if settings.TESTING else '[!_]*.py'
+cmdcache_logger = logging.getLogger('cmd_cacher')
+# DYN_GLOB = '*.py'  if settings.TESTING else '[!_]*.py'
 
-def hard_reset():
+async def hard_reset(defer_handling=True):
     """Restarts the current program, with file objects and descriptors cleanup"""
     # https://stackoverflow.com/a/33334183
     # see also:
@@ -41,22 +45,47 @@ def hard_reset():
     
     os.environ['REBOOT_REQUESTED'] = '1'
     
-    try:
-        p = psutil.Process(os.getpid())
-        #time.sleep(3.0)
-        #p.send_signal(signal.SIGINT)
-        for handler in p.open_files():# + p.net_connections():
-            os.close(handler.fd)
-        p.send_signal(signal.SIGINT)
+    
+    
+    if defer_handling:
+        # for task in asyncio.all_tasks(asyncio.get_running_loop()):
+        #     if task.cancel():
+        #         print('CANCELED TASK:', task.get_name(), task)
+        #await asyncio.sleep(2.0) # give time for tasks to catchup
+        raise KeyboardInterrupt('Restart')
+    else:
+        try:
+            p = psutil.Process(os.getpid())
+            #time.sleep(3.0)
+            # Closing openfiles 
+            # TODO: try to determine which of these causes the crontab closing issue
+            for handler in p.open_files():# + p.net_connections():
+                print(handler.path)
+                os.fsync(handler.fd)
+                os.close(handler.fd)
+            
+        except Exception as e:
+            logger.error(e, exc_info=e)
 
-    except Exception as e:
-        logger.error(e, exc_info=e)
-    #finally:
-        # python = sys.executable
-        # os.execl(python, python, *sys.argv)
+        p.send_signal(signal.SIGINT)
+        #finally:
+        #    os.environ['MESSAGE_ON_START'] = '1'
+        #    python = sys.executable
+        #    os.execl(python, python, *sys.argv)
+
+def cmd_cache_init(cache_filepath:str, n:int = 100):
+    last_n_cmds = io_utils.tail(cache_filepath, n=n)
+    cmd_cache = {}
+    
+    for cmd_str in last_n_cmds:
+        cmd = json.loads(cmd_str)['cmd']
+        cmd_cache[cmd.pop('interaction_id')] = cmd
+    return cmd_cache
+
+
 
 class BotUs(commands.Bot):
-    def __init__(self):
+    def __init__(self, extention_glob:str = '[!_]*.py'):
         super().__init__(
             command_prefix='!',#commands.when_mentioned_or('!'), 
             description=DESC, 
@@ -69,13 +98,16 @@ class BotUs(commands.Bot):
             'chat': False,
             'draw': False
         }
+        self._extention_glob = extention_glob
+        self.pstore = io_utils.PersistentStorage(settings.CONFIG_DIR/'persistent_storage.yaml')
+        self.cmd_cache = cmd_cache_init(settings.LOGS_DIR/'cmd_cache.jsonl', n=100)
     
     async def on_ready(self):
         print('ready')
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         await self.toggle_extensions(extdir='cogs', state='on')
         if os.environ.pop('MESSAGE_ON_START', None):
-            await self.get_channel(settings.CHANNEL_ID).send('I. am. REBORN.')
+            await self.get_channel(settings.CHANNEL_ID).send('I. am. REBORN.', silent=True)
     
     def _get_presence(self):
         text_up = self._operational_state['chat']
@@ -120,7 +152,7 @@ class BotUs(commands.Bot):
             
 
     async def toggle_extensions(self, extdir:typing.Literal['appcmds','cogs','views'], state='on'):
-        for ext_file in settings.SERVER_ROOT.joinpath(extdir).glob(DYN_GLOB):
+        for ext_file in settings.SERVER_ROOT.joinpath(extdir).glob(self._extention_glob):
             if ext_file.stem != '__init__':
                 if state=='on':
                     await self.load_extension(f'{extdir}.{ext_file.stem}')
@@ -176,7 +208,47 @@ class BotUs(commands.Bot):
             logger.error(f'In {ctx.command.qualified_name}:', exc_info=error.original)
             await ctx.send(f'An error occurred: {error}')
 
-    async def on_app_command_completion(self, interaction:discord.Interaction, command:app_commands.Command):
+    async def on_command_completion(self, ctx:commands.Context):
+        # this will only trigger on hybrid commands
+        if ctx.interaction is not None:
+            interaction = ctx.interaction
+            args = ctx.args
+            kwargs = ctx.kwargs.copy() # doesn't really matter if mutate ctx since command is done by the time this is called
+
+            # NOTE: for this to work, all commands must always refer to the flags argument as "flags". But at least then don't need to iterate over values
+            if (flags := kwargs.pop('flags', None)):
+                kwargs['flags'] = {'FlagsClsName': flags.__class__.__name__, 'flag_kwargs': {k:v for k,v in flags}}
+
+            cmd_attrs = {'qualified_name': ctx.command.qualified_name, 'args':args, 'kwargs':kwargs, } #  'namespace': ctx.interaction.namespace
+            self.cmd_cache[interaction.id] = cmd_attrs
+            
+            # this is what we will use to rebuild cache on start
+            data = {'cmd': {'interaction_id': interaction.id, **cmd_attrs}}
+            
+            # the rest is just for logging purposes
+            data['interaction'] = {
+                'user_global_name': interaction.user.global_name,
+                'user_name': interaction.user.name,
+                'user_id': interaction.user.id,
+                'type': interaction.type,
+                'created_at':interaction.created_at.strftime('%Y-%m-%d %H:%M:%S%z'),
+                'guild_id':interaction.guild_id,
+                'channel_id':interaction.channel_id,
+            }
+
+            data['metadata'] = {
+                'command_failed': ctx.command_failed,
+                'module': ctx.command.module,
+                'cog_name': ctx.command.cog_name,
+                'message_id': ctx.message.id,
+                
+                'log_time': datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S%z')
+            }
+
+            cmdcache_logger.info(json.dumps(data))
+        
+
+    async def on_app_command_completion(self, interaction:discord.Interaction, command:app_commands.Command|app_commands.ContextMenu):
         # app_commands.ContextMenu
         data = {
             'log_time': datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S%z'),
@@ -219,30 +291,34 @@ class BotUs(commands.Bot):
             data.update(i_msg_data)
         # 'command': command.to_dict(self.tree),
         #param_types = dict(subcommand = 1, subcommand_group = 2, string = 3, integer = 4, boolean = 5, user = 6, channel = 7, role = 8, mentionable = 9, number = 10, attachment = 11,)
-        cmd_data = {
-            'command.module':command.module,
-            'command.name': command.name,
-            'command.description': command.description,
-            'command.parameters': [{'name': param.name, 
-                                    'type': param.type, 
-                                    'default': (str(param.default) if param.required else param.default), 
-                                    'required': param.required} 
-                                    for param in command.parameters],
-            #'command': command.to_dict(self.tree), 
-            #'options': [param.to_dict() for param in self._params.values()],
-            'command.extras':command.extras,
-        }
+        if isinstance(command, app_commands.Command):
+            cmd_data = {
+                'command.module':command.module,
+                'command.name': command.name,
+                'command.qualified_name': command.qualified_name,
+                'command.description': command.description,
+                'command.parameters': [{'name': param.name, 
+                                        'type': param.type, 
+                                        'default': (str(param.default) if param.required else param.default), 
+                                        'required': param.required} 
+                                        for param in command.parameters],
+                #'command': command.to_dict(self.tree), 
+                #'options': [param.to_dict() for param in self._params.values()],
+                'command.extras':command.extras,
+            }
 
-        data.update(cmd_data)
+            data.update(cmd_data)
         
         #data.update(ctx_data)
         struct_logger.info(json.dumps(data))
         
 
 async def main(bot=None):
-    cog_list = [c.stem.lower() for c in settings.COGS_DIR.glob(DYN_GLOB) if c.stem != '__init__']
+    extention_glob = '*.py'  if settings.TESTING else '[!_]*.py'
+    cog_list = [c.stem.lower() for c in settings.COGS_DIR.glob(extention_glob) if c.stem != '__init__']
     if bot is None:
-        bot = BotUs()
+        bot = BotUs(extention_glob)
+
 
     @bot.tree.command(name='reload', description='Reload a set of commands')
     @app_commands.choices(cog=[app_commands.Choice(name=cog, value=cog) for cog in cog_list])
@@ -254,10 +330,24 @@ async def main(bot=None):
         msg = await interaction.followup.send(f'Reloaded: {cog}', ephemeral=True, wait=True)
         await msg.delete(delay=1)
     
-    
+    @bot.command(name='kill')
+    async def kill(ctx: commands.Context):
+        '''Destroy the bot, by any means necessary. UNRECOVERABLE.'''
+        print('KILL CALL')
+        await ctx.send('☠️')
+        await bot.change_presence(activity=discord.ActivityType.unknown, status=discord.Status.invisible)
+        
+        p = psutil.Process(os.getpid())
+        for task in asyncio.all_tasks(bot.loop):
+           print('CANCEL:', task.get_name(), task)
+           task.cancel()
+        
+        p.send_signal(signal.SIGTERM)
+
+
     @bot.command(name='restart', aliases=['reboot'])
     async def restart(ctx: commands.Context, spec: typing.Literal["-h", "-s",]='-h'):
-        '''Nuke and Pave. All state will be lost.
+        '''Hard reset the bot. All state will be lost.
         
         Args:
             spec: type of reboot (options "-h" ard, "-s" oft)
@@ -270,10 +360,13 @@ async def main(bot=None):
             await bot.toggle_extensions('cogs', 'reload')
             os.environ.pop('EAGER_LOAD')
             await msg.edit('Done.', delete_after=3)
+        
         elif spec == '-h':
             await ctx.send('⚠️ **Reboot Request Received** ⚠️ Razing and Rebuilding to Remedy RuhRos...')
+            
             await bot.toggle_extensions('cogs', 'off')
-            hard_reset()
+            
+            await hard_reset(defer_handling=True)
 
     @bot.command(name='gsync', aliases=['sync'])
     #@commands.guild_only()
@@ -352,32 +445,56 @@ async def main(bot=None):
         await bot.start(settings.BOT_TOKEN)
     #bot.run(settings.BOT_TOKEN)
 
+
+
+def get_cli_args():
+    parser = argparse.ArgumentParser(description='run discord bot')
+    run_mode_group = parser.add_mutually_exclusive_group(required=True)
+    run_mode_group.add_argument('--live', action='store_true', help='run on live server')
+    run_mode_group.add_argument('--test', action='store_true', help='run on test server (if configured)')
+    parser.add_argument('--non-interactive', action='store_true', help='disable "human features" like color logging to improve crontab compatibility')
+    return parser.parse_args()
+
 def run_main():
+    extention_glob = '*.py'  if settings.TESTING else '[!_]*.py'
     DEBUG = None
-    bot = BotUs()
+    bot = BotUs(extention_glob)
     
+    # signal.signal(signal.SIGINT, signal_handler)
     try:
         uvloop.run(main(bot), debug=DEBUG)
+    # except (KeyboardInterrupt, SystemExit):
     except KeyboardInterrupt:
-        for task in asyncio.all_tasks(bot.loop):
-           print(task.get_name())
-           task.cancel()
-        
-        if 'REBOOT_REQUESTED' in os.environ:
-            logger.info(f'REBOOT_REQUESTED. Running: {sys.argv}')
-            os.environ.pop('REBOOT_REQUESTED')
-            os.environ['MESSAGE_ON_START'] = '1'
-            
-            python = sys.executable
-            os.execl(python, python, *sys.argv)
+        #bot.loop.close()
+        # for task in asyncio.all_tasks(bot.loop):
+        #   if task.cancel():
+        #       print('CANCELED TASK:', task.get_name(), task)
+           
         
         # nothing to do here
         # `asyncio.run` handles the loop cleanup
         # and `self.start` closes all sockets and the HTTPClient instance.
         return
+    finally:
+        if os.environ.pop('REBOOT_REQUESTED', None):
+            print(f'REBOOT_REQUESTED. Running: {sys.executable} {sys.argv}')
+            
+            os.environ['MESSAGE_ON_START'] = '1'
+            
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
 
 if __name__ == '__main__':
     #from threading import Thread
+    cli_args = get_cli_args()
+    if cli_args.test:
+        os.environ['TESTING'] = '1'
+    if cli_args.non_interactive:
+        os.environ['DISCORD_SESSION_INTERACTIVE'] = '0'
+    
+    # Only import settigns AFTER parsing cli. 
+    # TODO: make settings less auto run.
+    import config.settings as settings
     settings._init_dirs()
     settings.setup_logging()
     
