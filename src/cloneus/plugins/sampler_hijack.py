@@ -494,6 +494,8 @@ def get_logits_processor_patch(self, **kwargs):
     if tokenizer is not None:
         if generation_config.dry_multiplier is not None and generation_config.dry_multiplier > 0.0:
             dry_sequence_breakers = generation_config.dry_sequence_breakers
+            if isinstance(dry_sequence_breakers, list):
+                dry_sequence_breakers = str(dry_sequence_breakers)
 
             # Support both JSON array notation and comma-separated strings.
             if not dry_sequence_breakers.startswith("["):

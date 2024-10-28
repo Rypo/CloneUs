@@ -54,8 +54,8 @@ class GenOpts:
     def to_dict(self):
        return asdict(self)
 
-# src: https://github.com/oobabooga/text-generation-webui/blob/81f603d09fab9afad9fa54f123c57c187bc115df/extensions/openai/typing.py#L28
-# src2: https://github.com/oobabooga/text-generation-webui/blob/81f603d09fab9afad9fa54f123c57c187bc115df/modules/presets.py#L13
+# src: https://github.com/oobabooga/text-generation-webui/blob/main/extensions/openai/typing.py
+# src2: https://github.com/oobabooga/text-generation-webui/blob/d1af7a41ade7bd3c3a463bfa640725edb818ebaf/modules/presets.py#L13
 # desc: https://github.com/oobabooga/text-generation-webui/wiki/03-%E2%80%90-Parameters-Tab#parameters-description
 # updated params, descs: https://github.com/oobabooga/text-generation-webui/blob/dev/modules/ui_parameters.py
 @dataclass
@@ -86,7 +86,7 @@ class GenOptsExtended(GenOpts):
     dry_multiplier: float = 0.0 # 0.8, ~ penalty weight, activator of DRY
     dry_base: float = 1.75 # pentalty--seqlength scaling factor 
     dry_allowed_length: int = 2 # max permitted repeats before pentalty applied
-    dry_sequence_breakers: list[str] = None# field(default_factory=lambda: ['"\\n", ":", "\\"", "*"'])
+    dry_sequence_breakers: list[str] = '"\\n", ":", "\\"", "*"'# field(default_factory=lambda: ['"\\n", ":", "\\"", "*"'])
     
     xtc_threshold: float = 0.1
     xtc_probability: float = 0
