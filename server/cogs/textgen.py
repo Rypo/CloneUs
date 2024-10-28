@@ -55,9 +55,14 @@ class TextGen(commands.Cog, SetTextConfig):
         self.pstore = self.bot.pstore #io_utils.PersistentStorage()
         self.ctx_menu = app_commands.ContextMenu(name='🔂 Redo (Text)', callback=self._cm_redo,)
         self.bot.tree.add_command(self.ctx_menu, override=True)
-        self.init_model = settings.ACTIVE_MODEL_CKPT
+        #self.active_checkpoint = settings.ACTIVE_MODEL_CKPT
+        self.active_model_kwargs = {'checkpoint_path':settings.ACTIVE_MODEL_CKPT,'gen_config':'best_generation_config.json', 'dtype': None, 'attn_implementation': None}
         
         self._log_extra = {'cog_name': self.qualified_name}
+        self._load_lock = asyncio.Lock()
+        self._model_load_commands = set(
+            [self.ctx_menu.name,'pbot','ubot','mbot','xbot', 'ask','chat', 'reword', ])
+        
 
     @property
     def youtube_quota(self):
@@ -70,7 +75,7 @@ class TextGen(commands.Cog, SetTextConfig):
         #self.bot.tree.add_command(self.ctx_menu)
         await self.msgmgr.set_default(self.bot.get_channel(settings.CHANNEL_ID))
         
-        self.clomgr._preload(self.init_model, gen_config='best_generation_config.json')
+        self.clomgr._preload(**self.active_model_kwargs)
         
 
     async def cog_unload(self):
@@ -80,14 +85,20 @@ class TextGen(commands.Cog, SetTextConfig):
         print('TextGen - Goodbye')
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         stop_global_executors()
+    
+    async def cog_before_invoke(self, ctx: commands.Context) -> None:
+        if not self.clomgr.is_ready:
+            if ctx.command.name in self._model_load_commands:
+                await self.check_defer(ctx)
+                msg = await self.txtup(ctx.channel)
 
     async def cog_after_invoke(self, ctx: commands.Context) -> None:
         #print('after invoke', datetime.datetime.now())
         cmd_status = 'FAIL' if ctx.command_failed else 'PASS'
         pos_args = [a for a in ctx.args[2:] if a]
 
-        cmds_logger.info(#f'(cog_after_invoke, {self.qualified_name})'
-                         '[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
+        cmds_logger.info('[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(
+            stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
 
 
 
@@ -110,15 +121,9 @@ class TextGen(commands.Cog, SetTextConfig):
 
         #human_proc = self.auto_reply_mode and context_updated        
         
-        # if context_updated:
-        #     mstat = "ADD"
-        #     lvl = logging.INFO
-        # else:
-        #      mstat = "SKIP"
-        #      lvl = logging.DEBUG
         mstat,lvl = ("ADD", logging.INFO) if context_updated else ("SKIP", logging.DEBUG)
-        event_logger.log(lvl, #f'(on_message, {self.qualified_name})'
-                        '[{mstat}] {a.display_name}({a.name}) message {message.content!r}'.format(mstat=mstat, a=message.author, message=message), extra=self._log_extra)
+        event_logger.log(lvl, '[{mstat}] {a.display_name}({a.name}) message {message.content!r}'.format(
+            mstat=mstat, a=message.author, message=message), extra=self._log_extra)
 
 
 
@@ -153,12 +158,19 @@ class TextGen(commands.Cog, SetTextConfig):
                 await reaction.remove(self.bot.user)
 
         
-        event_logger.info(f'(on_reaction_add, {self.qualified_name})'
-                         f'- [REACT] {user.display_name}({user.name}) ADD "{reaction.emoji}" '
-                         'TO {a.display_name}({a.name}) message {reaction.message.content!r}'.format(a=reaction.message.author, reaction=reaction))
+        event_logger.info(f'[REACT] {user.display_name}({user.name}) ADD "{reaction.emoji}" TO '
+                         '{a.display_name}({a.name}) message {reaction.message.content!r}'.format(a=reaction.message.author, reaction=reaction), extra=self._log_extra)
                         
 
-
+    async def check_defer(self, ctx: commands.Context):
+        needs_defer = False
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.defer()
+            await asyncio.sleep(1)
+            needs_defer = True
+        
+        return needs_defer
+    
     def status_list(self, keep_advanced:bool=True, ctx: commands.Context = None):
         if ctx is None:
             ctx = self.msgmgr.default_channel
@@ -173,48 +185,51 @@ class TextGen(commands.Cog, SetTextConfig):
         ]
         return [s for s in status if keep_advanced or not s.advanced]
 
-    @commands.command('tstatus')
+    @commands.command('tstatus', aliases=['tstat'])
     async def tstatus_report(self, ctx: commands.Context):
         '''Full text model status report.'''
         msg = '\n'.join(stat.md() for stat in self.status_list(keep_advanced=True, ctx=ctx))
         await ctx.send(msg)
 
-    @commands.cooldown(1, 10, commands.BucketType.guild)    
+    #@commands.cooldown(1, 10, commands.BucketType.guild)    
     @commands.command(name='txtup', aliases=['textup','tup'])
-    async def txtup(self, ctx: commands.Context, announce: bool = True, load: bool=True):
-        """Fire up the model"""
-        await self.bot.wait_until_ready()
-
-        if announce: 
-            msg = await ctx.send('Powering up....',  silent=True)
+    async def txtup(self, ctx: commands.Context, reload: bool=False):
+        """Fire up the text generation model"""
         
-        if load and not self.clomgr.is_ready:
-            await self.clomgr.load(self.init_model, gen_config='best_generation_config.json')
+        was_called = hasattr(ctx,'command') and ctx.command.name=='txtup'
+        msg = None
+        async with self._load_lock:
+            if not self.clomgr.is_ready or reload:
+                msg = await ctx.send('Powering up....',  silent=True)
+                await self.clomgr.load(**self.active_model_kwargs)
             
-        await self.bot.report_state('chat', ready=True)
+            await self.bot.report_state('chat', ready=True)
             
-        if announce: 
-            await msg.delete()
-            await ctx.send('Imitation Engine Fired Up 🔥')
+        if msg is not None: 
+            await msg.edit('Imitation Engine Fired Up 🔥')
+        elif was_called:
+            await self.tstatus_report(ctx)
+
         
     
-    @commands.cooldown(1, 10, commands.BucketType.guild)   
+    #@commands.cooldown(1, 10, commands.BucketType.guild)   
     @commands.command(name='txtdown', aliases=['textdown','tdown'])
-    async def txtdown(self, ctx: commands.Context, announce: bool = True, unload: bool=True):
-        '''Disable the bot's brain power'''
-        await self.bot.wait_until_ready()
+    async def txtdown(self, ctx: commands.Context):
+        '''Disable the text generation model'''
         
-        if unload:
-            await self.clomgr.unload()
-            # doesn't clear unless these are here for some reason
-            torch.cuda.empty_cache()
-            gc.collect()
+        was_called = hasattr(ctx,'command') and ctx.command.name=='txtdown'
+        
+        
+        await self.clomgr.unload()
+        # doesn't clear unless these are here for some reason
+        torch.cuda.empty_cache()
+        gc.collect()
 
-        if announce:
+        if was_called:
             await ctx.send('Ahh... sweet release ...', delete_after=5)
         
         await self.bot.report_state('chat', ready=False)
-        await self.bot.wait_until_ready()
+        
         #release_memory()
     
     @commands.hybrid_command(name='gcsave')
@@ -230,17 +245,17 @@ class TextGen(commands.Cog, SetTextConfig):
             tnow = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
             name = f'{self.clomgr.clo.gen_mode}_{tnow}'
         
-        name = re.sub('\W+','_', name[:100].removesuffix('.json'))+'.json'
+        name = re.sub('\W+','_', name[:100].removesuffix('.json'))
         
-        self.clomgr.clo.save_genconfig(filepath=gc_dir/name)
+        self.clomgr.clo.save_genconfig(filepath=(gc_dir/name).with_suffix('.json'))
         
         return await ctx.send(f'Saved current generation config settings to {name}')
     
     async def savedgc_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         gc_dir = (self.clomgr.clo.path_data.checkpoint_path/'gen_configs')
-        confs = ['default'] + ([g.name for g in gc_dir.iterdir()] if gc_dir.exists() else [])
+        confs = ['default'] + ([g.stem.casefold() for g in gc_dir.iterdir()] if gc_dir.exists() else [])
         
-        return [app_commands.Choice(name=c, value=c) for c in confs if current.lower() in c.lower()]
+        return [app_commands.Choice(name=c, value=c) for c in confs if current.casefold() in c]
 
     @commands.hybrid_command(name='gcload')
     @app_commands.autocomplete(name=savedgc_autocomplete)
@@ -255,7 +270,7 @@ class TextGen(commands.Cog, SetTextConfig):
         if name == 'default':
             self.clomgr.clo.set_genconfig(save_on_change=False, preset='ms')
         else:
-            gc = self.clomgr.clo.load_genconfig(gc_dir/name, self.clomgr.clo.path_data)
+            gc = self.clomgr.clo.load_genconfig((gc_dir/name).with_suffix('.json'), self.clomgr.clo.path_data)
             delt = self.clomgr.update_genconfig(gc.to_dict())#clo.set_genconfig(save_on_change=False, preset='ms')
         
         await ctx.send(f'Loaded GenConfig: {name!r}\n{delt}')
@@ -279,6 +294,8 @@ class TextGen(commands.Cog, SetTextConfig):
             name_filter = cur_model_path.relative_to(settings.RUNS_DIR).as_posix()
 
         ckpt_list = self.clomgr.modelview_data(name_filter, remove_empty=True)
+        if not ckpt_list:
+            return await ctx.send(f'No models found matching {name_filter!r}')
         ppview = cview.PrePagedView(ckpt_list, timeout=180)
 
         msg = 'All Valid Model Options' if name_filter is None else f'Model options matching {name_filter!r}'
@@ -308,12 +325,10 @@ class TextGen(commands.Cog, SetTextConfig):
     
         if modelpath_filter is None:
             if dtype or attn_implementation:
-                await ctx.defer()
-                await self.clomgr.load(self.clomgr.clo.path_data.checkpoint_path, dtype=dtype, attn_implementation=attn_implementation)
-                #await self.txtup(ctx, False, False)
-                #await self.status_report(ctx) # TODO: FIX 
-                await self.bot.report_state('chat', ready=True)
-                return await ctx.send(content='Done.', delete_after=3)
+                await self.check_defer(ctx)
+                self.active_model_kwargs.update(dtype=dtype, attn_implementation=attn_implementation)
+
+                return await self.txtup(ctx, reload=True)
             
             return await self.show_models(ctx)
         elif all([c == '.' for c in modelpath_filter]):
@@ -330,15 +345,11 @@ class TextGen(commands.Cog, SetTextConfig):
 
             full_model_path = matches[0]
             
-        msg = await ctx.send(f'Switching to model: {full_model_path.relative_to(settings.RUNS_DIR)} ...')
+        msg = await ctx.send(f'Switching text model ... `{full_model_path.relative_to(settings.RUNS_DIR)}`')
         
-        #await self.txtdown(ctx, False, False)
-        await self.clomgr.load(full_model_path, dtype=dtype, attn_implementation=attn_implementation)
-        #await self.txtup(ctx, False, False)
-        await self.bot.report_state('chat', ready=True)
-        
-        await msg.edit(content='Done.', delete_after=3)
-        #await self.status_report(ctx) # TODO: FIX
+        self.active_model_kwargs.update(checkpoint_path=full_model_path, dtype=dtype, attn_implementation=attn_implementation)
+        return await self.txtup(ctx, reload=True)
+
 
     @commands.hybrid_command(name='sayas')
     @app_commands.choices(author=cmd_choices.AUTHOR_DISPLAY_NAMES)
@@ -447,7 +458,7 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.redo(interaction, message, author=None, seed_text=None, _needsdefer=False)
         await interaction.delete_original_response()
 
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def redo(self, ctx:commands.Context, message: discord.Message, author:str=None, seed_text:str=None, _needsdefer=True):
         #ctx = await self.bot.get_context(message)
         if author is None:
@@ -458,11 +469,12 @@ class TextGen(commands.Cog, SetTextConfig):
         try:
             mcache_slice = self.msgmgr.get_mcache_subset(message, inclusive=False)
         except ValueError:
-            await ctx.send("Can't re-roll. Message not in context.")
+            await ctx.send("Can't re-roll. Message not in context.", ephemeral=True)
 
-        if _needsdefer:
-            await ctx.defer()
-            await asyncio.sleep(1)
+        await self.check_defer(ctx)
+        # if _needsdefer:
+        #     await ctx.defer()
+        #     await asyncio.sleep(1)
         
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             #message.reply()
@@ -471,7 +483,7 @@ class TextGen(commands.Cog, SetTextConfig):
             await self.msgmgr.replace_message(message, sent_messages)
 
     @commands.hybrid_command(name='pbot')
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     @app_commands.choices(auto_mode=cmd_choices.AUTO_MODES)
     async def pbot(self, ctx: commands.Context, 
                       auto_mode: str ='rbest', # typing.Literal['rbest','irbest','top', 'urand']
@@ -490,8 +502,7 @@ class TextGen(commands.Cog, SetTextConfig):
 
         """
         
-        await ctx.defer()
-        await asyncio.sleep(1)
+        await self.check_defer(ctx)
         author_candidates = None
         
         if author_initials:
@@ -514,11 +525,12 @@ class TextGen(commands.Cog, SetTextConfig):
         ctx = await self.bot.get_context(message_cache[-1])
         await self.anybot(ctx, next_author, seed_text=None)
     
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def streambot(self, ctx: commands.Context, author:str, seed_text:str,*, _needsdefer=True):        
-        if _needsdefer:
-            await ctx.defer()
-            await asyncio.sleep(1)
+        await self.check_defer(ctx)
+        # if _needsdefer:
+        #     await ctx.defer()
+        #     await asyncio.sleep(1)
         
         #author_tag_prefix = f"[{author}] " + ((seed_text + ' ') if seed_text else '')
         #msg = await ctx.send(author_tag_prefix)
@@ -528,25 +540,26 @@ class TextGen(commands.Cog, SetTextConfig):
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
 
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def batch_streambot(self, ctx: commands.Context, authors:list[str], seed_text:str):        
-        await ctx.defer()
-        await asyncio.sleep(1)
+        await self.check_defer(ctx)
+        # await ctx.defer()
+        # await asyncio.sleep(1)
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'stream_batch')
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
                 
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def anybot(self, ctx: commands.Context, author: str, seed_text=None, *, _needsdefer=True):
         """Generalist bot generator."""
         
         if self.streaming_mode:
             return await self.streambot(ctx, author=author, seed_text=seed_text, _needsdefer=_needsdefer)
-            
-        if _needsdefer:
-            await ctx.defer()
-            await asyncio.sleep(1)
+        await self.check_defer(ctx)    
+        # if _needsdefer:
+        #     await ctx.defer()
+        #     await asyncio.sleep(1)
         
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
@@ -570,7 +583,7 @@ class TextGen(commands.Cog, SetTextConfig):
         return await self.anybot(ctx, user, seed_text=seed_text)
 
     @commands.hybrid_command(name='mbot')
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def initials_bot(self, ctx: commands.Context, author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer], *, seed_text: str=None):
         """Call one or more bots using author initials
         
@@ -587,9 +600,9 @@ class TextGen(commands.Cog, SetTextConfig):
         if self.streaming_mode:
             return await self.batch_streambot(ctx, authors, seed_text)
             
-        
-        await ctx.defer()
-        await asyncio.sleep(1)
+        await self.check_defer(ctx)
+        # await ctx.defer()
+        # await asyncio.sleep(1)
 
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
@@ -613,7 +626,7 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.anybot(ctx, useridx.get_users('dname', by='initial')[author_initial], seed_text=seed_text)
 
     @commands.hybrid_command(name='xbot')
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def xbot(self, ctx, author: commands.Range[str, 1, 32], seed_text:typing.Optional[str] = None):
         """BYOName, but keep it alphanumeric
         
@@ -627,7 +640,7 @@ class TextGen(commands.Cog, SetTextConfig):
 
 
     @commands.hybrid_command(name='ask')
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def ask(self, ctx: commands.Context, prompt:str, *, system_msg:str=None):
         """Send a prompt to the underlying, un-fintuned base model.
         
@@ -644,8 +657,9 @@ class TextGen(commands.Cog, SetTextConfig):
 
         if system_msg is None:
             system_msg = self.default_system_msg
-        await ctx.defer()
-        await asyncio.sleep(1)
+        await self.check_defer(ctx)
+        # await ctx.defer()
+        # await asyncio.sleep(1)
         
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
@@ -656,7 +670,7 @@ class TextGen(commands.Cog, SetTextConfig):
             
     
     @commands.hybrid_command(name='chat')            
-    @check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
     async def chat(self, ctx: commands.Context, prompt:str, *, system_msg:str=None):
         """Have a conversation with the underlying, un-fintuned base model.
         
@@ -673,8 +687,9 @@ class TextGen(commands.Cog, SetTextConfig):
         if system_msg is None:
             system_msg = self.default_system_msg
         
-        await ctx.defer()
-        await asyncio.sleep(1)
+        await self.check_defer(ctx)
+        # await ctx.defer()
+        # await asyncio.sleep(1)
         self.msgmgr.base_message_cache.append(prompt)
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):

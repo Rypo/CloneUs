@@ -29,7 +29,6 @@ from utils import image as imgutil
 from views import imageui
 from run import BotUs
 
-bot_logger = logging.getLogger('bot')
 cmds_logger = logging.getLogger('server.cmds')
 event_logger = logging.getLogger('server.event')
 color_logger = logging.getLogger('pconsole') 
@@ -131,25 +130,26 @@ class SetImageConfig:
     
     @isetarg.command(name='model', aliases=['artist',])
     @app_commands.choices(version=cmd_choices.IMAGE_MODELS)
-    async def iset_model(self, ctx: commands.Context, version: app_commands.Choice[str], offload: bool=False):
+    async def iset_model(self, ctx: commands.Context, version: str, offload: bool=False):
         '''Loads in the image generation model
         
         Args:
             version: Image model name
-            offload: If True, model will be moved off GPU when not in use to save vRAM 
+            offload: If True, model will be moved off GPU when not in use to save vRAM (Default=False) 
         '''
-        await ctx.defer()
-        if self.igen.model_name != version.value or self.igen.offload != offload:
+        # NOTE: this will make precheck error messages non-ephemeral.  
+        await self.view_check_defer(ctx)
+        disp_name = imgman.AVAILABLE_MODELS[version]['desc']
+        if self.igen.model_name != version or self.igen.offload != offload:
             if self.igen.is_ready:
                 await self.igen.unload_pipeline()
-            #await self.igen.unload_pipeline()
             
-            self.igen = imgman.AVAILABLE_MODELS[version.value]['manager'](offload=offload)
+            self.igen = imgman.AVAILABLE_MODELS[version]['manager'](offload=offload)
             return await self.imgup(ctx)
         elif not self.igen.is_ready:
             return await self.imgup(ctx)
         else:
-            await ctx.send(f'{version.name} already up')
+            await ctx.send(f'{disp_name} already up')
 
 
     async def scheduler_autocomplete(self, interaction: discord.Interaction, current: str,) -> list[app_commands.Choice[str]]:
@@ -178,11 +178,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         self.bot = bot
         #self.igen = imgman.ColorfulXLLightningManager(offload=False)
         # self.igen = imgman.FluxSchnevManager(offload=False)
-        self.igen = imgman.JuggernautXIManager(offload=False)
+        # self.igen = imgman.JuggernautXIManager(offload=False)
+        self.igen = imgman.SD35LargeManager(offload=False)
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
 
         self._log_extra = {'cog_name': self.qualified_name}
+        self._load_lock = asyncio.Lock()
+        self._model_load_commands = set(['draw', 'redraw','hd','animate', 'reanimate', 'optimize'])
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
@@ -193,12 +196,19 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 await view.on_timeout()
         stop_global_executors()
     
+    async def cog_before_invoke(self, ctx: commands.Context) -> None:
+        if not self.igen.is_ready:
+            if ctx.command.name in self._model_load_commands:
+                _ = await self.view_check_defer(ctx)
+                msg = await self.imgup(ctx.channel)
+            
+
     async def cog_after_invoke(self, ctx: commands.Context) -> None:
         cmd_status = 'FAIL' if ctx.command_failed else 'PASS'
         pos_args = [a for a in ctx.args[2:] if a]
         
-        cmds_logger.info(#f'(cog_after_invoke, {self.qualified_name})'
-                         '[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
+        cmds_logger.info('[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(
+            stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
     
     @commands.Cog.listener('on_message_delete')
     async def on_message_delete(self, message: discord.Message):
@@ -282,7 +292,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         return [s for s in status if keep_advanced or not s.advanced]
     
-    @commands.command(name='istatus')
+    @commands.command(name='istatus', aliases=['istat'])
     async def istatus_report(self, ctx: commands.Context):
         '''Full image model status report.'''
         msg = '\n'.join(stat.md() for stat in self.status_list(keep_advanced=True))
@@ -292,19 +302,27 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     async def imgup(self, ctx: commands.Context):
         '''Loads in the default image generation model'''
         msg = None
-        if not self.igen.is_ready:
-            msg = await ctx.send('Warming up drawing skills...', silent=True)
-            await self.igen.load_pipeline()
-            # Disable if redirecting
-            #self.igen.pbar_config(disable=True)
-        
-        await self.bot.report_state('draw', ready=True)
+        was_called = hasattr(ctx,'command') and ctx.command.name=='imgup'
+        #was_called = hasattr(ctx, 'channel')
+        async with self._load_lock:
+            if not self.igen.is_ready:
+                msg = await ctx.send('Warming up drawing skills...', silent=True)
+                await self.igen.load_pipeline()
+                # Disable if redirecting
+                if not settings.DISCORD_SESSION_INTERACTIVE:
+                    self.igen.pbar_config(disable=True)
+            
+            await self.bot.report_state('draw', ready=True)
 
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         complete_msg = f'{model_alias} (offload={self.igen.offload}) all fired up'
         complete_msg += self.igen.config.to_md(keymap={'guidance_scale':'guidance', 'negative_prompt':'negprompt'})
-
-        return await ctx.send(complete_msg) if msg is None else await msg.edit(content = complete_msg)
+        if msg:
+            return await msg.edit(content = complete_msg)
+        elif was_called:
+            return await ctx.send(complete_msg)  
+        
+            
         
     @commands.command(name='imgdown', aliases=['idown','imagedown'])
     async def imgdown(self, ctx: commands.Context):
@@ -315,7 +333,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 
 
     @commands.command(name='optimize', aliases=['compile'])
-    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def optimize(self, ctx: commands.Context):
         '''Compiles the model to make it go brrrr (~20% faster)'''
 
@@ -325,8 +343,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             return await ctx.send("Can't go brrrrr when model is offloaded. Call `iset model` with `offload=False`")
         msg = await ctx.send("Sit tight. This'll take 2-4 minutes...")
 
-        await ctx.defer()
-        await asyncio.sleep(1)
+        
+        await self.view_check_defer(ctx)
         async with (ctx.channel.typing(), self.bot.busy_status('Compiling...')):
             await self.igen.compile_pipeline()
             await msg.edit(content='🏎 I am SPEED. 🏎 ')
@@ -342,9 +360,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             level: level of detail in the description. Default=verbose.
             text_only: If True, only return text description, otherwise show the image. Default=False.
         """
-        await ctx.defer()
-        await asyncio.sleep(1)
-        image_url = imgutil.clean_discord_urls(imgurl, True)#imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)
+        await self.view_check_defer(ctx)
+        image_url = imgutil.clean_discord_urls(imgurl)#imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)
         # test for gif/mp4/animated file
 
         image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
@@ -380,8 +397,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             return await ctx.send('You need to set at least 1 of `imgurls` and `prompt`, preferably both', ephemeral=True)
                 
         if imgurls is None:
-            await ctx.defer()
-            await asyncio.sleep(1)
+            await self.view_check_defer(ctx)
             desc = await self.igen.vqa_chat(prompt=prompt, images=None)
             return await ctx.send(desc)
                 
@@ -400,8 +416,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
             image_urls.append(image_url)
         
-        await ctx.defer()
-        await asyncio.sleep(1)
+        await self.view_check_defer(ctx)
         
         if prompt is not None:
             prompt = await self.validate_prompt(ctx, prompt)
@@ -445,9 +460,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             imgfile1: start image attachment. To use, write anything in `imgurl1` and drag+drop image. 
             imgfile2: end image attachment. To use, write anything in `imgurl2` and drag+drop image. 
         """
-        # manual conversion may be needed because discord transformer doesn't proc when function called internally (e.g. by GUI redo button)
-        #strength = cmd_tfms.percent_transform(strength)
-        #refine_strength = cmd_tfms.percent_transform(refine_strength)
         
         needs_view = await self.view_check_defer(ctx)
         
@@ -481,7 +493,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
 
     @commands.hybrid_command(name='draw')
-    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _draw(self, ctx: commands.Context, prompt:commands.Range[str,1,1000], *, flags: cmd_flags.DrawFlags):
         """Generate an image from a text prompt description.
 
@@ -556,7 +568,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
 
     @commands.hybrid_command(name='redraw')
-    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _redraw(self, ctx: commands.Context, prompt: commands.Range[str,1,1000], imgurl:str, *, flags: cmd_flags.RedrawFlags):
         """Remix an image from a text prompt and image.
 
@@ -676,7 +688,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  negative_prompt = flags.negprompt, 
                                  guidance_scale = flags.guidance, 
                                  detail_weight = flags.detail,
-                                 seed = flags.seed
+                                 seed = flags.seed,
+                                 _needs_view=True, # if calling as a command, need "view" (aka send img), if calling from UI, no view
                                  )
 
     async def hd_upsample(self, ctx: commands.Context, imgurl:str, prompt: str = None, imgfile: discord.Attachment|None=None, *,
@@ -686,10 +699,12 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                           guidance_scale: float = None,
                           detail_weight: float = 0,
                           seed: int = None,
+                          _needs_view=False,
                           ):
         refine_strength = cmd_tfms.percent_transform(refine_strength)
         
-        needs_view = await self.view_check_defer(ctx)
+        _ = await self.view_check_defer(ctx)
+        needs_view=_needs_view
         
         if isinstance(imgfile, Image.Image):
             image = imgfile # get a little cheeky here to bypass the download
@@ -714,7 +729,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         return image
 
     @commands.hybrid_command(name='animate')
-    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     #@commands.max_concurrency(1, wait=True)
     async def _animate(self, ctx: commands.Context, prompt: str, imgurl:str=None, *, flags: cmd_flags.AnimateFlags):
         """Create a gif from a text prompt and (optionally) a starting image
@@ -815,7 +830,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         return image_frames, out_imgpath
 
     @commands.hybrid_command(name='reanimate')
-    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _reanimate(self, ctx: commands.Context, prompt: commands.Range[str,1,1000], imgurl:str, *, flags: cmd_flags.ReanimateFlags):
         """Redraw the frames of an animated image.
 
