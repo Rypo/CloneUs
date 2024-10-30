@@ -37,6 +37,9 @@ color_logger = logging.getLogger('pconsole')
 GUI_TIMEOUT = 30*60 # NOTE: limit is 15 minutes unless webhook message is converted to message
 
 
+class PromptCanceled(Exception): 
+    '''Raised when user cancels command after prompt spellcheck.'''
+
 class Autocorrect:
     def __init__(self, model_relpath:str='extras/models/jamspell/en.bin') -> None:
         import jamspell
@@ -179,7 +182,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         #self.igen = imgman.ColorfulXLLightningManager(offload=False)
         # self.igen = imgman.FluxSchnevManager(offload=False)
         # self.igen = imgman.JuggernautXIManager(offload=False)
-        self.igen = imgman.SD35LargeManager(offload=False)
+        self.igen = imgman.SD35MediumManager(offload=False)
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
 
@@ -219,10 +222,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 await view.on_timeout()
             self.msg_views.pop(message.id)
             #print(f'Message Deleted: {message.author} - "{message.content}"')
-            event_logger.info(#'(on_message_delete)'
-                                '[DELETE] {a.display_name}({a.name}) message {message.content!r} view {view}'.format(a=message.author, message=message, view=view), extra=self._log_extra)
+            event_logger.info('[DELETE] {a.display_name}({a.name}) message {message.content!r} view {view}'.format(
+                a=message.author, message=message, view=view), extra=self._log_extra)
         else:
-            print('Message without view deleted.')
+            event_logger.debug('Message without view deleted.', extra=self._log_extra)
 
     async def view_check_defer(self, ctx: commands.Context, view=None):
         needs_view = (view is None or view.message is None)
@@ -264,7 +267,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             await view.wait()
             if view.value == '<CANCEL>':
                 await msg.delete()
-                return '<CANCEL>'
+                raise PromptCanceled
             keep_changes =  view.value or view.value is None
             if not keep_changes:
                 self.spell_check.ban_texts(prompt, prompt_new)
@@ -304,9 +307,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         msg = None
         was_called = hasattr(ctx,'command') and ctx.command.name=='imgup'
         #was_called = hasattr(ctx, 'channel')
+        model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         async with self._load_lock:
             if not self.igen.is_ready:
-                msg = await ctx.send('Warming up drawing skills...', silent=True)
+                msg = await ctx.send(f'Warming up default: {model_alias} ...', silent=True)
                 await self.igen.load_pipeline()
                 # Disable if redirecting
                 if not settings.DISCORD_SESSION_INTERACTIVE:
@@ -314,7 +318,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             await self.bot.report_state('draw', ready=True)
 
-        model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
+        #model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         complete_msg = f'{model_alias} (offload={self.igen.offload}) all fired up'
         complete_msg += self.igen.config.to_md(keymap={'guidance_scale':'guidance', 'negative_prompt':'negprompt'})
         if msg:
@@ -419,8 +423,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         await self.view_check_defer(ctx)
         
         if prompt is not None:
-            prompt = await self.validate_prompt(ctx, prompt)
-            if prompt == '<CANCEL>':
+            try:
+                prompt = await self.validate_prompt(ctx, prompt)
+            except PromptCanceled:
                 return await ctx.send('Canceled', silent=True, delete_after=1)
 
         images,img_metas = [], []
@@ -547,11 +552,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         view = imageui.DrawUIView(timeout=GUI_TIMEOUT) if _view is None else _view
         needs_view = await self.view_check_defer(ctx, view)
-
-        prompt = await self.validate_prompt(ctx, prompt)
-        if prompt == '<CANCEL>':
-            await ctx.send('Canceled', silent=True, delete_after=1)
-            return 
+        try:
+            prompt = await self.validate_prompt(ctx, prompt)
+        except PromptCanceled:
+            return await ctx.send('Canceled', silent=True, delete_after=1)
+        # prompt = await self.validate_prompt(ctx, prompt)
+        # if prompt == '<CANCEL>':
+        #     await ctx.send('Canceled', silent=True, delete_after=1)
+        #     return 
 
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast)
@@ -642,10 +650,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         image = Image.fromarray(image)
         
 
-        prompt = await self.validate_prompt(ctx, prompt)
-        if prompt == '<CANCEL>':
-            await ctx.send('Canceled', silent=True, delete_after=1)
-            return
+        try:
+            prompt = await self.validate_prompt(ctx, prompt)
+        except PromptCanceled:
+            return await ctx.send('Canceled', silent=True, delete_after=1)
         
 
         async with self.bot.busy_status(activity='draw'):
@@ -665,7 +673,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
     
     @commands.hybrid_command(name='hd')
-    @check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
+    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
     async def _hd_upsample(self, ctx: commands.Context, imgurl:str, prompt: commands.Range[str,None,1000] = None, imgfile: discord.Attachment=None, *, flags: cmd_flags.UpsampleFlags, ):
         """Make an image HD (big n' smooooth).
         
@@ -712,8 +720,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
             image, imgmeta = await imgutil.aload_image(image_url)
         
-        prompt = await self.validate_prompt(ctx, prompt)
-        if prompt == '<CANCEL>':
+        try:
+            prompt = await self.validate_prompt(ctx, prompt)
+        except PromptCanceled:
             return await ctx.send('Canceled', silent=True, delete_after=1)
 
 
@@ -793,8 +802,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
             image, imgmeta = await imgutil.aload_image(image_url, result_type=None)
         
-        prompt = await self.validate_prompt(ctx, prompt)
-        if prompt == '<CANCEL>':
+        try:
+            prompt = await self.validate_prompt(ctx, prompt)
+        except PromptCanceled:
             return await ctx.send('Canceled', silent=True, delete_after=1)
         
         
@@ -893,8 +903,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         needs_view = await self.view_check_defer(ctx) # This needs to be AFTER the checks or message will not be ephemeral because of ctx.defer()
         
-        prompt = await self.validate_prompt(ctx, prompt)
-        if prompt == '<CANCEL>':
+        try:
+            prompt = await self.validate_prompt(ctx, prompt)
+        except PromptCanceled:
             return await ctx.send('Canceled', silent=True, delete_after=1)
                 
         image_frames = []
