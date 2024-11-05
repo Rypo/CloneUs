@@ -14,7 +14,7 @@ from transformers import (
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
 
-from trl import SFTTrainer #, SFTConfig
+from trl import SFTTrainer, SFTConfig
 
 def _get_cosine_const_schedule_with_warmup_lr_lambda(current_step: int, *, num_warmup_steps: int, num_const_steps:int, num_training_steps: int, num_cycles: float):
     
@@ -136,7 +136,8 @@ def save_last_step(trainer:Trainer|SFTTrainer):
     checkpoint_path = os.path.join(trainer.args.output_dir, ckpt)
         
     trainer.model.save_pretrained(checkpoint_path, safe_serialization=True) # trainer.save_model(checkpoint_path)
-    trainer.tokenizer.save_pretrained(checkpoint_path)
+    trainer.processing_class.save_pretrained(checkpoint_path)
+    # trainer.tokenizer.save_pretrained(checkpoint_path)
     trainer.state.save_to_json(os.path.join(checkpoint_path, 'trainer_state.json')) # trainer.save_state()
     torch.save(trainer.args, os.path.join(checkpoint_path,'training_args.bin'))
     #save_model_safetensors(trainer.model,  os.path.join(checkpoint_path, "model.safetensors"))
@@ -263,7 +264,8 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
 def get_batch(trainer:Trainer, train=False):
     dl = trainer.get_train_dataloader() if train else trainer.get_eval_dataloader()
     b0=next(iter(dl))
-    return trainer.tokenizer.batch_decode(b0.input_ids, skip_special_tokens=False)
+    return trainer.processing_class.batch_decode(b0.input_ids, skip_special_tokens=False)
+    #return trainer.tokenizer.batch_decode(b0.input_ids, skip_special_tokens=False)
 
 class FullSaveCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
