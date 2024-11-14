@@ -16,6 +16,7 @@ server/logs
 server/appcmds
 server/res
 server/cogs/_*
+server/cogs/beta/*
 server/output/*
 # state store
 server/config/persistent_storage.yaml
@@ -33,6 +34,9 @@ config/eval/*
 nbs
 imgs
 TODO
+
+# Out of scope scripts
+scripts/diffusion
 
 # VSCode
 .vscode
