@@ -1,9 +1,13 @@
 import gc
 import time
+from pathlib import Path
 import itertools
 from contextlib import contextmanager
 
 import torch
+
+import safetensors.torch as sft
+from huggingface_hub import snapshot_download, hf_hub_download
 
 def release_memory():
     torch.cuda.empty_cache()
@@ -30,3 +34,28 @@ def batched(iterable, n:int):
     iterator = iter(iterable)
     while batch := list(itertools.islice(iterator, n)):
         yield batch
+
+
+def read_state_dict(model_id_or_path:str|Path, subfolder:str|None=None, local_files_only:bool = False, allow_empty:bool = False,) -> dict[str, torch.Tensor]:
+    '''Read sharded safetensors files into a unified state dict from a remote HF repo or local filepath'''
+    
+    if (model_path := Path(model_id_or_path)).exists():
+        if model_path.is_file():
+            return sft.load_file(model_path)
+        
+        weights_loc = model_path
+        
+    else:
+        if subfolder:
+            weights_loc = Path(snapshot_download(repo_id=model_id_or_path, allow_patterns=f"{subfolder}/*", local_files_only=local_files_only)).joinpath(subfolder)
+        else:
+            weights_loc = Path(snapshot_download(repo_id=model_id_or_path, local_files_only=local_files_only))
+    
+    state_dict = {}
+    for shard in sorted(Path(weights_loc).glob('*.safetensors')):
+        state_dict.update(sft.load_file(shard))
+
+    if not state_dict and not allow_empty:
+        raise RuntimeError('Failed to read state dict data from given path')
+
+    return state_dict
