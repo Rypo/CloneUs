@@ -22,7 +22,7 @@ import aiohttp
 import requests
 from PIL import Image, UnidentifiedImageError
 import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png # imageio.plugins.freeimage.download()
-import pygifsicle # sudo apt install gifsicle
+
 
 
 import config.settings as settings
@@ -87,6 +87,7 @@ def save_animation_prompt(frames:list[Image.Image], prompt:str, ext: typing.Lite
     if ext == 'GIF':
         iio.imwrite(out_imgpath, frames, extension=sfx, loop=0, duration=imgmeta.get('duration', None))
         if optimize:
+            import pygifsicle # sudo apt install gifsicle
             pygifsicle.optimize(out_imgpath)#, 'tmp-o.gif')
     else:
         iio.imwrite(out_imgpath, frames, extension=sfx, fps=imgmeta.get('fps', 10))
@@ -137,7 +138,7 @@ def to_bytes_file(image:Image.Image, prompt: str, ext:typing.Literal['PNG','WebP
         
         return discord.File(fp=imgbin, filename=filename, description=prompt)
 
-def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: typing.Literal['PNG','WebP','JPEG'] = 'WebP', **kwargs):
+def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: typing.Literal['PNG','WebP','JPEG'] = 'WebP', spoiler:bool=False, **kwargs):
     sfx = f'.{ext.lower()}'
     
     # discord thinks all .webp are animated. Rename as png, but keep webp all performance benefits
@@ -150,7 +151,7 @@ def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: t
         image.save(imgbin, format=ext, **kwargs)
         imgbin.seek(0)
         
-        return discord.File(fp=imgbin, filename=filename, description=description)
+        return discord.File(fp=imgbin, filename=filename, description=description, spoiler=spoiler)
 
 
 def impath_to_file(img_path:Path|str, description:str=None):
@@ -164,7 +165,7 @@ def to_discord_file(image:Image.Image|str|Path, filestem:str=None, description:s
     
     return impath_to_file(img_path=image, description=description)
 
-def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, ext: typing.Literal['GIF','MP4','WebP']='GIF', **kwargs):
+def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=None, description:str=None, ext: typing.Literal['GIF','MP4','WebP']='GIF', spoiler:bool=False, **kwargs):
     sfx = f'.{ext.lower()}'
     filename = filestem+sfx if filestem is not None else tempfile.NamedTemporaryFile(suffix=sfx).name
     
@@ -176,10 +177,10 @@ def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=
             iio.imwrite(outbin, image_frames, extension=sfx, loop=kwargs.pop('loop', 0), **kwargs)
         
         outbin.seek(0)
-        return discord.File(fp=outbin, filename=filename, description=description)
+        return discord.File(fp=outbin, filename=filename, description=description, spoiler=spoiler)
 
 
-def tenor_fix(url: str):
+def correct_tenor_url(url: str):
     if not isinstance(url, str) or 'tenor' not in url:
         return url
     if 'https/media.tenor.com' in url: # https://images-ext-1.discordapp.net/external/sW67YUaWQx_lnwJE5_TP2p3GMBAXbehBhrxzrSFn4tA/https/media.tenor.com/aUz-N2QvBOsAAAPo/the-isle-evrima.mp4
@@ -198,7 +199,7 @@ def tenor_fix(url: str):
     return url
 
 
-def clean_discord_urls(url:str, verbose=False):
+def clean_discord_url(url:str, verbose=False):
     if not isinstance(url, str) or 'discordapp' not in url:
         return url
     # GIF: https://media.discordapp.net/attachments/.../XYZ.gif?ex=...&is=...&=&width=837&height=837
@@ -213,6 +214,20 @@ def clean_discord_urls(url:str, verbose=False):
         print(f'old discord url: {url}\nnew discord url: {clean_url}')
     return clean_url
 
+def clean_image_url(url:str, check_tenor:bool):
+    url = clean_discord_url(url, verbose=False)
+    if check_tenor:
+        url = correct_tenor_url(url)
+    return url
+
+def image_fix(image:np.ndarray, animated:bool=False, transparency:bool=False):
+    if not animated and image.ndim > 3:
+        image = image[0] # gifs -> take first frame
+    if not transparency and image.shape[-1] > 3: # discard alpha channel
+        image = image[..., :3] # avoid [:, :, :3] in case animated with transparency
+    return image
+
+
 def extract_image_url(message: discord.Message, verbose=False):
     """read image url from message"""
     url = None
@@ -226,7 +241,7 @@ def extract_image_url(message: discord.Message, verbose=False):
         if verbose: print('attach_url:', url)
         
 
-    return clean_discord_urls(url)
+    return clean_discord_url(url)
         
 
 async def read_attach(ctx: commands.Context):
@@ -258,7 +273,7 @@ async def async_img_bytestream(image_url, random_ua:bool=True):
 
 async def is_animated(image_url:str) -> bool:
     try:
-        image_url = tenor_fix(image_url)
+        image_url = correct_tenor_url(image_url)
         img_props = iio.improps(await async_img_bytestream(image_url))
             # transparent png is batch but n_images = 0
         return img_props.is_batch and img_props.n_images > 1 
