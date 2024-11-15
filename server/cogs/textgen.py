@@ -81,7 +81,7 @@ class TextGen(commands.Cog, SetTextConfig):
     async def cog_unload(self):
         await self.bot.wait_until_ready()
         self.pstore.update(youtube_quota = self.youtube_quota)
-        await self.txtdown(self.bot.get_channel(settings.CHANNEL_ID), announce=False)
+        await self.txtdown(self.bot.get_channel(settings.CHANNEL_ID))
         print('TextGen - Goodbye')
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
         stop_global_executors()
@@ -206,7 +206,7 @@ class TextGen(commands.Cog, SetTextConfig):
             await self.bot.report_state('chat', ready=True)
             
         if msg is not None: 
-            await msg.edit('Imitation Engine Fired Up 🔥')
+            await msg.edit(content='Imitation Engine Fired Up 🔥')
         elif was_called:
             await self.tstatus_report(ctx)
 
@@ -704,7 +704,7 @@ class TextGen(commands.Cog, SetTextConfig):
         # for msg in sent_messages:
         #     self.msgmgr.base_message_cache.append(msg)
     
-
+    # provide 4 creative rewritings of this text to image prompt, be detailed and highly creative but keep try to stay true to 
     @commands.hybrid_command(name='reword')
     async def reword_t2i_prompt(self, ctx:commands.Context, prompt:str):
         '''Reword a image prompt to add details for use in /draw or /redraw
