@@ -25,7 +25,6 @@ from .imagegen import ImageGen
 
 from run import BotUs
 
-bot_logger = logging.getLogger('bot')
 event_logger = logging.getLogger('server.event')
 cmds_logger = logging.getLogger('server.cmds')
 

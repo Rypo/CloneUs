@@ -96,13 +96,13 @@ DEFAULT_LOGGING_CONFIG: dict = {
     },
     "filters": {},
     "handlers": {
-        "console": {
+        "sconsole": {
             "class": "logging.StreamHandler",
             "formatter": "simple",
             "filters": [],
             "stream": sys.stdout,
         },
-        "color_console": {
+        "console_color": {
             "class": "logging.StreamHandler",
             "formatter": "colorful",
             "filters": [],
@@ -115,10 +115,10 @@ DEFAULT_LOGGING_CONFIG: dict = {
             "stream": sys.stdout,
         },
     },
-    "root": {"handlers": ["console"], "level": os.getenv("LOG_LEVEL", "INFO")},
+    "root": {"handlers": ["sconsole"], "level": os.getenv("LOG_LEVEL", "INFO")},
     "loggers": {
         "cloneus": {
-            "handlers": ["color_console"],
+            "handlers": ["console_color"],#["color_console"],
             "level": "DEBUG",
             "propagate": False,
         },
@@ -133,6 +133,6 @@ DEFAULT_LOGGING_CONFIG: dict = {
 
 def setup_logging():
     """Setup default logging configuration"""
-    print('LOGGING SETUP CALLED')
+    #print('LOGGING SETUP CALLED')
     init()  # Initialize colorama
     dictConfig(DEFAULT_LOGGING_CONFIG)

@@ -29,8 +29,6 @@ from cloneus.inference import genconfig, load as iload
 from cloneus.types import BatchGenerationOutput, GenerationOutput
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
 
 @dataclass
 class ModelPathComponents:
@@ -276,7 +274,7 @@ class Cloneus(GenConfigUtilities):
         config = OmegaConf.load(path_data.config_path)
         config.update(**{k:v for k,v in kwargs.items() if v is not None}) # filter to avoid overwriting with None
                    
-        logger.debug(self.torch_dtype, config.attn_implementation) # Don't stop printing until fixed double call issue
+        logger.debug(f'{self.torch_dtype=}, {config.attn_implementation=}') # Don't stop printing until fixed double call issue
         
         # Try to overide even if model wasen't trained with flash attn
         if config.attn_implementation is None:
