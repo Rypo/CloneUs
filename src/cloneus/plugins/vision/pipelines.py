@@ -13,8 +13,6 @@ from pathlib import Path
 from abc import abstractmethod
 from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
 
-import discord
-from discord.ext import commands
 
 from tqdm.auto import tqdm
 import numpy as np
@@ -29,19 +27,24 @@ from diffusers import (
     DiffusionPipeline, 
     StableDiffusionXLPipeline, 
     StableDiffusionXLImg2ImgPipeline, 
+    StableDiffusionXLPAGPipeline,
+    StableDiffusionXLPAGImg2ImgPipeline,
     StableDiffusion3Pipeline,
     StableDiffusion3Img2ImgPipeline,
     SD3Transformer2DModel,
+    UNet2DConditionModel, 
     DPMSolverMultistepScheduler, 
     DPMSolverSinglestepScheduler,
-    UNet2DConditionModel, 
     EulerDiscreteScheduler,
     EulerAncestralDiscreteScheduler,
     FlowMatchEulerDiscreteScheduler,
+    UniPCMultistepScheduler,
     FluxPipeline, 
     FluxTransformer2DModel,
     AutoencoderKL,
-    AnimateDiffSDXLPipeline
+    AnimateDiffSDXLPipeline,
+    BitsAndBytesConfig,
+    StableDiffusion3PAGPipeline
 )
 
 from diffusers.schedulers import AysSchedules
@@ -49,25 +52,24 @@ from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img 
 from huggingface_hub import hf_hub_download, snapshot_download
 
 
-from safetensors.torch import load_file
-from diffusers.utils import make_image_grid
 
 from transformers.image_processing_utils import select_best_resolution
-from transformers import T5EncoderModel, BitsAndBytesConfig, QuantoConfig, AutoModelForTextEncoding, CLIPTextModel, T5Config, CLIPTextConfig
+
 
 from optimum import quanto
 from accelerate import cpu_offload,init_empty_weights
 from accelerate.utils import BnbQuantizationConfig, load_and_quantize_model
 
-from DeepCache import DeepCacheSDHelper
-from tgate import TgateSDXLDeepCacheLoader
+
 from PIL import Image
 from spandrel import ImageModelDescriptor, ModelLoader
-from compel import Compel, ReturnedEmbeddingsType
+# from compel import Compel, ReturnedEmbeddingsType
 
 from cloneus import cpaths
-from cloneus.plugins.vision import quantops,specialists,loraops,interpolation
-from cloneus.plugins.vision.fluximg2img import FluxImg2ImgPipeline
+from . import quantops,specialists,loraops,interpolation
+from .fluxpatch import FluxImg2ImgPipeline
+from .lpw_sdxl import get_weighted_text_embeddings_sdxl
+
 from cloneus.utils.common import release_memory, batched
 
 logger = logging.getLogger(__name__)
@@ -165,8 +167,10 @@ class DiffusionConfig:
     def to_dict(self):
         return {v.name: v for k,v in vars(self).items() if k.endswith('_')}
 
-    def to_md(self):
+    def to_md(self, keymap:dict=None):
         md_text = ""
+        if keymap is None:
+            keymap = {}
         for k,v in self.to_dict().items():
             if k in self.metadata_keys or (v.default is None and v.locked):
                 continue
@@ -187,7 +191,8 @@ class DiffusionConfig:
             elif v.bounds is not None:
                 postfix = f'*(typical: {lb} - {ub})*'
             
-            md_text += f"\n- {k}: {default} {postfix}"
+            keyname = keymap.get(k, k)
+            md_text += f"\n- {keyname}: {default} {postfix}"
         return md_text
 
     def get_if_none(self, **kwargs):
@@ -261,6 +266,8 @@ def discretize_strengths(steps:int, nframes:int, start:float=0.3, end:float=0.8,
     return strengths
 
 def rebatch_prompt_embs(emb_prompts:dict[str, torch.Tensor], batch_size:int):
+    # TODO: compare with
+    # https://github.com/comfyanonymous/ComfyUI/blob/0dbba9f7516acd6839e2849eca87facf61b5bf1a/comfy/utils.py#L543
     cur_bz = emb_prompts[next(iter(emb_prompts))].size(0)
     if cur_bz == batch_size:
         return emb_prompts
@@ -296,50 +303,77 @@ def generator_batch(seed:int|list[int]|None, num_seeds:int, device='cpu', all_un
 
     return [torch.Generator(device=device).manual_seed(s) for s in seeds]
 
+SAMPLER_ALIASES = typing.Literal['DPM++ 2M', 'DPM++ 2M SDE', 'DPM++', 'Euler', 'Euler A', 'Euler FM', 'UniPC']
+SCHEDULER_TYPE_ALIASES = typing.Literal['Karras','sgm_uniform','exponential','beta', 'ts_leading']
+# https://github.com/comfyanonymous/ComfyUI/blob/f58475827150c2ac610cbb113019276efcd1a733/comfy/samplers.py#L732
+def get_scheduler(init_sched_config:dict, sampler_alias:SAMPLER_ALIASES, sched_alias:SCHEDULER_TYPE_ALIASES =None,  **kwargs):
+    # alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM']
     
-    
+    # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#noise-schedules-and-schedule-types
+    scheduler_type_aliases = {
+        'Karras': dict(use_karras_sigmas=True),
+        'sgm_uniform': dict(timestep_spacing="trailing"), #'simple': dict(timestep_spacing="trailing"),
+        'exponential': dict(timestep_spacing="linspace", use_exponential_sigmas=True),
+        'beta': dict(timestep_spacing="linspace", use_beta_sigmas=True),
+        # custom aliases
+        'ts_leading': dict(timestep_spacing="leading"),
+    }
 
-def get_scheduler(alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], init_sched_config:dict, **kwargs):
+    kwargs.update({} if sched_alias is None else scheduler_type_aliases[sched_alias])
     # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
     # partials to avoid warnings for incompatible schedulers
-    sched_map = {
-        'DPM++ 2M':             functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=False, **kwargs),
-        'DPM++ 2M Karras':      functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=True, **kwargs),
-        'DPM++ 2M SDE':         functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=False, algorithm_type='sde-dpmsolver++', **kwargs),
-        'DPM++ 2M SDE Karras':  functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=True, algorithm_type='sde-dpmsolver++', **kwargs),
+    sampler_aliases = {
+        'DPM++ 2M':             functools.partial(DPMSolverMultistepScheduler.from_config, **kwargs),
+        #'DPM++ 2M Karras':      functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=True, **kwargs),
+        'DPM++ 2M SDE':         functools.partial(DPMSolverMultistepScheduler.from_config, algorithm_type='sde-dpmsolver++', **kwargs),
+        #'DPM++ 2M SDE Karras':  functools.partial(DPMSolverMultistepScheduler.from_config, use_karras_sigmas=True, algorithm_type='sde-dpmsolver++', **kwargs),
         
-        'DPM++ SDE':            functools.partial(DPMSolverSinglestepScheduler.from_config, use_karras_sigmas=False, algorithm_type='dpmsolver++', **kwargs), 
-        'DPM++ SDE Karras':     functools.partial(DPMSolverSinglestepScheduler.from_config, use_karras_sigmas=True, algorithm_type='dpmsolver++', **kwargs),
+        'DPM++':                functools.partial(DPMSolverSinglestepScheduler.from_config, algorithm_type='dpmsolver++', **kwargs), 
+        #'DPM++ SDE':            # sde-dpmsolver++ not supported
+        #'DPM++ SDE Karras':     functools.partial(DPMSolverSinglestepScheduler.from_config, use_karras_sigmas=True, algorithm_type='dpmsolver++', **kwargs),
 
         'Euler':                functools.partial(EulerDiscreteScheduler.from_config, **kwargs),
         'Euler A':              functools.partial(EulerAncestralDiscreteScheduler.from_config, **kwargs),
         'Euler FM':             functools.partial(FlowMatchEulerDiscreteScheduler.from_config, **kwargs),
+
+        'UniPC':                functools.partial(UniPCMultistepScheduler.from_config, **kwargs), # bh2 (default)
     }
-    scheduler = sched_map[alias](init_sched_config)
+
+    scheduler = sampler_aliases[sampler_alias](init_sched_config)
     return scheduler
 
-def list_schedulers(compatible_schedulers:list, return_aliases: bool = True) -> list[str]:
-    implemented = ['DPMSolverMultistepScheduler', 'DPMSolverSinglestepScheduler', 'EulerDiscreteScheduler', 'EulerAncestralDiscreteScheduler', 'FlowMatchEulerDiscreteScheduler']
+def list_schedulers(compatible_schedulers:list, return_aliases: bool = True) -> list[str]:    
+    # NOTE: diffusers has an enum for all compats, _compatibles = [e.name for e in KarrasDiffusionSchedulers] ( diffusers.schedulers.scheduling_utils.KarrasDiffusionSchedulers )
+    implemented = ['DPMSolverMultistepScheduler', 'DPMSolverSinglestepScheduler', 
+                   'EulerDiscreteScheduler', 'EulerAncestralDiscreteScheduler', 'FlowMatchEulerDiscreteScheduler',
+                   'UniPCMultistepScheduler']
     
     if not return_aliases:
         return list(set(implemented) & set([s.__name__ for s in compatible_schedulers]))
     
-    schedulers = []
-    
-    if DPMSolverMultistepScheduler in compatible_schedulers:
-        schedulers += ['DPM++ 2M', 'DPM++ 2M Karras', 'DPM++ 2M SDE', 'DPM++ 2M SDE Karras']
-    if DPMSolverSinglestepScheduler in compatible_schedulers:
-        schedulers += ['DPM++ SDE', 'DPM++ SDE Karras']
-    if EulerDiscreteScheduler in compatible_schedulers:
-        schedulers += ['Euler']
-    if EulerAncestralDiscreteScheduler in compatible_schedulers:
-        schedulers += ['Euler A'] 
+    # will need to update if this ever changes
     if FlowMatchEulerDiscreteScheduler in compatible_schedulers:
-        schedulers += ['Euler FM']
+        return ['Euler FM']
+
+    schedulers = ['DPM++ 2M', 'DPM++ 2M SDE',] + ['DPM++', ] + ['Euler'] + ['Euler A'] + ['UniPC']
+    
+    # if DPMSolverMultistepScheduler in compatible_schedulers:
+    #     schedulers += ['DPM++ 2M', 'DPM++ 2M SDE',] # 'DPM++ 2M Karras',  'DPM++ 2M SDE Karras'
+    # if DPMSolverSinglestepScheduler in compatible_schedulers:
+    #     schedulers += ['DPM++', ] # 'DPM++ SDE', 'DPM++ SDE Karras'
+    # if EulerDiscreteScheduler in compatible_schedulers:
+    #     schedulers += ['Euler']
+    # if EulerAncestralDiscreteScheduler in compatible_schedulers:
+    #     schedulers += ['Euler A'] 
+
+    # if UniPCMultistepScheduler in compatible_schedulers:
+    #     schedulers += ['UniPC','UniPC BH2']
     return schedulers
 
 class DeepCacheMixin:
     def _setup_dc(self):
+        from DeepCache import DeepCacheSDHelper
+        # from tgate import TgateSDXLDeepCacheLoader
         # https://github.com/horseee/DeepCache/blob/master/DeepCache/extension/deepcache.py
         # TODO: https://huggingface.co/docs/diffusers/v0.30.0/en/optimization/tgate?pipelines=Stable+Diffusion+XL
         self.dc_base = DeepCacheSDHelper(self.base)
@@ -367,22 +401,10 @@ class DeepCacheMixin:
             if enable: self.dc_base.enable()
             else: self.dc_base.disable()
             self.dc_enabled = enable
-        
-        # self.dc_enabled=enable
-        # if enable != self.dc_enabled:
-        #     if enable:
-        #         self.dc_base.enable()
-        #         #(self.dc_basei2i if img2img else self.dc_base).enable()
-        #     else:
-        #         self.dc_base.disable()
-
-                #(self.dc_basei2i if img2img else self.dc_base).disable()
-                
-            #self.dc_enabled=enable 
 
     
 class SingleStagePipeline:
-    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_setup:str|tuple[str, dict]=None):
+    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_setup:str|tuple[str, str, dict]=None, dtype=torch.bfloat16, root_name:str='base'):
         self.is_compiled = False
         self.is_ready = False
         self.dc_enabled = None
@@ -391,14 +413,18 @@ class SingleStagePipeline:
         self.model_path = model_path
         self.config = config
         self.offload = offload
+
         self.initial_scheduler_config = None
-        self._scheduler_setup = (scheduler_setup, {}) if isinstance(scheduler_setup,str) else scheduler_setup
+        self._scheduler_setup = scheduler_setup #(scheduler_setup, {}) if isinstance(scheduler_setup,str) else scheduler_setup
         self.scheduler_kwargs = None
-        
+
+        self.dtype = dtype
+        self.root_name = root_name
         self.clip_skip = self.config.clip_skip
-        #self.global_seed = None
+
         self.adapter_names = []
         self.adapter_weight = None
+        self.lora_dirpath = cpaths.ROOT_DIR/f'extras/loras/{self.root_name}'
         # core
         self.base = None
         self.basei2i = None
@@ -410,15 +436,23 @@ class SingleStagePipeline:
 
         # processors
         self.compeler = None
-        
+        # extra keywords passed to t2i,i2i pipes (e.g. pag_scale if using PAG)
+        self.pipe_xkwgs = {}
+
+    def t2i(self, *args, **kwargs):
+        return self.base(*args, **kwargs, **self.pipe_xkwgs)
+    
+    def i2i(self, *args, **kwargs):
+        kwargs.pop('height',None)
+        kwargs.pop('width', None)
+        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
+    
     def pbar_config(self, **kwargs):
         if self.base is not None:
             self.base.set_progress_bar_config(**kwargs)
         if self.basei2i is not None:
             self.basei2i.set_progress_bar_config(**kwargs)
     
-    def load_lora(self, weight_name:str = 'detail-tweaker-xl.safetensors', lora_dirpath:Path=None):
-        pass
     
     @abstractmethod
     def load_pipeline(self):
@@ -440,23 +474,47 @@ class SingleStagePipeline:
             torch_compile_flags(restore_defaults=True)
             torch._dynamo.reset()
             self.is_compiled = False
+    
+    def set_pag_config(self, pag_scale:float=0.0, pag_applied_layers: str|list[str] = None, disable_on_zero:bool=False):
+        raise NotImplementedError('PAG not implemented for this pipeline type')
+    
+    def load_lora(self, weight_name:str, init_weight:float=None):
+        pass
+
+
+    def _scheduler_init(self) -> None:
+        self.initial_scheduler_config = self.base.scheduler.config
+        # cases: str, (str, str), (str, dict), (str, str, dict)
+        if self._scheduler_setup is not None:
+            sch_setup = self._scheduler_setup
+            if isinstance(sch_setup, tuple) and len(sch_setup) < 2:
+                sch_setup=sch_setup[0]
+            
+            if isinstance(sch_setup, str):
+                self._scheduler_setup = (sch_setup, None, {})
+            elif len(self._scheduler_setup) == 2:
+                self._scheduler_setup = (*sch_setup, {}) if isinstance(sch_setup[1], str) else (sch_setup[0], None, sch_setup[1])
+
+
+            sampler_alias, sched_alias, self.scheduler_kwargs = self._scheduler_setup
+            self.base.scheduler = get_scheduler(self.initial_scheduler_config, sampler_alias, sched_alias, **self.scheduler_kwargs)
 
     def available_schedulers(self, return_aliases: bool = True) -> list[str]:
         if self.base is None:
             return []
         return list_schedulers(self.base.scheduler.compatibles, return_aliases=return_aliases)
 
-    def set_scheduler(self, alias:typing.Literal['DPM++ 2M','DPM++ 2M Karras','DPM++ 2M SDE','DPM++ 2M SDE Karras','DPM++ SDE','DPM++ SDE Karras','Euler','Euler A', 'Euler FM'], **kwargs) -> str:
+    def set_scheduler(self, sampler_alias:SAMPLER_ALIASES, schedtype_alias:SCHEDULER_TYPE_ALIASES=None, **kwargs) -> str:
         # https://huggingface.co/docs/diffusers/main/en/api/schedulers/overview#schedulers
         assert self.base is not None, 'Model not loaded. Call `load_pipeline()` before proceeding.'
-        if alias not in self.available_schedulers(return_aliases=True):
-            raise KeyError(f'Scheduler {alias!r} not found or is incompatiable with active scheduler ({self.base.scheduler.__class__.__name__!r})')
+        if sampler_alias not in self.available_schedulers(return_aliases=True):
+            raise KeyError(f'Scheduler {sampler_alias!r} not found or is incompatiable with active scheduler ({self.base.scheduler.__class__.__name__!r})')
         
         # be sure to keep anything initially passed like "timespace trailing" unless explicitly set otherwise
         if self.scheduler_kwargs:
             kwargs = {**self.scheduler_kwargs, **kwargs}
         
-        scheduler = get_scheduler(alias, self.initial_scheduler_config, **kwargs)
+        scheduler = get_scheduler(self.initial_scheduler_config, sampler_alias, schedtype_alias, **kwargs)
         self.base.scheduler = scheduler
         self.basei2i.scheduler = scheduler
 
@@ -483,6 +541,12 @@ class SingleStagePipeline:
         #batch_sizes = {'tiny': 32, 'small': 20, 'med': 16, 'full': 6} # With vae_slicing # 14gb, X, X -- 13.5gb, X, X heatbeat blocked small, 
         #batch_sizes = {'tiny': 24, 'small': 32, 'med': 24, 'full': 16} # With vae_slicing # 17gb, 16.5gb, 20gb -- heartbeat blocked all 3
         return (dims_opts[imsize], batch_sizes[imsize])
+
+    def preprocess_prompts(self, prompt:str, negative_prompt:str = None):
+        if negative_prompt is None:
+            negative_prompt = ''
+        return prompt, negative_prompt
+
 
     @abstractmethod  
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
@@ -567,7 +631,7 @@ class SingleStagePipeline:
     def _pipe_txt2img(self, prompt_encodings:dict, num_inference_steps:int, guidance_scale:float, target_size:tuple[int,int], seed=None):
         gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
         h,w = target_size
-        image = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0] # num_images_per_prompt=4
+        image = self.t2i(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0] # num_images_per_prompt=4
         
         return image
 
@@ -577,7 +641,7 @@ class SingleStagePipeline:
         w,h = image.size
         #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
         strength = np.clip(strength, 1/num_inference_steps, 1)
-        image = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0]
+        image = self.i2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0]
         
         return image
 
@@ -607,7 +671,7 @@ class SingleStagePipeline:
             if gen_batch[0] is None:
                 gen_batch = None
             
-            images = self.base(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type,).images
+            images = self.t2i(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type).images
             
             if output_type != 'latent':
                 torch.cuda.empty_cache()
@@ -638,7 +702,7 @@ class SingleStagePipeline:
             #if generators is not None:
             #    gen_batch, generators = generators[:batch_len], generators[batch_len:] # pop slice
             
-            images = self.basei2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type).images 
+            images = self.i2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type).images 
             
             if output_type != 'latent':
                 torch.cuda.empty_cache()
@@ -716,6 +780,7 @@ class SingleStagePipeline:
         
 
         lora_scale = self.toggle_loras(detail_weight)
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
 
         call_kwargs = dict(prompt=prompt, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
@@ -725,8 +790,6 @@ class SingleStagePipeline:
             _,BSZ = self.batch_settings('full')
             if n_images <= 10:
                 BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
-            elif n_images > 20:
-                BSZ *= 2
             
             call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
             batchgen = self._batched_txt2img(prompt_encodings, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seeds, output_type='pil')
@@ -768,6 +831,7 @@ class SingleStagePipeline:
                 
 
         lora_scale = self.toggle_loras(detail_weight)
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
         
         # don't want to pass around full image, going to replace with image_url in imagegen anyway
@@ -779,8 +843,6 @@ class SingleStagePipeline:
             _,BSZ = self.batch_settings('full')
             if n_images <= 10:
                 BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
-            elif n_images > 20:
-                BSZ *= 2
 
             call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
             batchgen = self._batched_img2img(prompt_encodings, image, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seeds, output_type='pil')
@@ -818,6 +880,7 @@ class SingleStagePipeline:
         image = self._resize_image(image, aspect=None, dim_choices=None) # Resize to best dim match
 
         lora_scale = self.toggle_loras(detail_weight)
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
 
         image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
@@ -859,6 +922,7 @@ class SingleStagePipeline:
         print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
         lora_scale = self.toggle_loras(detail_weight)
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
         prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
         
         # subtract 1 for first image
@@ -871,7 +935,7 @@ class SingleStagePipeline:
             strengths = [strength_end]*nframes
             w,h = self.config.get_dims(aspect)
             # timesteps=AysSchedules["StableDiffusionXLTimesteps"]
-            image = self.base(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0] # num_images_per_prompt=4
+            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0] # num_images_per_prompt=4
             
             latents.append(image)
         else:
@@ -888,7 +952,7 @@ class SingleStagePipeline:
                 
         for i in range(nframes):
             # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
-            image = self.basei2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='latent', generator=gseed).images
+            image = self.i2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='latent', generator=gseed).images
             latents.append(image)
             yield i
             
@@ -917,7 +981,7 @@ class SingleStagePipeline:
             if batch_len != batch_size:
                batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
 
-            latents = self.basei2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=generators, output_type='latent', **kwargs).images 
+            latents = self.i2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=generators, output_type='latent', **kwargs).images 
 
             yield latents
     
@@ -963,6 +1027,7 @@ class SingleStagePipeline:
         w,h = dim_out
         
         lora_scale = self.toggle_loras(detail_weight)
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
         prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
         
         # First, yield the total number of frames since it may have changed from slice
@@ -992,7 +1057,7 @@ class SingleStagePipeline:
 
         te = time.perf_counter()
         runtime = te-t0
-        print(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
+        logger.info(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
         release_memory()
     
     @torch.inference_mode()
@@ -1028,57 +1093,98 @@ class SingleStagePipeline:
     
 
 
-
-
 class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
-    def load_pipeline(self):
-        pipeline_loader = (StableDiffusionXLPipeline.from_single_file if self.model_path.endswith('.safetensors') 
-                           else AutoPipelineForText2Image.from_pretrained)
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, root_name='sdxl')
 
-        self.base: StableDiffusionXLPipeline = pipeline_loader(
-            self.model_path, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, add_watermarker=False, #, device_map=device,
-        )
+    def load_pipeline(self):
+        _pipe_kwargs = dict(torch_dtype=self.dtype, variant="fp16", use_safetensors=True, add_watermarker=False, )
+        if str(self.model_path).endswith('.safetensors'):
+            self.base: StableDiffusionXLPipeline = StableDiffusionXLPipeline.from_single_file(self.model_path, **_pipe_kwargs)
+        else:
+            self.base: StableDiffusionXLPipeline = AutoPipelineForText2Image.from_pretrained(self.model_path, **_pipe_kwargs) 
+            #custom_pipeline='lpw_stable_diffusion_xl,'#, device_map=device,
         
         if not self.offload:
             self.base = self.base.to(0)
         
         self.base.vae.enable_slicing()
 
-        self.initial_scheduler_config = self.base.scheduler.config
-        
-        if self._scheduler_setup is not None:
-            sched_alias, self.scheduler_kwargs = self._scheduler_setup
-            self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
+        self._scheduler_init()
         
         self.load_lora(weight_name='detail-tweaker-xl.safetensors')
+        # https://github.com/comfyanonymous/ComfyUI/blob/f58475827150c2ac610cbb113019276efcd1a733/comfy/sd1_clip.py#L234
+        # self.compeler = Compel(
+        #     tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
+        #     text_encoder=[self.base.text_encoder, self.base.text_encoder_2],
+        #     truncate_long_prompts=False,
+        #     returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+        #     requires_pooled=[False, True]
+        # )
         
-        self.compeler = Compel(
-            tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
-            text_encoder=[self.base.text_encoder, self.base.text_encoder_2],
-            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
-            requires_pooled=[False, True]
-        )
-        
-        self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base,)# torch_dtype=torch.bfloat16, use_safetensors=True, add_watermarker=False)#.to(0)
+        self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base)
 
         if self.offload:
             # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
+            # https://huggingface.co/docs/diffusers/using-diffusers/loading?pipelines=specific+pipeline#:~:text=Some%20pipeline%20methods
             self.base.enable_model_cpu_offload()
             self.basei2i.enable_model_cpu_offload()
         
         self.is_ready = True
 
-    @torch.inference_mode()
-    def load_lora(self, weight_name:str = 'detail-tweaker-xl.safetensors', lora_dirpath:Path=None):
-        if lora_dirpath is None:
-            lora_dirpath = cpaths.ROOT_DIR/'extras/loras/sdxl'
+    
+    def set_pag_config(self, pag_scale:float=3.0, pag_applied_layers: str|list[str] = "mid", disable_on_zero:bool=False):
+        # https://huggingface.co/docs/diffusers/main/en/using-diffusers/pag?tasks=Text-to-image
+        # https://huggingface.co/docs/diffusers/main/en/api/pipelines/pag#perturbed-attention-guidance
+        if isinstance(pag_applied_layers, str):
+            pag_applied_layers = [pag_applied_layers]
         
+        pag_config = {'enabled':False, 'scale':None, 'layers':None}
+        if pag_scale:
+            if 'page_scale' not in self.pipe_xkwgs:
+                pag_kwargs = {'enable_pag':True, 'pag_applied_layers':pag_applied_layers,}
+                self.base: StableDiffusionXLPAGPipeline = AutoPipelineForText2Image.from_pipe(self.base, **pag_kwargs,)
+                # self.basei2i: StableDiffusionXLPAGImg2ImgPipelinePatch = AutoPipelineForImage2Image.from_pipe(self.basei2i, **pag_kwargs,)
+                self.basei2i: StableDiffusionXLPAGImg2ImgPipeline = StableDiffusionXLPAGImg2ImgPipeline.from_pipe(self.basei2i, pag_applied_layers=pag_applied_layers,)
+                if self.offload:
+                    self.base.enable_model_cpu_offload()
+                    self.basei2i.enable_model_cpu_offload()
+            
+            if self.base.pag_applied_layers != pag_applied_layers:
+                self.base.set_pag_applied_layers(pag_applied_layers)
+                self.basei2i.set_pag_applied_layers(pag_applied_layers)
+
+            self.pipe_xkwgs.update(pag_scale=pag_scale)
+            pag_config.update(enabled=True, scale=pag_scale, layers=pag_applied_layers)
+
+        elif disable_on_zero:
+            self.pipe_xkwgs.pop('pag_scale', None)
+            self.base = AutoPipelineForText2Image.from_pipe(self.base, enable_pag=False)
+            self.basei2i = AutoPipelineForImage2Image.from_pipe(self.basei2i, enable_pag=False,)
+            if self.offload:
+                self.base.enable_model_cpu_offload()
+                self.basei2i.enable_model_cpu_offload()
+        else:
+            self.pipe_xkwgs.update(pag_scale=0.0)
+            pag_config.update(enabled=False, scale=0.0, layers=pag_applied_layers)
+        
+        print(self.base.__class__,self.base.__class__.__name__)
+        print(self.basei2i.__class__, self.basei2i.__class__.__name__)
+        return pag_config
+
+        
+
+    @torch.inference_mode()
+    def load_lora(self, weight_name:str, init_weight:float=None):        
         adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
         
         try:
-            self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
+            self.base.load_lora_weights(self.lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
             self.adapter_names.append(adapter_name)
-            self.base.disable_lora()
+            if init_weight is None:
+                self.base.disable_lora()
+            else:
+                self.base.set_adapters(adapter_name, init_weight)
         except IOError as e:
             raise NotImplementedError(f'Unsupported lora adapter {adapter_name!r}')
             
@@ -1099,28 +1205,28 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
 
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
-        prompt = [prompt]#*batch_size
-        if negative_prompt is not None:
-            negative_prompt = [negative_prompt]#*batch_size
-        
+        if negative_prompt is None:
+            negative_prompt = ""
+
         prompt_encodings = {}
-        compel_tokens = set('()-+')
+        #compel_tokens = set('()-+')
 
-        if set(prompt) & compel_tokens:
-            conditioning, pooled = self.compeler(prompt)
-            prompt_encodings.update(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
-            prompt = None
+        # if set(prompt) & compel_tokens:
+        #     conditioning, pooled = self.compeler(prompt)
+        #     prompt_encodings.update(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
+        #     prompt = None
 
-        if negative_prompt is not None and set(negative_prompt) & compel_tokens:
-            neg_conditioning, neg_pooled = self.compeler(negative_prompt)
-            prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
-            negative_prompt = None
-            
-
-        (p_emb, neg_p_emb, pooled_p_emb, neg_pooled_p_emb) = self.base.encode_prompt(
-            prompt=prompt, negative_prompt=negative_prompt, device=0, **prompt_encodings, num_images_per_prompt=batch_size,
+        # if negative_prompt is not None and set(negative_prompt) & compel_tokens:
+        #     neg_conditioning, neg_pooled = self.compeler(negative_prompt)
+        #     prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
+        #     negative_prompt = None
+        
+        # https://github.com/huggingface/diffusers/blob/main/examples/community/lpw_stable_diffusion_xl.py
+        # https://github.com/huggingface/diffusers/issues/2136#issuecomment-1514338525
+        (p_emb, neg_p_emb, pooled_p_emb, neg_pooled_p_emb) = get_weighted_text_embeddings_sdxl( # self.base.encode_prompt(
+            self.base, prompt=prompt, neg_prompt=negative_prompt, device=0, **prompt_encodings, num_images_per_prompt=batch_size,
              lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'))
-
+        
         prompt_encodings.update(
             prompt_embeds=p_emb, negative_prompt_embeds=neg_p_emb, 
             pooled_prompt_embeds=pooled_p_emb, negative_pooled_prompt_embeds=neg_pooled_p_emb
@@ -1180,31 +1286,44 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         
         return image
     
-
+    
 class SD3Base(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup)
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, 
+                 quantize:bool=True):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, root_name='sd35')
+        self.max_seq_len = 512
+        self.quantize = quantize
+
+        
     
     @torch.inference_mode()
     def load_pipeline(self):
-        pipeline_loader = (SD3Transformer2DModel.from_single_file if self.model_path.endswith('.safetensors') 
-                           else StableDiffusion3Pipeline.from_pretrained)
-
-        self.base: StableDiffusion3Pipeline = pipeline_loader(
-            self.model_path, torch_dtype=torch.bfloat16,  use_safetensors=True,
-        )
-
+        if self.model_path.endswith('.safetensors'):
+            self.base = StableDiffusion3Pipeline.from_single_file(self.model_path, torch_dtype=self.dtype,  use_safetensors=True,)
+            # SD3Transformer2DModel.from_single_file
+        else:
+            quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16) if self.quantize else None
+            transformer = SD3Transformer2DModel.from_pretrained(self.model_path, subfolder="transformer", quantization_config = quant_config, torch_dtype=self.dtype)
+            
+            self.base: StableDiffusion3Pipeline =  StableDiffusion3Pipeline.from_pretrained(
+                self.model_path, transformer=transformer, torch_dtype=self.dtype, use_safetensors=True,
+            )
+        
+        # self.load_lora('sd35Fusion_8Steps.safetensors', 1.0)
+        device = torch.device('cuda')
         if not self.offload:
-            self.base.to(0)
+            self.base = self.base.to(device)
+            self.base.text_encoder_3 = self.base.text_encoder_3.to(device, self.dtype)
+            #if self.quantize:
+            self.base.text_encoder_3 = cpu_offload(self.base.text_encoder_3, execution_device = device)
 
         self.base.vae.enable_slicing()
 
-        self.initial_scheduler_config = self.base.scheduler.config
-        if self._scheduler_setup is not None:
-            sched_alias, self.scheduler_kwargs = self._scheduler_setup
-            self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
+        self._scheduler_init()
         
+
         self.basei2i: StableDiffusion3Img2ImgPipeline = StableDiffusion3Img2ImgPipeline.from_pipe(self.base,)
+
         
         if self.offload:
             self.base.enable_model_cpu_offload()
@@ -1212,26 +1331,42 @@ class SD3Base(SingleStagePipeline):
         
         self.is_ready = True
     
-    
+    @torch.inference_mode()
+    def load_lora(self, weight_name:str, init_weight:float=None):
+        
+        adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
+        
+        try:
+            #loraops.set_lora_transformer(self.base, Path(lora_dirpath).joinpath(weight_name), adapter_name)
+            #lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
+            lora_sd = Path(self.lora_dirpath).joinpath(weight_name)
+            #self.base.transformer,skipped_keys = loraops.manual_lora(lora_sd, self.base.transformer, adapter_name=adapter_name)
+            self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
+            #self.base.load_lora_into_transformer(self.base.lora_state_dict(lora_sd), transformer=self.base.transformer, adapter_name=adapter_name, low_cpu_mem_usage=True)
+            #self.base.load_lora_into_transformer(lora_sd, None, self.base.transformer, adapter_name=adapter_name)
+            #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
+            if init_weight is None:
+                self.base.disable_lora()
+            else:
+                self.base.set_adapters(adapter_name, init_weight)
+            #self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
+            self.adapter_names.append(adapter_name)
+            
+        except IOError as e:
+            raise NotImplementedError(f'Unsupported lora adapter {weight_name!r}')
+        
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
-        prompt = [prompt]#*batch_size
+        prompt = [prompt]
         if negative_prompt is not None:
-            negative_prompt = [negative_prompt]#*batch_size
+            negative_prompt = [negative_prompt]
 
-        if not self.offload:
-            self.base.text_encoder_3.to(0)
 
+        device = torch.device('cuda')
         (prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds) = self.base.encode_prompt(
             prompt=prompt, prompt_2=None, prompt_3=None, negative_prompt=negative_prompt, num_images_per_prompt=batch_size,
-            device=self.base.device, lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'))
+            device=device, lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'), max_sequence_length=self.max_seq_len)
         
-        # moving the text encoder is just always a good idea since it's in full bf16 most of the time.
-        if not self.offload and kwargs.get('partial_offload'): 
-            self.base.text_encoder_3.to('cpu')
-            torch.cuda.empty_cache()
-        
-            print(prompt_embeds.dtype, prompt_embeds.device)
         torch.cuda.empty_cache()
         return dict(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds, negative_pooled_prompt_embeds=negative_pooled_prompt_embeds) # .bfloat16()
     
@@ -1247,7 +1382,7 @@ class SD3Base(SingleStagePipeline):
         self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
         
         for _ in range(3):
-            _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
+            _ = self.t2i("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
         self.is_compiled = True
         torch.compiler.reset()
     
@@ -1258,7 +1393,7 @@ class SD3Base(SingleStagePipeline):
         
         gseed = generator_batch(seed, nframes, 'cpu') #[torch.Generator('cpu').manual_seed(seed) for _ in range(nframes)]
         proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(dtype=torch.float32)
-                
+        
         #latents = self.basei2i._encode_vae_image(image=proc_images, generator=gseed)
         #img_encodings = self.basei2i.vae.encode(proc_images)
         # NOTE: this might be wrong
@@ -1278,17 +1413,18 @@ class SD3Base(SingleStagePipeline):
         if isinstance(latents, list):
             latents = torch.cat(latents, dim=0)
         
-        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-        image = self.vae.decode(latents, return_dict=False)[0]
-        image = self.image_processor.postprocess(image, output_type='pil')
+        latents = (latents / self.basei2i.vae.config.scaling_factor) + self.basei2i.vae.config.shift_factor
+        image = self.basei2i.vae.decode(latents, return_dict=False)[0]
+        image = self.basei2i.image_processor.postprocess(image, output_type='pil')
         
         return image
 
+
 class FluxBase(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None,
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16,
                  qtype:typing.Literal['bnb4','qint4','qint8','qfloat8'] = 'bnb4', te2_qtype:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'] = 'bf16', quant_basedir:Path = None):
         
-        super().__init__(model_name, model_path, config, offload, scheduler_setup)
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, root_name='flux')
         
         self.text_enc_model_id = "black-forest-labs/FLUX.1-dev" # use same shared text_encoder_2, avoid 2x-download
         self.qtype = qtype
@@ -1296,9 +1432,12 @@ class FluxBase(SingleStagePipeline):
         self.quant_basedir = quant_basedir if quant_basedir is not None else cpaths.ROOT_DIR / 'extras/quantized/flux/'
         
         self.variant = model_name.split('_')[-1] # flux_schell,flux_dev,flux_* -> *
-        self.max_seq_len = 256 if self.variant == 'schnell' else 512
+        self.max_seq_len = 512
         self.text_pipe:FluxPipeline = None
     
+    def i2i(self, *args, **kwargs):
+        # because latents shape cannot be reliably inferred, height and width are required for flux img2img
+        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
     
     def unload_pipeline(self):
         components = ['text_encoder','text_encoder_2','transformer','vae']
@@ -1313,41 +1452,40 @@ class FluxBase(SingleStagePipeline):
         super().unload_pipeline()
     
     @torch.inference_mode()
-    def _load_pipe_default(self):
-        if str(self.model_path).endswith('.safetensors'):
-            transformer = quantops.load_sd_bnb4_transformer(safetensor_filepath=self.model_path)
-        else:
-            bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
-            transformer = quantops.bnb4_transformer(self.model_path, torch.bfloat16, bnb_qconfig)
-        
-        pipe = FluxPipeline.from_pretrained(self.text_enc_model_id, transformer=transformer, torch_dtype=torch.bfloat16,)
-        
-        if not self.offload: 
-            pipe.to(0)
-            # if not offloading everything, just offload text_encoder_2
-            pipe.text_encoder_2 = cpu_offload(pipe.text_encoder_2, execution_device = torch.device('cuda:0'))
-        return pipe
-
     def load_pipeline(self):
-        if self.qtype == 'bnb4' and self.te2_qtype == 'bf16':
-            self.base = self._load_pipe_default()
-        else:
-            #with torch.inference_mode():
-            self.base: FluxPipeline = self._load_helper(qtype=self.qtype, offload=self.offload, te2_qtype=self.te2_qtype)
+        bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=self.dtype, )
+
+        if self.model_name == 'flux_hyper':
+            transformer = quantops.flux_hyper_transformer_4bit(self.model_path, scale=0.125,dtype=self.dtype, bnb_qconfig=bnb_qconfig).to(0, dtype=self.dtype)
+            self.base: FluxPipeline = FluxPipeline.from_pretrained(self.model_path, transformer=transformer, torch_dtype=self.dtype,)
             
-            #if not self.offload:
-            #    self.base.to(0)
+        elif self.model_name == 'flux_pixelwave':
+            
+            
+            transformer = FluxTransformer2DModel.from_pretrained(self.model_path, quantization_config=bnb_qconfig, torch_dtype=self.dtype, low_cpu_mem_usage = True)
+            self.base = FluxPipeline.from_pretrained(self.text_enc_model_id, transformer=transformer, torch_dtype=self.dtype,)
+
+        elif self.qtype == 'bnb4' and self.te2_qtype == 'bf16':
+            if str(self.model_path).endswith('.safetensors'):
+                transformer = quantops.load_prequantized_transformer(safetensor_filepath=self.model_path)
+            else:
+                transformer = quantops.bnb4_transformer(self.model_path, self.dtype, bnb_qconfig)
+        else:
+            qloader = quantops.FluxLoadHelper(self.model_path, self.quant_basedir, self.text_enc_model_id, self.variant)
+            self.base: FluxPipeline = qloader.load_quant(qtype=self.qtype, offload=self.offload, te2_qtype=self.te2_qtype)
+            
+        if not self.offload: 
+            self.base = self.base.to(0)
+            # if not offloading everything, just offload text_encoder_2
+            self.base.text_encoder_2 = cpu_offload(self.base.text_encoder_2, execution_device = torch.device('cuda:0'))
+        
         self.base.vae.enable_slicing() # all this does is iterate over batch instead of all at once, no reason to ever disable
-        self.initial_scheduler_config = self.base.scheduler.config
         
-        if self._scheduler_setup is not None:
-            sched_alias, self.scheduler_kwargs = self._scheduler_setup
-            self.base.scheduler = get_scheduler(sched_alias, self.initial_scheduler_config, **self.scheduler_kwargs)
+        self._scheduler_init()
         
-        self.load_lora('detail-maximizer.safetensors')
-        self.load_lora('midjourneyV6_1.safetensors')
+        #self.load_lora('detail-maximizer_v02.safetensors')
+        #self.load_lora('midjourneyV61_v02.safetensors')
         
-        #with torch.inference_mode():
         self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base)
 
         if self.offload:
@@ -1358,108 +1496,30 @@ class FluxBase(SingleStagePipeline):
         self.is_ready = True
         release_memory()
     
-    @torch.inference_mode()
-    def _load_transformer(self, qtype:str, device:torch.device, torch_dtype = torch.bfloat16):
-        if qtype == 'bnb4':
-            print('load transformer')
-            
-            if str(self.model_path).endswith('.safetensors'):
-                # return bnbops.load_quantized(safetensor_filepath=self.model_path, bnb_quant_config=bnb_qconfig).to(device, dtype=torch_dtype)
-                return quantops.load_sd_bnb4_transformer(safetensor_filepath=self.model_path).to(device, dtype=torch_dtype)
-                #transformer = bnbops.bnb4_transformer(self.model_path, torch_dtype).to(device, dtype=torch_dtype)
-            else:
-               
-                bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
-                                                    # bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='fp32', torch_dtype=torch.float32, )
-
-                #return  bnbops.create_4bit_transformer(self.model_path, bnb_qconfig).to(device, dtype=torch_dtype)
-                return  quantops.bnb4_transformer(self.model_path, torch_dtype, bnb_qconfig).to(device, dtype=torch_dtype)
-        
-        if not (model_path := self.quant_basedir/qtype/self.variant/'transformer/').exists():
-            model_path = self.model_path
-        
-        return quantops.load_or_quantize(model_path, qtype=qtype, module='transformer', device=device)
-    
-    @torch.inference_mode()
-    def _load_text_encoder_2(self, te2_qtype:str, device:torch.device, torch_dtype = torch.bfloat16):
-        if te2_qtype=='bf16':
-           return T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype, low_cpu_mem_usage=True, device_map='auto')
-        
-        if te2_qtype.startswith('q'):
-            if not (model_path := self.quant_basedir/te2_qtype/'text_encoder_2/').exists():
-                model_path = self.model_path
-            return quantops.load_or_quantize(model_path, qtype=te2_qtype, module='text_encoder_2', device=device)
-
-        if te2_qtype in ['bnb4','bnb8']:
-            # leave text_encoder_2 empty in the pipe line and instead use a seperate pipeline for text encoding so that the transformer can still be offloaded
-            bnb_quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type= "nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=False)
-            
-            text_encoder = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", quantization_config=bnb_quant_config, torch_dtype=torch_dtype, low_cpu_mem_usage=True, device_map='auto')
-            self.text_pipe = DiffusionPipeline.from_pretrained(self.model_path, transformer=None, vae=None, text_encoder_2=text_encoder, torch_dtype=torch_dtype, low_cpu_mem_usage=True) 
-            return None
 
     @torch.inference_mode()
-    def _load_helper(self, qtype:typing.Literal['bnb4','qint4','qint8','qfloat8'], te2_qtype:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'], offload:bool=False,):
-        '''Try to load quantized from disk otherwise, quantize on the fly
-        
-        Args:
-            qtype: quantization type for transformer
-            te2_quant: quantization type for T5 encoder. If bf16, no quantization.
-            offload: enable model cpu off (incompatible with bnb)
-            
-        '''
-
-        print(f'transformer quant: {qtype}, text_encoder_2 quant: {te2_qtype}')
-        
-        device = None if offload else 0 #'cuda'
-        torch_dtype = torch.bfloat16 
-        
-        
-        te_kwarg = {'text_encoder':None} if te2_qtype.startswith('bnb') else {}
-        pipe: FluxPipeline = FluxPipeline.from_pretrained(self.text_enc_model_id, transformer=None, text_encoder_2=None, **te_kwarg, torch_dtype=torch_dtype)  # 
-        # don't move to device yet, loading transformer could use a LOT of vram if quantizing
-        pipe.transformer = self._load_transformer(qtype, device, torch_dtype)
-        release_memory()
-        if pipe.text_encoder_2 is None:
-            pipe.text_encoder_2 = self._load_text_encoder_2(te2_qtype, device, torch_dtype).to(device)
-        
-        pipe.transformer = pipe.transformer.to(device)
-        release_memory()
-        
-        # Do not call pipe.to(device) more than once. It will break things
-        pipe = pipe.to(device, dtype=torch_dtype)
-        
-        
-        print('PIPE:', pipe.dtype, pipe.device)
-        print('TRANSFORMER:', pipe.transformer.dtype, pipe.transformer.device)
-        
-        if pipe.text_encoder_2 is None:
-            print('text_pipe - TEXT ENC 2:', self.text_pipe.text_encoder_2.dtype, self.text_pipe.text_encoder_2.device)
-        else:
-            print('TEXT ENC 2:', pipe.text_encoder_2.dtype, pipe.text_encoder_2.device)
-        
-        release_memory()
-        return pipe
-
-    @torch.inference_mode()
-    def load_lora(self, weight_name:str = 'detail-maximizer.safetensors', lora_dirpath:Path=None):
-        if lora_dirpath is None:
-            lora_dirpath = cpaths.ROOT_DIR/'extras/loras/flux'
+    def load_lora(self, weight_name:str, init_weight:float=None):
         
         adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
         # https://civitai.green/user/nakif0968/models?types=LORA&baseModels=Flux.1+D&baseModels=Flux.1+S
         try:
             #loraops.set_lora_transformer(self.base, Path(lora_dirpath).joinpath(weight_name), adapter_name)
-            lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
+            #lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
+            lora_sd = Path(self.lora_dirpath).joinpath(weight_name)
             #self.base.transformer,skipped_keys = loraops.manual_lora(lora_sd, self.base.transformer, adapter_name=adapter_name)
-            self.base.load_lora_into_transformer(lora_sd, None, self.base.transformer, adapter_name=adapter_name)
             #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
-            self.base.disable_lora()
+            self.base.load_lora_into_transformer(*self.base.lora_state_dict(lora_sd, return_alphas=True), transformer=self.base.transformer, adapter_name=adapter_name, low_cpu_mem_usage=True)
+            #self.base.load_lora_into_transformer(lora_sd, None, self.base.transformer, adapter_name=adapter_name)
+            #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
+            if init_weight is None:
+                self.base.disable_lora()
+            else:
+                self.base.set_adapters(adapter_name, init_weight)
             #self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
             self.adapter_names.append(adapter_name)
             
         except IOError as e:
-            raise NotImplementedError(f'Unsupported lora adapater {adapter_name!r}')
+            raise NotImplementedError(f'Unsupported lora adapter {weight_name!r}')
 
     def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
         dims_opts = {
@@ -1477,21 +1537,21 @@ class FluxBase(SingleStagePipeline):
     
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
-        prompt = [prompt]#*batch_size
+        prompt = [prompt]
         # lora weights for Flux should ONLY be loaded into transformer, not text_encoder
-        lora_scale = None # kwargs.get('lora_scale')
+        lora_scale = kwargs.get('lora_scale', None) # None
         device = torch.device('cuda:0')
         if self.text_pipe is None:
-                (prompt_embeds, pooled_prompt_embeds,_,) = self.base.encode_prompt(
+            (prompt_embeds, pooled_prompt_embeds,_,) = self.base.encode_prompt(
                 prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size, 
                 device=device, lora_scale=lora_scale)
         else:
             (prompt_embeds, pooled_prompt_embeds,_,) = self.text_pipe.encode_prompt(
                 prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size,
                   device=self.text_pipe.device, lora_scale=lora_scale)
+        
         torch.cuda.empty_cache()
-        return dict(prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds)
-        #return  dict(prompt=prompt) #, negative_prompt=negative_prompt) # neg not supported (offically)
+        return dict(prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds) # neg not supported (offically)
     
     
     @torch.inference_mode()
@@ -1506,7 +1566,7 @@ class FluxBase(SingleStagePipeline):
         self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
         
         for _ in range(3):
-            _ = self.base("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
+            _ = self.t2i("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
         self.is_compiled = True
         torch.compiler.reset()
     
@@ -1532,8 +1592,9 @@ class FluxBase(SingleStagePipeline):
     @torch.inference_mode()
     def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
         img_w,img_h = img_wh
-        unpacked_latents = self.basei2i._unpack_latents(out_latents, img_h, img_w, self.basei2i.vae_scale_factor)
-        blended_latents = interpolation.blend_latents(raw_image_latents, unpacked_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
+        if out_latents.ndim == 3 and out_latents.shape[-1] == 64:
+            out_latents = self.basei2i._unpack_latents(out_latents, img_h, img_w, self.basei2i.vae_scale_factor)
+        blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
         packed_blended_latents = self._repack_latents(blended_latents, img_h, img_w)
         return packed_blended_latents
     
@@ -1545,7 +1606,8 @@ class FluxBase(SingleStagePipeline):
         #print(latents.shape)
         
         # make sure the VAE is in float32 mode, as it overflows in float16
-        latents = self.base._unpack_latents(latents, height, width, self.base.vae_scale_factor)
+        if latents.ndim == 3 and latents.shape[-1] == 64:
+            latents = self.base._unpack_latents(latents, height, width, self.base.vae_scale_factor)
         latents = (latents / self.base.vae.config.scaling_factor) + self.base.vae.config.shift_factor
         image = self.base.vae.decode(latents, return_dict=False)[0]
 
