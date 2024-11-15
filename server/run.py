@@ -30,7 +30,7 @@ Commands that accept arguments can be called with either prefix.
 '''
 
 
-logger = logging.getLogger('server')
+logger = logging.getLogger('bot')
 struct_logger = logging.getLogger('struct_cmds')
 cmdcache_logger = logging.getLogger('cmd_cacher')
 # DYN_GLOB = '*.py'  if settings.TESTING else '[!_]*.py'
@@ -52,7 +52,7 @@ async def hard_reset(defer_handling=True):
         #     if task.cancel():
         #         print('CANCELED TASK:', task.get_name(), task)
         #await asyncio.sleep(2.0) # give time for tasks to catchup
-        raise KeyboardInterrupt('Restart')
+        raise RuntimeError('defer handling')
     else:
         try:
             p = psutil.Process(os.getpid())
@@ -85,7 +85,7 @@ def cmd_cache_init(cache_filepath:str, n:int = 100):
 
 
 class BotUs(commands.Bot):
-    def __init__(self, extention_glob:str = '[!_]*.py'):
+    def __init__(self, cogs_list:list[str], extention_glob:str = '[!_]*.py'):
         super().__init__(
             command_prefix='!',#commands.when_mentioned_or('!'), 
             description=DESC, 
@@ -98,7 +98,9 @@ class BotUs(commands.Bot):
             'chat': False,
             'draw': False
         }
+        self.cogs_list = cogs_list
         self._extention_glob = extention_glob
+        
         self.pstore = io_utils.PersistentStorage(settings.CONFIG_DIR/'persistent_storage.yaml')
         self.cmd_cache = cmd_cache_init(settings.LOGS_DIR/'cmd_cache.jsonl', n=100)
     
@@ -151,17 +153,18 @@ class BotUs(commands.Bot):
             await self.change_presence(**self._get_presence())
             
 
-    async def toggle_extensions(self, extdir:typing.Literal['appcmds','cogs','views'], state='on'):
-        for ext_file in settings.SERVER_ROOT.joinpath(extdir).glob(self._extention_glob):
-            if ext_file.stem != '__init__':
-                if state=='on':
-                    await self.load_extension(f'{extdir}.{ext_file.stem}')
-                elif state=='off':
-                    await self.unload_extension(f'{extdir}.{ext_file.stem}')
-                elif state=='reload':
-                    await self.reload_extension(f'{extdir}.{ext_file.stem}')
-                else:
-                    raise ValueError('Unknown state:', state)
+    async def toggle_extensions(self, extdir:typing.Literal['appcmds','cogs','views'], state:typing.Literal['on','off','reload']='on'):
+        
+        if extdir == 'cogs':
+            ext_filestems = self.cogs_list
+        else:
+            ext_filestems = [ext_file.stem for ext_file in settings.SERVER_ROOT.joinpath(extdir).glob(self._extention_glob) if ext_file.stem != '__init__']
+        
+        state_func = {'on': self.load_extension, 'off': self.unload_extension, 'reload': self.reload_extension}[state]
+        
+        for ext_stem in ext_filestems:
+            await state_func(f'{extdir}.{ext_stem}')
+
 
     async def add_temporary_reaction(self, message: discord.Message, emoji:str, delete_after:float=60.0):
         await message.add_reaction(emoji)
@@ -313,15 +316,18 @@ class BotUs(commands.Bot):
         struct_logger.info(json.dumps(data))
         
 
-async def main(bot=None):
-    extention_glob = '*.py'  if settings.TESTING else '[!_]*.py'
+async def main(args, bot=None):
+    
+    extention_glob = '*.py' if args.test else '[!_]*.py'
     cog_list = [c.stem.lower() for c in settings.COGS_DIR.glob(extention_glob) if c.stem != '__init__']
+    if args.beta:
+        cog_list += ['beta.' + c.stem.lower() for c in (settings.COGS_DIR/'beta').glob(extention_glob) if c.stem != '__init__']
     if bot is None:
-        bot = BotUs(extention_glob)
+        bot = BotUs(cog_list, extention_glob)
 
 
     @bot.tree.command(name='reload', description='Reload a set of commands')
-    @app_commands.choices(cog=[app_commands.Choice(name=cog, value=cog) for cog in cog_list])
+    @app_commands.choices(cog=[app_commands.Choice(name=cog.split('.')[-1], value=cog) for cog in cog_list])
     async def reload(interaction: discord.Interaction, cog: str):
         """Reload a command set."""
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -365,8 +371,12 @@ async def main(bot=None):
             await ctx.send('⚠️ **Reboot Request Received** ⚠️ Razing and Rebuilding to Remedy RuhRos...')
             
             await bot.toggle_extensions('cogs', 'off')
-            
-            await hard_reset(defer_handling=True)
+            os.environ['REBOOT_REQUESTED'] = '1'
+            raise KeyboardInterrupt('Restart')
+            # try:
+            #     await hard_reset(defer_handling=True)
+            # except RuntimeError:
+            #     raise KeyboardInterrupt('Restart')
 
     @bot.command(name='gsync', aliases=['sync'])
     #@commands.guild_only()
@@ -453,18 +463,20 @@ def get_cli_args():
     run_mode_group.add_argument('--live', action='store_true', help='run on live server')
     run_mode_group.add_argument('--test', action='store_true', help='run on test server (if configured)')
     parser.add_argument('--non-interactive', action='store_true', help='disable "human features" like color logging to improve crontab compatibility')
+    parser.add_argument('--stable', dest='beta', action='store_false', help='exclude unstable beta cogs')
     return parser.parse_args()
 
-def run_main():
-    extention_glob = '*.py'  if settings.TESTING else '[!_]*.py'
-    DEBUG = None
-    bot = BotUs(extention_glob)
+def run_main(args):
+    #extention_glob = '*.py' if args.test else '[!_]*.py'
+    DEBUG = True
+    #bot = BotUs(extention_glob)
     
     # signal.signal(signal.SIGINT, signal_handler)
     try:
-        uvloop.run(main(bot), debug=DEBUG)
+        uvloop.run(main(args), debug=DEBUG)
     # except (KeyboardInterrupt, SystemExit):
     except KeyboardInterrupt:
+        print('Keyint')
         #bot.loop.close()
         # for task in asyncio.all_tasks(bot.loop):
         #   if task.cancel():
@@ -485,7 +497,7 @@ def run_main():
             os.execl(python, python, *sys.argv)
 
 if __name__ == '__main__':
-    #from threading import Thread
+    
     cli_args = get_cli_args()
     if cli_args.test:
         os.environ['TESTING'] = '1'
@@ -501,4 +513,4 @@ if __name__ == '__main__':
     #useridx.check_author_initials()
     # main()
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    run_main()
+    run_main(cli_args)
