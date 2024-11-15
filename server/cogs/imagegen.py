@@ -16,7 +16,6 @@ from diffusers.utils import load_image, make_image_grid
 
 from PIL import Image
 import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png
-import pygifsicle # sudo apt install gifsicle
 
 from managers import imgman
 import config.settings as settings
@@ -152,28 +151,53 @@ class SetImageConfig:
         elif not self.igen.is_ready:
             return await self.imgup(ctx)
         else:
-            await ctx.send(f'{disp_name} already up')
+            return await ctx.send(f'{disp_name} already up')
 
 
-    async def scheduler_autocomplete(self, interaction: discord.Interaction, current: str,) -> list[app_commands.Choice[str]]:
+    async def sampler_autocomplete(self, interaction: discord.Interaction, current: str,) -> list[app_commands.Choice[str]]:
         if not self.igen.is_ready:
             return []
         compat_schedulers = self.igen.available_schedulers(return_aliases=True)
         return [app_commands.Choice(name=sched, value=sched) for sched in compat_schedulers if current.lower() in sched.lower()]
 
     @isetarg.command(name='scheduler')
-    @app_commands.autocomplete(alias=scheduler_autocomplete)
-    async def iset_scheduler(self, ctx: commands.Context, alias: str):
+    @app_commands.autocomplete(sampler=sampler_autocomplete)
+    async def iset_scheduler(self, ctx: commands.Context, sampler: str, schedtype: typing.Literal['Karras','sgm_uniform','exponential','beta', 'ts_leading']=None):
         '''Change the image generation scheduler
         
         Args:
-            alias: The scheduler's nickname
+            sampler: The sampler's nickname
+            schedtype: The scheduler type nickname
         '''
         if not self.igen.is_ready:
             return await ctx.send(f'Image model not loaded! Call `!imgup` first.')
-        new_sched = self.igen.set_scheduler(alias=alias)
-        return await ctx.send(f'Scheduler set: {alias} ({new_sched})')
+                    
+        
+        scheduler_clsname = self.igen.set_scheduler(sampler_alias=sampler, schedtype_alias=schedtype)
+        
+        scheduler_name = f'{sampler} - {schedtype}' if schedtype is not None else sampler
+        return await ctx.send(f'Scheduler set: {scheduler_name} ({scheduler_clsname})')
+    
+    @isetarg.command(name='pag')
+    async def iset_pag(self, ctx: commands.Context, scale: float=3.0, layers: str='mid', disable:bool=False):
+        '''Configure PAG (Perturbed-Attention Guidance) for model if possible
+        
+        Args:
+            scale: PAG scale. Similar to guidance. Can improve quality+adherence, too high over saturates. Default=3.
+            layers: Network layers to apply PAG. Can use comma for list. Default='mid'.
+            disable: If true, disable PAG completely. Default=Fasle.
+        '''
+        if not self.igen.is_ready:
+            return await ctx.send(f'Image model not loaded! Call `!imgup` first.')
+        
+        try:
+            scale = 0.0 if disable else scale
+            pag_config = self.igen.set_pag_config(scale, layers.split(','), disable_on_zero=disable)
+            return await ctx.send(f'```json\nPAG {"Enabled" if scale else "Disabled"}: {pag_config}\n```')
+        except NotImplementedError:
+            return await ctx.send('PAG not implemented for this model type. Try an SDXL based model.')
 
+    
 class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='img'
     '''Suite of tools for generating images.'''
     
@@ -181,14 +205,14 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         self.bot = bot
         #self.igen = imgman.ColorfulXLLightningManager(offload=False)
         # self.igen = imgman.FluxSchnevManager(offload=False)
-        # self.igen = imgman.JuggernautXIManager(offload=False)
-        self.igen = imgman.SD35MediumManager(offload=False)
+        self.igen = imgman.JuggernautXIManager(offload=False)
+        #self.igen = imgman.SD35MediumManager(offload=False)
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
 
         self._log_extra = {'cog_name': self.qualified_name}
         self._load_lock = asyncio.Lock()
-        self._model_load_commands = set(['draw', 'redraw','hd','animate', 'reanimate', 'optimize'])
+        self._model_load_commands = set(['▶ Replay CMD']+['draw', 'redraw','hd','animate', 'reanimate', 'optimize'])
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
@@ -213,6 +237,51 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         cmds_logger.info('[{stat}] {a.display_name}({a.name}) command "{c.prefix}{c.invoked_with} ({c.command.qualified_name})" args:({args}, {c.kwargs})'.format(
             stat=cmd_status, a=ctx.author, c=ctx, args=pos_args), extra=self._log_extra)
     
+
+    @commands.Cog.listener('on_reaction_add')
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
+        if reaction.message.author == self.bot.user:
+            if str(reaction.emoji) == '🔞':
+                
+                view = self.msg_views.get(reaction.message.id, discord.utils.MISSING)
+                if view:
+                    reaction.message = await view.set_blur(True) # so, that works for forcing an update. good to know.
+                
+                    #print(view, [a.is_spoiler() for a in reaction.message.attachments])
+                    #await view.refresh()
+                else:
+                    #print('NO VIEW HERE ADD')
+                    #attachs = [await attach.to_file(spoiler=True) for attach in reaction.message.attachments]
+                    attachs = asyncio.gather(*[attach.to_file(spoiler=True) for attach in reaction.message.attachments])
+                    # reaction.message = await reaction.message.edit(attachments=attachs, view=view)
+                    
+                    msg = await reaction.message.edit(attachments=[], view=view)
+                    msg = await msg.edit(attachments=await attachs, view=view)
+                
+            #event_logger.info(f'[REACT] {user.display_name}({user.name}) ADD "{reaction.emoji}" TO '
+            #                '{a.display_name}({a.name}) message {reaction.message.content!r}'.format(a=reaction.message.author, reaction=reaction), extra=self._log_extra)
+    
+    @commands.Cog.listener('on_reaction_remove')
+    async def on_reaction_remove(self, reaction: discord.Reaction, user: discord.User):
+        
+        if reaction.message.author == self.bot.user:
+            if str(reaction.emoji) == '🔞':
+                view = self.msg_views.get(reaction.message.id, discord.utils.MISSING)
+                if view:
+                    reaction.message = await view.set_blur(False)
+                    
+                    #print(view, 'is_spoliers:', [a.is_spoiler() for a in reaction.message.attachments])
+                    #await view.refresh()
+                else:
+                    
+                    #attachs = [await attach.to_file(spoiler=True) for attach in reaction.message.attachments]
+                    attachs = asyncio.gather(*[attach.to_file(spoiler=False) for attach in reaction.message.attachments])
+                    # reaction.message = await reaction.message.edit(attachments=attachs, view=view)
+                    
+                    msg = await reaction.message.edit(attachments=[], view=view)
+                    msg = await msg.edit(attachments=await attachs, view=view)
+
+
     @commands.Cog.listener('on_message_delete')
     async def on_message_delete(self, message: discord.Message):
         if message.id in self.msg_views:
@@ -291,7 +360,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #StatusItem(, value=None),
         ]
         if self.igen.is_ready:
-            status.append(StatusItem('```json\n' + 'Scheduler ' + self.igen.base.scheduler.to_json_string() + '\n```', value=None, advanced=True))
+            status.append(StatusItem(None,None, extra='```json\n' + 'Scheduler ' + self.igen.base.scheduler.to_json_string() + '\n```', advanced=True))
         
         return [s for s in status if keep_advanced or not s.advanced]
     
@@ -306,11 +375,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         '''Loads in the default image generation model'''
         msg = None
         was_called = hasattr(ctx,'command') and ctx.command.name=='imgup'
+        was_iset = hasattr(ctx,'command') and ctx.command.qualified_name == 'iset model'
         #was_called = hasattr(ctx, 'channel')
         model_alias = imgman.AVAILABLE_MODELS[self.igen.model_name]['desc']
         async with self._load_lock:
             if not self.igen.is_ready:
-                msg = await ctx.send(f'Warming up default: {model_alias} ...', silent=True)
+                pre_msg = 'Loadin\' in model' if was_iset else 'Warming up default model'
+                msg = await ctx.send(f'{pre_msg}: {model_alias} ...', silent=True)
                 await self.igen.load_pipeline()
                 # Disable if redirecting
                 if not settings.DISCORD_SESSION_INTERACTIVE:
@@ -365,13 +436,12 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             text_only: If True, only return text description, otherwise show the image. Default=False.
         """
         await self.view_check_defer(ctx)
-        image_url = imgutil.clean_discord_urls(imgurl)#imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)
+        image_url = imgutil.clean_image_url(imgurl, check_tenor=False)
         # test for gif/mp4/animated file
 
         image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
         
-        if image.ndim > 3:
-            image = image[0] # gifs
+        image = imgutil.image_fix(image, animated=False, transparency=False)
         image = Image.fromarray(image)
         
         desc = self.igen.caption(image, level)
@@ -413,9 +483,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         image_urls = []
         for image_url in img_urls:
-            image_url = imgutil.clean_discord_urls(image_url.strip())
             try:
-                image_url = imgutil.tenor_fix(url=image_url)
+                image_url = imgutil.clean_image_url(image_url.strip(), check_tenor=True)
             except ValueError:
                 return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
             image_urls.append(image_url)
@@ -432,9 +501,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         bfiles = [] 
         for url in image_urls:
             image, imgmeta = await imgutil.aload_image(url, result_type='np')
-        
-            if image.shape[-1] > 3: # discard alpha channel
-                image = image[..., :3]
+            image = imgutil.image_fix(image, animated=True, transparency=False)
             
             images.append(image.squeeze())
             img_metas.append(imgmeta)
@@ -469,17 +536,13 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         needs_view = await self.view_check_defer(ctx)
         
         # this may be passed a url string in drawUI config
-        image_url1 = imgutil.clean_discord_urls(imgfile1.url if isinstance(imgfile1, discord.Attachment) else imgurl1)
-        image_url2 = imgutil.clean_discord_urls(imgfile2.url if isinstance(imgfile2, discord.Attachment) else imgurl2)
+        image_url1 = imgutil.clean_image_url(imgfile1.url if isinstance(imgfile1, discord.Attachment) else imgurl1, check_tenor=False)
+        image_url2 = imgutil.clean_image_url(imgfile2.url if isinstance(imgfile2, discord.Attachment) else imgurl2, check_tenor=False)
         
         images:list[Image.Image] = []
         for image_url in [image_url1,image_url2]:
             image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
-            if image.ndim > 3:
-                image = image[0] # gifs -> take first frame
-            
-            if image.shape[-1] > 3: # discard alpha channel
-                image = image[:, :, :3]
+            image = imgutil.image_fix(image, animated=False, transparency=False)
 
             images.append(Image.fromarray(image))
         
@@ -556,10 +619,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             prompt = await self.validate_prompt(ctx, prompt)
         except PromptCanceled:
             return await ctx.send('Canceled', silent=True, delete_after=1)
-        # prompt = await self.validate_prompt(ctx, prompt)
-        # if prompt == '<CANCEL>':
-        #     await ctx.send('Canceled', silent=True, delete_after=1)
-        #     return 
 
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast)
@@ -639,13 +698,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         needs_view = await self.view_check_defer(ctx, view)
         
         # this may be passed a url string in drawUI config
-        image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile, discord.Attachment) else imgurl)
-        
+        image_url = imgfile.url if isinstance(imgfile, discord.Attachment) else imgurl
+        image_url = imgutil.clean_image_url(image_url, check_tenor=False)
         image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
-        if image.ndim > 3:
-            image = image[0] # gifs -> take first frame
-        if image.shape[-1] > 3: # discard alpha channel
-            image = image[:, :, :3]
+        image = imgutil.image_fix(image, animated=False, transparency=False)
         
         image = Image.fromarray(image)
         
@@ -717,7 +773,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if isinstance(imgfile, Image.Image):
             image = imgfile # get a little cheeky here to bypass the download
         else:
-            image_url = imgutil.clean_discord_urls(imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl)#imgfile)
+            image_url = imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl
+            image_url = imgutil.clean_image_url(image_url, check_tenor=False)
             image, imgmeta = await imgutil.aload_image(image_url)
         
         try:
@@ -799,7 +856,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         image = None
         if imgurl is not None:
-            image_url = imgutil.clean_discord_urls(imgurl)#imgfile)
+            image_url = imgutil.clean_image_url(imgurl, check_tenor=False)
             image, imgmeta = await imgutil.aload_image(image_url, result_type=None)
         
         try:
@@ -889,9 +946,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if self.igen.config.strength == 0:
             return await ctx.send(f'{self.igen.model_name} does not support `/reanimate`', ephemeral=True)
         # this may be passed a url string in drawUI config
-        image_url = imgutil.clean_discord_urls(imgurl)
         try:
-            image_url = imgutil.tenor_fix(url=image_url)
+            image_url = imgutil.clean_image_url(imgurl, check_tenor=True)
         except ValueError:
             return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
         

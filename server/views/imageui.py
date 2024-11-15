@@ -87,7 +87,7 @@ class ImagePrimaryView(discord.ui.View):
         
         self.images: list[Image.Image] # = []
         self.thumbs: list[Image.Image] # = []
-        self._file_cache: list[Image.Image] = []
+        self._file_cache: list[discord.File] = []
 
         self.img_count:int # = 0
 
@@ -100,6 +100,16 @@ class ImagePrimaryView(discord.ui.View):
         self._timeout_warning_visible = False
         self.timeout_embed = discord.Embed()
 
+        self._blur = False
+
+    async def set_blur(self, active:bool=True):
+        self._blur = active
+        if any([a.is_spoiler() != active for a in self.message.attachments]):
+            self.message = await self.message.edit(attachments=[])#, view=self)
+        #self.message = await self.message.remove_attachments(a for a in self.message.attachments if a.is_spoiler() != active)
+        self.message = await self.refresh_view()
+        return self.message
+
     def image_attrs(self, start:int=0, stop:int|None=None):
         raise NotImplementedError('Requires override')
     
@@ -107,7 +117,7 @@ class ImagePrimaryView(discord.ui.View):
         raise NotImplementedError('Requires override')
     
     def image_files(self, start:int=0, stop:int|None=None, ext='WebP', **kwargs):
-        return [imgutil.to_bfile(**iattrs, ext=ext, **kwargs) for iattrs in self.image_attrs(start, stop)]
+        return [imgutil.to_bfile(**iattrs, ext=ext, spoiler=self._blur, **kwargs) for iattrs in self.image_attrs(start, stop)]
     
     async def _populate_cache(self, start:int=0, stop:int|None=None, ext='WebP', **kwargs):
         self._file_cache[start:stop] = self.image_files(start, stop, ext=ext, **kwargs)
@@ -138,14 +148,18 @@ class ImagePrimaryView(discord.ui.View):
                     self.timeout_warning.change_interval(seconds=nxt_sec)
                 timeout_msg = f"⏰ Timeout in {time_remaining:0.1f}s"
             
+            # use embed footer text a proxy to only long once
+            if self.timeout_embed.footer.text is None:
+                logger.info(f'Timeout init. {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs.get("prompt")!r})')
+            
             self.timeout_embed = self.timeout_embed.set_footer(text=f'{timeout_msg}')
             
             if self.img_count > 1:
                 self.message = await self.message.edit(embed=self.timeout_embed) # , suppress=False
             
             # use embed as a proxy to avoid logging every time
-            if self.message.embeds:
-                logger.info(f'Timeout init. {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs.get("prompt")!r})')
+            #if self.message.embeds:
+            #    logger.info(f'Timeout init. {time_remaining:0.2f}s : {self} : (prompt={self.call_ctx.kwargs.get("prompt")!r})')
 
         
         if time_remaining <= (-3*60):
@@ -159,7 +173,7 @@ class ImagePrimaryView(discord.ui.View):
         self.lock_ui()
         self.clear_items()
         try:
-            self.message = await self.message.edit(embed=None, view=self)
+            self.message = await self.message.edit(embed=None, view=self) # MONITOR: embed didn't clear after `/animate prompt: birds aspect: portrait`
         except discord.NotFound:
             logger.debug(f'Message(id={self.message.id}) not found, no view to clear')
 
@@ -180,6 +194,7 @@ class ImagePrimaryView(discord.ui.View):
         self._time_last_refresh = time.monotonic()
 
         if self.message.embeds:
+            self.timeout_embed = discord.Embed()
             self.message = await self.message.edit(embed=None)
         
     
@@ -291,7 +306,7 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
     async def refresh(self):
         self.update_buttons()
         index = self.cur_imgnum-1
-        img_file = imgutil.to_bfile(self.images[index], filestem=self.local_paths[index].stem, description=self.kwarg_sets[index]['prompt'], ext='PNG')#ext='WebP', lossless = True)
+        img_file = imgutil.to_bfile(self.images[index], filestem=self.local_paths[index].stem, description=self.kwarg_sets[index]['prompt'], ext='PNG', spoiler=self._blur)#ext='WebP', lossless = True)
         self.message = await self.message.edit(attachments=[img_file], view=self)
         return self.message
         
@@ -319,7 +334,10 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
     async def add_images(self, images: list[Image.Image], call_kwargs:list[dict]):
         n = len(images)
         self.img_count += n
-        self.cur_imgnum  = self.img_count
+        # Don't move position on new added images if not at end already 
+        if self.cur_imgnum+n==self.img_count:
+            self.cur_imgnum = self.img_count
+            
         self.images.extend(images)
 
         
@@ -340,9 +358,9 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
             self.thumbs.append(imgutil.to_thumb(image, max_size=(256, 256)))
             
             if self.grid_display_active and self.img_count <= 10:
-                fast_files.append(imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP'))
+                fast_files.append(imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP', spoiler=self._blur))
 
-            self._file_cache.append(imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP'))
+            self._file_cache.append(imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP', spoiler=self._blur))
 
         if fast_files:
             self.message = await self.message.add_files(*fast_files)
@@ -466,6 +484,8 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         else:
             #self.kwarg_sets.append(new_kwargs)
             # NOTE: if decide to do this, remove the defer from on_submit
+            # want to move to end in this case
+            self.cur_imgnum  = self.img_count
             await self.redo(cm.submit_interaction, new_kwargs)
     
 
@@ -502,7 +522,7 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         #await interaction.followup.send(file=to_bytes_file(image_file, kwargs['prompt']))
         fpath = imgutil.save_image_prompt(image, prompt, ext='WebP', lossless=True)
         #ifile = imgutil.impath_to_file(fpath, description=prompt)
-        ifile = imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP', lossless=True)
+        ifile = imgutil.to_bfile(image, filestem=fpath.stem, description=prompt, ext='WebP', spoiler=self._blur, lossless=True)
         
         # if self.upsample_thread is None:
         #    self.upsample_thread = await self.call_ctx.channel.create_thread(name='Upsampled Images', message=self.message)
@@ -513,7 +533,8 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         # TODO: this would break if > 10 upsamples
         if self.upsample_message is None:
             self.upsample_message = await interaction.followup.send(file=ifile, wait=True)
-            self.upsample_message = await self.upsample_message.channel.fetch_message(self.upsample_message.id)
+            #self.upsample_message = await self.upsample_message.channel.fetch_message(self.upsample_message.id)
+            self.upsample_message:discord.Message = await self.call_ctx.fetch_message(self.upsample_message.id)
             #self.upsample_message = await self.message.reply(files=[ifile])
         else:
             #self.upsample_message = await self.call_ctx.fetch_message(self.upsample_message.id)
@@ -555,7 +576,7 @@ class GifUIView(ImagePrimaryView):
         self.gif_file_task: asyncio.Task = None
         self.optimized_images = None
 
-        self.ext: typing.Literal['GIF','MP4'] = None
+        self.ext: typing.Literal['GIF','MP4', 'WebP'] = None
     
 
 
@@ -571,8 +592,9 @@ class GifUIView(ImagePrimaryView):
         if self._animated_bfile is None:
             if ext is None:
                 ext = self.ext
-            self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext=self.ext)
+            self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext=self.ext, spoiler=self._blur)
         gbfile = copy.deepcopy(self._animated_bfile)
+        gbfile.spoiler = self._blur
         t1 = time.monotonic()
         if round(t1-t0,2) > 0:
             logger.debug(f'deep copy gif: {t1 - t0:0.2f}s')
@@ -580,7 +602,7 @@ class GifUIView(ImagePrimaryView):
     
     async def delayed_gif(self, delay:float=1.0):
         await asyncio.sleep(delay/2)
-        gif_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP', method=5, quality=90)#, lossless=True)
+        gif_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP', spoiler=self._blur, method=5, quality=90)#, lossless=True)
         #gif_bfile = await asyncio.to_thread(imgutil.animation_to_bfile, image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='GIF')
         
         self.gif_bytes = gif_bfile.fp.getbuffer().nbytes
@@ -615,7 +637,7 @@ class GifUIView(ImagePrimaryView):
         # x - use catbox hosting
         # x - return exploded view with the collapse button disabled. 
         
-        self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='MP4')
+        self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='MP4', spoiler=self._blur)
         # self._animated_bfile = imgutil.animation_to_bfile(image_frames=self.images, filestem=self.gif_filepath.stem, description=self.prompt, ext='WebP')
         mp4_bfile = copy.deepcopy(self._animated_bfile)
         self.message = await self.message.edit(content='', attachments=[mp4_bfile], view=self) # set content to '' to clear "seasoning..."
@@ -645,7 +667,7 @@ class GifUIView(ImagePrimaryView):
         self.message = await self.refresh_view(grid_display=True)
 
 class DynamicImageGridView(discord.ui.View):
-    def __init__(self, parent_view:DrawUIView, *, orphaned:bool=False, max_grid_images:int=10, timeout=None):
+    def __init__(self, parent_view:DrawUIView, *, orphaned:bool=False, max_grid_images:int=9, timeout=None):
         super().__init__(timeout=timeout)
         self.parent_view = parent_view
         self.orphaned = orphaned
@@ -725,7 +747,7 @@ class DynamicImageGridView(discord.ui.View):
         #print(self.has_nav, self.children)
         self.prev_button.disabled = (n_batches < 2)
         self.next_button.disabled = (n_batches < 2)
-        self.collapse_button.disabled = self.orphaned
+        self.collapse_button.disabled = self.orphaned or self.parent_view.img_count < 1
 
         if not self.has_nav and n_batches > 1:
             self.prev_button.disabled = False
@@ -749,37 +771,42 @@ class DynamicImageGridView(discord.ui.View):
         return self.parent_view.image_attrs(offs, stop=stop)
         
        
-    async def async_file_batch(self, img_attr_batch:list[dict], ext:str, **kwargs):
-        for img_attrs in img_attr_batch:
-            yield imgutil.to_bfile(**img_attrs, ext=ext, **kwargs)
+    # async def async_file_batch(self, img_attr_batch:list[dict], ext:str, **kwargs):
+    #     for img_attrs in img_attr_batch:
+    #         yield imgutil.to_bfile(**img_attrs, ext=ext, **kwargs)
     
-    async def async_filecache_batch(self, index:int,):
-        offs = index*self.max_grid_images
-        stop = offs+self.max_grid_images
-        for file in self.parent_view.cached_files(offs, stop):
-            yield file
+    # async def async_filecache_batch(self, index:int,):
+    #     offs = index*self.max_grid_images
+    #     stop = offs+self.max_grid_images
+    #     for file in self.parent_view.cached_files(offs, stop):
+    #         yield file
+    def _jit_fsync(self, img_files:list[discord.File]):
+        for f in img_files:
+            f.spoiler = self.parent_view._blur
+        return img_files
     
     async def async_batch(self, thumbs:bool, index:int, ext:str, **kwargs):
         offs = index*self.max_grid_images
         stop = offs+self.max_grid_images
         if thumbs:
             for img_attrs in self.parent_view.thumb_attrs(offs, stop=stop):
-                yield imgutil.to_bfile(**img_attrs, ext=ext, **kwargs)
+                yield imgutil.to_bfile(**img_attrs, ext=ext, spoiler=self.parent_view._blur, **kwargs)
         else: 
             for file in self.parent_view.cached_files(offs, stop, ext=ext, **kwargs):
+                file.spoiler = self.parent_view._blur
                 yield file
 
     
-    async def render_sync(self, thumbs:bool, index:int = None):
-        if index is None:
-            index = self.cur_batchnum-1
+    # async def render_sync(self, thumbs:bool, index:int = None):
+    #     if index is None:
+    #         index = self.cur_batchnum-1
 
-        props = dict(ext='JPEG', optimize=False, quality=30) if thumbs else dict(ext='WebP')
+    #     props = dict(ext='JPEG', optimize=False, quality=30) if thumbs else dict(ext='WebP')
 
-        self.message = await self.message.edit(
-            attachments=[imgutil.to_discord_file(**img_attrs, **props) for img_attrs in self.attr_batch(thumbs=thumbs, index=index)], view=self)
+    #     self.message = await self.message.edit(
+    #         attachments=[imgutil.to_discord_file(**img_attrs, **props) for img_attrs in self.attr_batch(thumbs=thumbs, index=index)], view=self)
         
-        self._visible_index = index
+    #     self._visible_index = index
         
     async def render_delayed(self, thumbs:bool, delay:float, index:int = None):
         if index is None:
@@ -797,7 +824,7 @@ class DynamicImageGridView(discord.ui.View):
         #print(f'time to_files (thumbs={thumbs}): {time.monotonic()-t0:0.2f}s')
         await asyncio.sleep(delay/2)
         
-        self.message = await self.message.edit(attachments=img_files, view=self)
+        self.message = await self.message.edit(attachments=self._jit_fsync(img_files), view=self)
         self._visible_index = index
 
     async def static_refresh(self):
@@ -805,13 +832,24 @@ class DynamicImageGridView(discord.ui.View):
             return await self.parent_view.message.edit(attachments=self.parent_view.image_files(0, stop=self.max_grid_images), view=self)
         return await self.parent_view.message.edit(view=self)
 
+    def stale_view(self, has_new_images:bool, index:int=None):
+        if index is None:
+            index = self.cur_batchnum-1
+        return (
+            index != self._visible_index
+            or any(a.is_spoiler() != self.parent_view._blur for a in self.message.attachments)
+            or (has_new_images and len(self.message.attachments)<self.max_grid_images)
+        )
+
+
+
     async def refresh(self, interaction:discord.Interaction=None):
         has_new_images = self._last_img_count != self.parent_view.img_count # this will update on self.n_batches, so call ahead
-        
+        self.update_buttons()
         if self.n_batches < 2:
             return await self.static_refresh()
         #self.interrupt_refresh()
-        self.update_buttons()
+        
         index = self.cur_batchnum-1 # always after update_buttons
         
         #if interaction:
@@ -823,7 +861,8 @@ class DynamicImageGridView(discord.ui.View):
         await self.parent_view.reset_timeout()
         thumb_timer = None
         # prevent needlessly refreshing images whenever parent_view calls refresh
-        if index != self._visible_index or (has_new_images and len(self.message.attachments)<self.max_grid_images):
+        #if index != self._visible_index or (has_new_images and len(self.message.attachments)<self.max_grid_images):
+        if self.stale_view(has_new_images, index):
             thumb_timer = asyncio.create_task(self.render_delayed(thumbs=True, delay=0., index=index))
             self.display_timer = asyncio.create_task(self.render_delayed(thumbs=False, delay=self.page_update_delay, index=index))
             # self.display_timer = asyncio.gather(
