@@ -1,5 +1,6 @@
 import sys
 import json
+import dateutil
 import argparse
 from pathlib import Path
 
@@ -67,14 +68,16 @@ def ask_overwrite(filepath:str|Path) -> bool:
         can_write = inp.startswith('y')
     return can_write
 
-def discord_json_to_csv(df_chat: pd.DataFrame, out_csvfile: str|Path):
+def discord_json_to_csv(df_chat: pd.DataFrame, out_csvfile: str|Path= None):
     df_chatcsv = df_chat.copy().rename(columns={'username':'Author'})
     print(df_chatcsv.columns)
     df_chatcsv = df_chatcsv[['AuthorID','Author','Date','Content','Attachments','Reactions']]
     df_chatcsv.loc[:,['Attachments','Reactions']] = df_chatcsv[['Attachments','Reactions']].map(lambda v: np.nan if isinstance(v,list) and not v else v)
-    df_chatcsv.to_csv(out_csvfile, index=False)
-    print('Saved converted discord csv file:', out_csvfile)
-    return out_csvfile
+    if out_csvfile:
+        df_chatcsv.to_csv(out_csvfile, index=False)
+        print('Saved converted discord csv file:', out_csvfile)
+        return out_csvfile
+    return df_chatcsv
 
 def read_discord_json(chat_jsonfile:str|Path) -> pd.DataFrame:
     with open(chat_jsonfile) as f:
@@ -105,6 +108,27 @@ def read_chat_csv(chat_csvfile:str|Path):
         df_chat['AuthorID'] = df_chat['username'].apply(useridx.fake_author_id)
         return df_chat
 
+def merge_new_data(new_data_path:str|Path, old_csv_path:str|Path, out_csv_path:str|Path=None):
+    new_data_path = Path(new_data_path)
+    
+    df_cur = pd.read_csv(old_csv_path)
+    
+    if new_data_path.suffix == '.json':
+        df_nxt = discord_json_to_csv(read_discord_json(new_data_path))
+    else:
+        df_nxt = read_chat_csv(new_data_path)
+
+    df_updated = pd.concat([df_cur, df_nxt])
+    df_updated['Date'] = df_updated['Date'].pipe(pd.to_datetime, utc=True, format='mixed')
+    df_updated = df_updated.drop_duplicates(['AuthorID','Date','Content']).reset_index(drop=True)
+    
+    
+    df_updated['Date'] = df_updated['Date'].dt.tz_convert(dateutil.tz.gettz())
+
+    if out_csv_path:
+        df_updated.to_csv(out_csv_path, index=False)
+        
+    return df_updated
 
 def build_and_save(chat_filepath:str|Path, msg_threshold:float|int = 0.005, excluded_users:list[str] = None, bot_usernames: list[str] = None, exclude_bots:bool=True):
     chat_filepath = Path(chat_filepath)
