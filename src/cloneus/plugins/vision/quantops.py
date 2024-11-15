@@ -12,37 +12,39 @@ import bitsandbytes as bnb
 
 from bitsandbytes.nn.modules import Params4bit, QuantState
 from bitsandbytes.functional import dequantize_4bit
-from accelerate import init_empty_weights
+from accelerate import init_empty_weights, cpu_offload
 from accelerate.utils import BnbQuantizationConfig, load_and_quantize_model, set_module_tensor_to_device, compute_module_sizes
-from diffusers import FluxTransformer2DModel
+from diffusers import FluxTransformer2DModel, SD3Transformer2DModel, BitsAndBytesConfig, FluxPipeline
 from diffusers.models.model_loading_utils import load_model_dict_into_meta
-import safetensors.torch as sft
-from huggingface_hub import snapshot_download
+
+
+
+from huggingface_hub import snapshot_download, hf_hub_download
 
 from transformers import T5EncoderModel, AutoModelForTextEncoding
 from transformers.quantizers.quantizers_utils import get_module_from_name
 from optimum import quanto
 
-from cloneus.utils.common import timed,release_memory
+from cloneus.utils.common import timed,release_memory,read_state_dict
+from . import loraops
 
 logger = logging.getLogger(__name__)
 
 
-def read_state_dict(model_id_or_path:str|Path, allow_empty:bool = False):
-    if (model_path := Path(model_id_or_path)).exists():
-        weights_loc = model_path if model_path.is_dir() else model_path.parent
-
-    else:
-        weights_loc = Path(snapshot_download(repo_id=model_id_or_path, allow_patterns="transformer/*")).joinpath('transformer')
-    
-    state_dict = {}
-    for shard in sorted(Path(weights_loc).glob('*.safetensors')):
-        state_dict.update(sft.load_file(shard))
-
-    if not state_dict and not allow_empty:
-        raise RuntimeError('Failed to read state dict data from given path')
-
-    return state_dict
+def meta_transformer(model_scaffold:typing.Literal['flux_dev', 'sd35_medium', 'sd35_large'], dtype=torch.bfloat16):
+    model_ids = {
+        'flux_dev': 'black-forest-labs/FLUX.1-dev',
+        'sd35_medium': 'stabilityai/stable-diffusion-3.5-medium',
+        'sd35_large': 'stabilityai/stable-diffusion-3.5-large',
+    }
+    with init_empty_weights():
+        if model_scaffold == 'flux_dev':
+            config = FluxTransformer2DModel.load_config(model_ids[model_scaffold], subfolder="transformer")
+            transformer = FluxTransformer2DModel.from_config(config).to(dtype).eval()
+        else:
+            config = SD3Transformer2DModel.load_config(model_ids[model_scaffold], subfolder="transformer")
+            transformer = SD3Transformer2DModel.from_config(config).to(dtype).eval()
+    return transformer
 
 # ---------------------------------------------------------------------------
 # BitsandBytes Quantization
@@ -74,6 +76,72 @@ def create_4bit_transformer(model_id_or_path:str, bnb_quant_config:BnbQuantizati
     return transformer
 
 
+@torch.inference_mode()
+def manual_4bit_model(meta_model:FluxTransformer2DModel|SD3Transformer2DModel, converted_state_dict:dict, quant_config:BnbQuantizationConfig|BitsAndBytesConfig=None, dtype=torch.bfloat16):
+    if meta_model.device.type != 'meta':
+        raise RuntimeError('`meta_model` not on meta device, use with init_empty_weights()')
+
+    mismatch_keys = set(meta_model.state_dict()) ^ set(converted_state_dict)
+    
+    if mismatch_keys:
+        raise KeyError(f'state dict is missing or extra keys: {mismatch_keys}')
+
+    if quant_config is None:
+        quant_config = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=dtype, )
+    
+    _replace_with_bnb_linear(meta_model, quant_config)
+
+    for param_name, param in converted_state_dict.items():
+        param = param.to(dtype)
+        
+        if not check_quantized_param(meta_model, param_name):
+            set_module_tensor_to_device(meta_model, param_name, device=0, value=param)
+        else:
+            create_quantized_param(meta_model, param, param_name, target_device=0)
+
+    
+    release_memory()
+    # technically are writing to an internal frozen dict class but it's the only way to make it work out of the box with from_pretrained 
+    meta_model.config["quantization_config"] = quant_config
+    meta_model.config.quantization_config = quant_config
+    # to save the 4bit quant:
+    # transformer.save_pretrained('extras/quantized/flux/nf4/hyper')
+    return meta_model
+
+@torch.inference_mode()
+def flux_hyper_transformer_4bit(model_id="black-forest-labs/FLUX.1-dev", scale=0.125, dtype=torch.bfloat16, bnb_qconfig=None):
+    transformer = meta_transformer('flux_dev', dtype)
+    
+    hyper_path = hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors")
+    merged_state_dict = loraops.state_dict_merge_lora(hyper_path, model_id, scale)
+    if bnb_qconfig is None:
+        bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
+    
+    transformer = manual_4bit_model(transformer, merged_state_dict, bnb_qconfig, dtype)
+    # to save the 4bit quant:
+    # transformer.save_pretrained('extras/quantized/flux/nf4/hyper')
+    
+    return transformer
+    
+
+# @torch.inference_mode()
+# def load_flux_hyper(model_path:str="black-forest-labs/FLUX.1-dev", offload=False):    
+#     #qconfig = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype=torch.bfloat16, ) # bnb_4bit_compute_dtype='bf16', 
+#     #transformer: FluxTransformer2DModel = FluxTransformer2DModel.from_pretrained(model_path, subfolder="transformer", quantization_config = qconfig, torch_dtype=torch.bfloat16)
+#     device = torch.device('cuda')
+#     transformer = flux_hyper_transformer_4bit(model_path, scale=0.125).to(device, dtype=torch.bfloat16)
+#     pipe: FluxPipeline = FluxPipeline.from_pretrained(model_path, transformer=transformer, torch_dtype=torch.bfloat16,)
+
+#     #pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"))
+    
+#     # this does not work as of diffusers 0.31.0
+#     #pipe.fuse_lora(lora_scale=0.125)#, components=["transformer"])
+#     #pipe.to('cuda', torch_dtype=torch.bfloat16)
+#     #pipe.unload_lora_weights()
+    
+    
+    
+#     return pipe
 
 @torch.inference_mode()
 def _replace_with_bnb_linear(
@@ -109,7 +177,7 @@ def _replace_with_bnb_linear(
                         in_features,
                         out_features,
                         module.bias is not None,
-                        compute_dtype=bnb_qconfig.torch_dtype,#torch.bfloat16,
+                        compute_dtype=bnb_qconfig.bnb_4bit_compute_dtype,#torch.bfloat16,
                         compress_statistics=bnb_qconfig.bnb_4bit_use_double_quant,#False,
                         quant_type=bnb_qconfig.bnb_4bit_quant_type,#"nf4",
                     )
@@ -131,7 +199,7 @@ def _replace_with_bnb_linear(
 @torch.inference_mode()
 def check_quantized_param(model, param_name: str,) -> bool:
     module, tensor_name = get_module_from_name(model, param_name)
-    if isinstance(module._parameters.get(tensor_name, None), bnb.nn.Params4bit):
+    if isinstance(module, bnb.nn.Params4bit) or isinstance(module._parameters.get(tensor_name, None), bnb.nn.Params4bit):
         # Add here check for loaded components' dtypes once serialization is implemented
         return True
     elif isinstance(module, bnb.nn.Linear4bit) and tensor_name == "bias":
@@ -209,10 +277,8 @@ def create_quantized_param(
     module._parameters[tensor_name] = new_value
 
 @torch.inference_mode()
-def bnb4_transformer(model_id:str = "black-forest-labs/flux.1-dev", dtype = torch.bfloat16, bnb_quant_config:BnbQuantizationConfig = None):
-    with init_empty_weights():
-        config = FluxTransformer2DModel.load_config("black-forest-labs/flux.1-dev", subfolder="transformer")
-        model = FluxTransformer2DModel.from_config(config).to(torch.bfloat16).eval()
+def bnb4_transformer(model_id:str = "black-forest-labs/FLUX.1-dev", dtype = torch.bfloat16, bnb_quant_config:BnbQuantizationConfig = None):
+    model = meta_transformer('flux_dev', dtype)
 
     if bnb_quant_config is None:
         # keep defaults from orig implementation (no compress stats)
@@ -221,8 +287,8 @@ def bnb4_transformer(model_id:str = "black-forest-labs/flux.1-dev", dtype = torc
             bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
     
     _replace_with_bnb_linear(model, bnb_quant_config)
-    converted_state_dict = read_state_dict(model_id)
-    assert len(converted_state_dict) > 5, 'failed to read state dict'
+    converted_state_dict = read_state_dict(model_id, subfolder='transformer')
+    #assert len(converted_state_dict) > 5, 'failed to read state dict'
     
     for param_name, param in converted_state_dict.items():
         param = param.to(dtype)
@@ -237,21 +303,22 @@ def bnb4_transformer(model_id:str = "black-forest-labs/flux.1-dev", dtype = torc
     return model
 
 @torch.inference_mode()
-def load_sd_bnb4_transformer(safetensor_filepath:str|Path):
-    dtype = torch.bfloat16
+def load_prequantized_transformer(safetensor_filepath:str|Path, dtype = torch.bfloat16, bnb_quant_config:BnbQuantizationConfig = None):
     is_torch_e4m3fn_available = hasattr(torch, "float8_e4m3fn")
     #ckpt_path = hf_hub_download("sayakpaul/flux.1-dev-nf4", filename="diffusion_pytorch_model.safetensors")
     original_state_dict = read_state_dict(safetensor_filepath)
 
-    with init_empty_weights():
-        #config = FluxTransformer2DModel.load_config("sayakpaul/flux.1-dev-nf4")
-        config = FluxTransformer2DModel.load_config("black-forest-labs/flux.1-dev", subfolder="transformer")
-        model = FluxTransformer2DModel.from_config(config).to(dtype).eval()
-        expected_state_dict_keys = list(model.state_dict().keys())
+    if bnb_quant_config is None:
+        # keep defaults from orig implementation (no compress stats)
+        bnb_quant_config = BnbQuantizationConfig(
+            load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, 
+            bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
+    
+    model = meta_transformer('flux_dev', dtype)
+    expected_state_dict_keys = list(model.state_dict().keys()) #("sayakpaul/flux.1-dev-nf4")
 
-    bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, 
-                                        bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
-    _replace_with_bnb_linear(model, bnb_qconfig)#nf4
+
+    _replace_with_bnb_linear(model, bnb_quant_config)
 
     for param_name, param in original_state_dict.items():
         if param_name not in expected_state_dict_keys:
@@ -339,3 +406,98 @@ def load_or_quantize(quant_path_or_model_id:str|Path, qtype:typing.Literal['qint
     
     release_memory()
     return model.to(device)
+
+
+
+
+class FluxLoadHelper:
+    def __init__(self, model_path, quant_basedir, text_enc_model_id, variant) -> None:
+        self.model_path = model_path
+        self.quant_basedir = quant_basedir
+        self.text_enc_model_id = text_enc_model_id
+        self.variant = variant
+
+    @torch.inference_mode()
+    def _load_transformer(self, qtype:str, device:torch.device, torch_dtype = torch.bfloat16):
+        if qtype == 'bnb4':
+            print('load transformer')
+            
+            if str(self.model_path).endswith('.safetensors'):
+                # return bnbops.load_quantized(safetensor_filepath=self.model_path, bnb_quant_config=bnb_qconfig).to(device, dtype=torch_dtype)
+                return load_prequantized_transformer(safetensor_filepath=self.model_path).to(device, dtype=torch_dtype)
+                #transformer = bnbops.bnb4_transformer(self.model_path, torch_dtype).to(device, dtype=torch_dtype)
+            else:
+               
+                bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
+                                                    # bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='fp32', torch_dtype=torch.float32, )
+
+                #return  bnbops.create_4bit_transformer(self.model_path, bnb_qconfig).to(device, dtype=torch_dtype)
+                return  bnb4_transformer(self.model_path, torch_dtype, bnb_qconfig).to(device, dtype=torch_dtype)
+        
+        if not (model_path := self.quant_basedir/qtype/self.variant/'transformer/').exists():
+            model_path = self.model_path
+        
+        return load_or_quantize(model_path, qtype=qtype, module='transformer', device=device)
+    
+    @torch.inference_mode()
+    def _load_text_encoder_2(self, te2_qtype:str, device:torch.device, torch_dtype = torch.bfloat16):
+        from diffusers import DiffusionPipeline, BitsAndBytesConfig
+
+        if te2_qtype=='bf16':
+           return T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", torch_dtype=torch_dtype, low_cpu_mem_usage=True, device_map='auto')
+        
+        if te2_qtype.startswith('q'):
+            if not (model_path := self.quant_basedir/te2_qtype/'text_encoder_2/').exists():
+                model_path = self.model_path
+            return load_or_quantize(model_path, qtype=te2_qtype, module='text_encoder_2', device=device)
+
+        if te2_qtype in ['bnb4','bnb8']:
+            # leave text_encoder_2 empty in the pipe line and instead use a seperate pipeline for text encoding so that the transformer can still be offloaded
+            bnb_quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type= "nf4", bnb_4bit_compute_dtype=torch_dtype, bnb_4bit_use_double_quant=False)
+            
+            text_encoder = T5EncoderModel.from_pretrained(self.text_enc_model_id, subfolder="text_encoder_2", quantization_config=bnb_quant_config, torch_dtype=torch_dtype, low_cpu_mem_usage=True, device_map='auto')
+            self.text_pipe = DiffusionPipeline.from_pretrained(self.model_path, transformer=None, vae=None, text_encoder_2=text_encoder, torch_dtype=torch_dtype, low_cpu_mem_usage=True) 
+            return None
+
+    @torch.inference_mode()
+    def load_quant(self, qtype:typing.Literal['bnb4','qint4','qint8','qfloat8'], te2_qtype:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'], offload:bool=False,):
+        '''Try to load quantized from disk otherwise, quantize on the fly
+        
+        Args:
+            qtype: quantization type for transformer
+            te2_quant: quantization type for T5 encoder. If bf16, no quantization.
+            offload: enable model cpu off (incompatible with bnb)
+            
+        '''
+        
+        print(f'transformer quant: {qtype}, text_encoder_2 quant: {te2_qtype}')
+        
+        device = None if offload else 0 #'cuda'
+        torch_dtype = torch.bfloat16 
+        
+        
+        te_kwarg = {'text_encoder':None} if te2_qtype.startswith('bnb') else {}
+        pipe: FluxPipeline = FluxPipeline.from_pretrained(self.text_enc_model_id, transformer=None, text_encoder_2=None, **te_kwarg, torch_dtype=torch_dtype)  # 
+        # don't move to device yet, loading transformer could use a LOT of vram if quantizing
+        pipe.transformer = self._load_transformer(qtype, device, torch_dtype)
+        release_memory()
+        if pipe.text_encoder_2 is None:
+            pipe.text_encoder_2 = self._load_text_encoder_2(te2_qtype, device, torch_dtype).to(device)
+        
+        pipe.transformer = pipe.transformer.to(device)
+        release_memory()
+        
+        # Do not call pipe.to(device) more than once. It will break things
+        pipe = pipe.to(device, dtype=torch_dtype)
+        
+        
+        print('PIPE:', pipe.dtype, pipe.device)
+        print('TRANSFORMER:', pipe.transformer.dtype, pipe.transformer.device)
+        
+        if pipe.text_encoder_2 is None:
+            print('text_pipe - TEXT ENC 2:', self.text_pipe.text_encoder_2.dtype, self.text_pipe.text_encoder_2.device)
+        else:
+            print('TEXT ENC 2:', pipe.text_encoder_2.dtype, pipe.text_encoder_2.device)
+        
+        release_memory()
+        return pipe

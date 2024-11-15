@@ -1,280 +1,269 @@
 import copy
 from pathlib import Path
 
+
 import torch
 
 import peft
 import diffusers.utils as diffutils 
-from diffusers import FluxTransformer2DModel, FluxPipeline
+from diffusers import FluxTransformer2DModel, FluxPipeline, SD3Transformer2DModel
 import safetensors.torch as sft
 
-# in SD3 original implementation of AdaLayerNormContinuous, it split linear projection output into shift, scale;
-# while in diffusers it split into scale, shift. Here we swap the linear projection weights in order to be able to use diffusers implementation
-def swap_scale_shift(weight, dim=0):
-    shift, scale = weight.chunk(2, dim=dim)
-    new_weight = torch.cat([scale, shift], dim=dim)
-    return new_weight
+from tqdm.auto import tqdm
+
+from cloneus.utils.common import release_memory,read_state_dict
+from . import sdconvert
 
 
 
-class popdict(dict):
-    def pop(self, k, d=None):
-        return super().pop(k, d)
-
-# SRC: https://github.com/huggingface/diffusers/blob/main/scripts/convert_flux_to_diffusers.py
-def flux_lora_to_diffusers(original_state_dict, is_lora_up:bool, num_layers=19, num_single_layers=38, inner_dim=3072, mlp_ratio=4.0):
-    DIM = 0 if is_lora_up else 1
-    conv_sd = {}
-    original_state_dict = popdict(copy.deepcopy(original_state_dict))
+def relabel_lora(state_dict:dict[str, torch.Tensor]):
+    if isinstance(state_dict, (str,Path)):
+        state_dict = sft.load_file(state_dict)
     
-    ## time_text_embed.timestep_embedder <-  time_in
-    conv_sd["time_text_embed.timestep_embedder.linear_1.weight"] = original_state_dict.pop("time_in.in_layer.weight")
-    conv_sd["time_text_embed.timestep_embedder.linear_2.weight"] = original_state_dict.pop("time_in.out_layer.weight")
-    # conv_sd["time_text_embed.timestep_embedder.linear_1.bias"] = original_state_dict.pop("time_in.in_layer.bias")
-    # conv_sd["time_text_embed.timestep_embedder.linear_2.bias"] = original_state_dict.pop("time_in.out_layer.bias")
-
-    ## time_text_embed.text_embedder <- vector_in
-    conv_sd["time_text_embed.text_embedder.linear_1.weight"] = original_state_dict.pop("vector_in.in_layer.weight")
-    conv_sd["time_text_embed.text_embedder.linear_2.weight"] = original_state_dict.pop("vector_in.out_layer.weight")
-    # conv_sd["time_text_embed.text_embedder.linear_1.bias"] = original_state_dict.pop("vector_in.in_layer.bias")
-    # conv_sd["time_text_embed.text_embedder.linear_2.bias"] = original_state_dict.pop("vector_in.out_layer.bias")
-
-    # guidance
-    has_guidance = any("guidance" in k for k in original_state_dict)
-    if has_guidance:
-        conv_sd["time_text_embed.guidance_embedder.linear_1.weight"] = original_state_dict.pop("guidance_in.in_layer.weight")
-        conv_sd["time_text_embed.guidance_embedder.linear_2.weight"] = original_state_dict.pop("guidance_in.out_layer.weight")
-        # conv_sd["time_text_embed.guidance_embedder.linear_1.bias"] = original_state_dict.pop("guidance_in.in_layer.bias")
-        # conv_sd["time_text_embed.guidance_embedder.linear_2.bias"] = original_state_dict.pop("guidance_in.out_layer.bias")
-
-    # context_embedder
-    conv_sd["context_embedder.weight"] = original_state_dict.pop("txt_in.weight")
-    # conv_sd["context_embedder.bias"] = original_state_dict.pop("txt_in.bias")
-
-    # x_embedder
-    conv_sd["x_embedder.weight"] = original_state_dict.pop("img_in.weight")
-    # conv_sd["x_embedder.bias"] = original_state_dict.pop("img_in.bias")
-
-    # double transformer blocks
-    for i in range(num_layers):
-        block_prefix = f"transformer_blocks.{i}."
-        in_block_prefix = f"double_blocks.{i}."
-        # norms.
-        
-        ## norm1
-        conv_sd[f"{block_prefix}norm1.linear.weight"] = original_state_dict.pop(f"{in_block_prefix}img_mod.lin.weight")
-        # conv_sd[f"{block_prefix}norm1.linear.bias"] = original_state_dict.pop(f"{in_block_prefix}img_mod.lin.bias")
-        
-        ## norm1_context
-        conv_sd[f"{block_prefix}norm1_context.linear.weight"] = original_state_dict.pop(f"{in_block_prefix}txt_mod.lin.weight")
-        # conv_sd[f"{block_prefix}norm1_context.linear.bias"] = original_state_dict.pop(f"{in_block_prefix}txt_mod.lin.bias")
-        
-        # Q, K, V
-        sample_qkv = original_state_dict.pop(f"{in_block_prefix}img_attn.qkv.weight")
-        context_qkv = original_state_dict.pop(f"{in_block_prefix}txt_attn.qkv.weight")
-        
-        # sample_q_bias, sample_k_bias, sample_v_bias = torch.chunk(original_state_dict.pop(f"{in_block_prefix}img_attn.qkv.bias"), 3, dim=0)
-        # context_q_bias, context_k_bias, context_v_bias = torch.chunk(original_state_dict.pop(f"{in_block_prefix}txt_attn.qkv.bias"), 3, dim=0)
-
-        if is_lora_up:
-            if sample_qkv is not None:
-                sample_q, sample_k, sample_v = torch.chunk(sample_qkv, 3, dim=0)
-                conv_sd[f"{block_prefix}attn.to_q.weight"] = torch.cat([sample_q])
-                conv_sd[f"{block_prefix}attn.to_k.weight"] = torch.cat([sample_k])
-                conv_sd[f"{block_prefix}attn.to_v.weight"] = torch.cat([sample_v])
-                # converted_state_dict[f"{block_prefix}attn.to_q.bias"] = torch.cat([sample_q_bias])
-                # converted_state_dict[f"{block_prefix}attn.to_k.bias"] = torch.cat([sample_k_bias])
-                # converted_state_dict[f"{block_prefix}attn.to_v.bias"] = torch.cat([sample_v_bias])
-
-            
-            if context_qkv is not None:
-                context_q, context_k, context_v = torch.chunk(context_qkv, 3, dim=0)
-                conv_sd[f"{block_prefix}attn.add_q_proj.weight"] = torch.cat([context_q])
-                conv_sd[f"{block_prefix}attn.add_k_proj.weight"] = torch.cat([context_k])
-                conv_sd[f"{block_prefix}attn.add_v_proj.weight"] = torch.cat([context_v])
-                # converted_state_dict[f"{block_prefix}attn.add_q_proj.bias"] = torch.cat([context_q_bias])
-                # converted_state_dict[f"{block_prefix}attn.add_k_proj.bias"] = torch.cat([context_k_bias])
-                # converted_state_dict[f"{block_prefix}attn.add_v_proj.bias"] = torch.cat([context_v_bias])
-        else:
-            if sample_qkv is not None:
-                for k in ['q','k','v']:
-                    conv_sd[f"{block_prefix}attn.to_{k}.weight"] = sample_qkv
-            
-            if context_qkv is not None:
-                for k in ['q','k','v']:
-                    conv_sd[f"{block_prefix}attn.add_{k}_proj.weight"] = context_qkv
-        
-        # qk_norm
-        conv_sd[f"{block_prefix}attn.norm_q.weight"] = original_state_dict.pop(f"{in_block_prefix}img_attn.norm.query_norm.scale")
-        conv_sd[f"{block_prefix}attn.norm_k.weight"] = original_state_dict.pop(f"{in_block_prefix}img_attn.norm.key_norm.scale")
-        conv_sd[f"{block_prefix}attn.norm_added_q.weight"] = original_state_dict.pop(f"{in_block_prefix}txt_attn.norm.query_norm.scale")
-        conv_sd[f"{block_prefix}attn.norm_added_k.weight"] = original_state_dict.pop(f"{in_block_prefix}txt_attn.norm.key_norm.scale")
-        
-        # ff img_mlp
-        conv_sd[f"{block_prefix}ff.net.0.proj.weight"] = original_state_dict.pop(f"{in_block_prefix}img_mlp.0.weight")
-        conv_sd[f"{block_prefix}ff.net.2.weight"] = original_state_dict.pop(f"{in_block_prefix}img_mlp.2.weight")
-        conv_sd[f"{block_prefix}ff_context.net.0.proj.weight"] = original_state_dict.pop(f"{in_block_prefix}txt_mlp.0.weight")
-        conv_sd[f"{block_prefix}ff_context.net.2.weight"] = original_state_dict.pop(f"{in_block_prefix}txt_mlp.2.weight")
-        # conv_sd[f"{block_prefix}ff.net.0.proj.bias"] = original_state_dict.pop(f"{in_block_prefix}img_mlp.0.bias")
-        # conv_sd[f"{block_prefix}ff.net.2.bias"] = original_state_dict.pop(f"{in_block_prefix}img_mlp.2.bias")
-        # conv_sd[f"{block_prefix}ff_context.net.0.proj.bias"] = original_state_dict.pop(f"{in_block_prefix}txt_mlp.0.bias")
-        # conv_sd[f"{block_prefix}ff_context.net.2.bias"] = original_state_dict.pop(f"{in_block_prefix}txt_mlp.2.bias")
-        
-        # output projections.
-        conv_sd[f"{block_prefix}attn.to_out.0.weight"] = original_state_dict.pop(f"{in_block_prefix}img_attn.proj.weight")
-        conv_sd[f"{block_prefix}attn.to_add_out.weight"] = original_state_dict.pop(f"{in_block_prefix}txt_attn.proj.weight")
-        # conv_sd[f"{block_prefix}attn.to_out.0.bias"] = original_state_dict.pop(f"{in_block_prefix}img_attn.proj.bias")
-        # conv_sd[f"{block_prefix}attn.to_add_out.bias"] = original_state_dict.pop(f"{in_block_prefix}txt_attn.proj.bias")
-
-    # single transfomer blocks
-    for i in range(num_single_layers):
-        block_prefix = f"single_transformer_blocks.{i}."
-        in_block_prefix = f"single_blocks.{i}."
-        
-        # norm.linear  <- single_blocks.0.modulation.lin
-        
-        conv_sd[f"{block_prefix}norm.linear.weight"] = original_state_dict.pop(f"{in_block_prefix}modulation.lin.weight")
-        # conv_sd[f"{block_prefix}norm.linear.bias"] = original_state_dict.pop(f"{in_block_prefix}modulation.lin.bias")
-        
-        # Q, K, V, mlp
-        mlp_hidden_dim = int(inner_dim * mlp_ratio)
-        split_size = (inner_dim, inner_dim, inner_dim, mlp_hidden_dim)
-        
-        linear1 = original_state_dict.pop(f"{in_block_prefix}linear1.weight")
-        if linear1 is not None:
-            if is_lora_up:
-            
-                q, k, v, mlp = torch.split(linear1, split_size, dim=0)
-                conv_sd[f"{block_prefix}attn.to_q.weight"] = q
-                conv_sd[f"{block_prefix}attn.to_k.weight"] = k
-                conv_sd[f"{block_prefix}attn.to_v.weight"] = v
-                conv_sd[f"{block_prefix}proj_mlp.weight"] = mlp
-                # q_bias, k_bias, v_bias, mlp_bias = torch.split(original_state_dict.pop(f"{in_block_prefix}linear1.bias"), split_size, dim=0)
-                # converted_state_dict[f"{block_prefix}attn.to_q.bias"] = torch.cat([q_bias])
-                # converted_state_dict[f"{block_prefix}attn.to_k.bias"] = torch.cat([k_bias])
-                # converted_state_dict[f"{block_prefix}attn.to_v.bias"] = torch.cat([v_bias])
-                # converted_state_dict[f"{block_prefix}proj_mlp.bias"] = torch.cat([mlp_bias])
-            else:
-                for k in ['q','k','v']:
-                    conv_sd[f"{block_prefix}attn.to_{k}.weight"] = linear1
-                conv_sd[f"{block_prefix}proj_mlp.weight"] = linear1
-
-                        
-        # qk norm
-        conv_sd[f"{block_prefix}attn.norm_q.weight"] = original_state_dict.pop(f"{in_block_prefix}norm.query_norm.scale")
-        conv_sd[f"{block_prefix}attn.norm_k.weight"] = original_state_dict.pop(f"{in_block_prefix}norm.key_norm.scale")
-        
-        # output projections.
-        conv_sd[f"{block_prefix}proj_out.weight"] = original_state_dict.pop(f"{in_block_prefix}linear2.weight")
-        # conv_sd[f"{block_prefix}proj_out.bias"] = original_state_dict.pop(f"{in_block_prefix}linear2.bias")
-
-    conv_sd["proj_out.weight"] = original_state_dict.pop("final_layer.linear.weight")
-    # conv_sd["proj_out.bias"] = original_state_dict.pop("final_layer.linear.bias")
-    
-    adaLN_modulation = original_state_dict.pop("final_layer.adaLN_modulation.1.weight")
-    if adaLN_modulation is not None:
-        conv_sd["norm_out.linear.weight"] = swap_scale_shift(adaLN_modulation, dim=DIM)
-    
-    # converted_state_dict["norm_out.linear.bias"] = swap_scale_shift(original_state_dict.pop("final_layer.adaLN_modulation.1.bias"))
-
-    return conv_sd, original_state_dict
-
-
-def to_flux_sd(lora_sd):
-    key_map_up = {}
-    key_map_down = {}
-    no_split = [
-        'double_blocks',
-        'single_blocks',
-
-        'img_mlp',
-        'txt_mlp',
-
-        'img_attn',
-        'txt_attn',
-
-        'img_mod',
-        'txt_mod',
+    replacements = [
+        ('lora_down', 'lora_A'), 
+        ('lora_up', 'lora_B'), 
+        ('.diff_b', '.bias'),
     ]
+    
+    prefixes = [
+        'model.diffusion_model.',
+        'diffusion_model.',
+        'model.',
+        'transformer.',
+    ]
+    
+    for k in list(state_dict):
+        k_init = k
 
-    for key in lora_sd:
-        if key.endswith('.alpha'):
-            continue
+        for pfx in prefixes:
+            k = k.removeprefix(pfx)
+        for old_key,new_key in replacements:
+            k = k.replace(old_key, new_key)
+        
+        if k != k_init:
+            state_dict[k] = state_dict.pop(k_init)
             
-        k = key.replace('lora_unet_', '')
-        k,lora,weight_ext = k.split('.')
-        #print(k)
-        for n in no_split:
-            k = k.replace(n, n.replace('_','+'))
+    return state_dict
+
+class LoraManager():
+    '''Diffusers handles loras well enough 80% of the time. This is for the other 20%'''
+    
+    def __init__(self, lora_sd_or_path:Path|dict[str,torch.Tensor]) -> None:
+        self.grouped_lora_sd = self._group_keys(relabel_lora(lora_sd_or_path))
         
-        k = k.replace('_','.')
-        k = k.replace('+','_')
+        self.target_params = set()
         
-        if lora == 'lora_up':
-            key_map_up[key] = k + '.weight'
-        elif lora == 'lora_down':
-            key_map_down[key] = k + '.weight'
-        else:
-            print('BAD KEY', k, key)
+        self.deltas = {}
+        self.scale = None
 
-    return key_map_up, key_map_down
+    @property
+    def A(self): return self.grouped_lora_sd['A']
+    @property
+    def B(self): return self.grouped_lora_sd['B']
+    @property
+    def bias(self): return self.grouped_lora_sd['bias']
+    @property
+    def extra(self): return self.grouped_lora_sd['extra']
 
-
-
-def get_alpha_rank(state_dict:dict[str, torch.Tensor]):
-    alpha=None
-    rank=None
-    for k,v in state_dict.items():
-        if "lora_up" in k or 'lora_B' in k:
-            rank=v.shape[1]
-        if k.endswith('.alpha'):
-            alpha = v#.item()
-        if alpha is not None and rank is not None:
-            break
-    assert alpha is not None and rank is not None, 'FAILED: unable to determine alpha and rank. Did you use the unconverted state_dict?'
+    @A.setter
+    def A(self, v): 
+        self._key_check(self.grouped_lora_sd['A'], v)
+        self.grouped_lora_sd['A'] = v
+    @B.setter
+    def B(self, v): 
+        self._key_check(self.grouped_lora_sd['B'], v)
+        self.grouped_lora_sd['B'] = v
+    @bias.setter
+    def bias(self, v): 
+        self._key_check(self.grouped_lora_sd['bias'], v)
+        self.grouped_lora_sd['bias'] = v
+    @extra.setter
+    def extra(self, v): 
+        self._key_check(self.grouped_lora_sd['extra'], v)
+        self.grouped_lora_sd['extra'] = v
     
-    return alpha,rank
+    def _key_check(self, cur:dict, new:dict):
+        n_old = len(cur.keys())
+        n_new = len(new.keys())
+        if n_old != n_new:
+            raise KeyError(f'Key mismatch. New key count: {n_new} != {n_old}')
+
+    def _group_keys(self, state_dict:dict, set_target:bool=True) -> dict[str, dict[str, torch.Tensor]]:
+        sd_grouped = {'A': {}, 'B': {}, 'bias': {}, 'extra': {}}
+        
+        for k in list(state_dict):
+            if 'lora_A' in k: 
+                group_label = 'A'
+            elif 'lora_B' in k: 
+                group_label = 'B'
+            elif 'bias' in k: 
+                group_label = 'bias'
+            else: 
+                group_label = 'extra'
+                
+            key = k.replace('.lora_A.','.').replace('.lora_B.','.')
+            sd_grouped[group_label][key] = state_dict[k]
+            
+            if set_target and group_label != 'extra':
+                self.target_params.add(key)
+        
+        release_memory()
+        
+        return sd_grouped
 
 
-def convert_sd(state_dict_or_path:str|Path|dict):
-    # Some else's attempt: https://github.com/ostris/ai-toolkit/commit/99f24cfb0c8de876cf7366089298385aea0066fe
-    # lora_down = lora_A = (sm, large) = (rank, dim1) -- e.g ([2, 3072]), ([2, 12288]) 
-    # lora_up = lora_B  = (large, sm)  = (dim0, rank) -- e.g.([3074, 2]), ([12288, 2])
-    if isinstance(state_dict_or_path, dict):
-        orig_state_dict = state_dict_or_path
-    else:
-        orig_state_dict = sft.load_file(state_dict_or_path)
+
+    def group(self, state_dict:dict = None) -> dict[str, dict[str, torch.Tensor]]:
+        if state_dict is None:
+            return self.grouped_lora_sd
+        return self._group_keys(state_dict, set_target=False)
+
+    def ungroup(self, grouped_sd:dict=None, only_AB:bool = False) -> dict[str, torch.Tensor]:
+        if grouped_sd is None:
+            grouped_sd = self.grouped_lora_sd    
+        
+        sd_ungrouped = {}
+        
+        sd_ungrouped.update({k.replace('.weight', '.lora_A.weight'): v for k,v in grouped_sd['A'].items()})
+        sd_ungrouped.update({k.replace('.weight', '.lora_B.weight'): v for k,v in grouped_sd['B'].items()})
+        if only_AB:
+            return sd_ungrouped
+        
+        sd_ungrouped.update(**grouped_sd['bias'], **grouped_sd['extra'])
+        release_memory()
+        return sd_ungrouped
+        
+
+    @torch.inference_mode()
+    def get_deltas(self, dtype:torch.dtype=None):
+        if self.deltas:
+            return self.deltas
+        
+        #self.grouped_lora_sd = self._group_keys()
+        
+        if dtype is None:
+            dtype = next(iter(self.grouped_lora_sd['A'].values())).dtype
+            if dtype == torch.float32:
+                dtype = torch.bfloat16
+        
+        
+        with tqdm(self.target_params) as pbar:
+            for k in pbar:
+                pbar.set_postfix_str(k)
+                
+                if k.endswith('.bias'):
+                    self.grouped_lora_sd['bias'][k] = self.grouped_lora_sd['bias'][k].to('cpu', dtype) # * scale
+                    continue
+
+                B = self.grouped_lora_sd['B'][k].to('cuda', torch.float32)
+                A = self.grouped_lora_sd['A'][k].to('cuda', torch.float32)
+
+                try:
+                    self.deltas[k] = ((B @ A)).to('cpu', dtype)
+                except Exception as e:
+                    if B.ndim > 2 or A.ndim > 2:
+                        # https://github.com/microsoft/LoRA/blob/main/loralib/layers.py#L255
+                        # (A.T @ B.T).T) 
+                        self.deltas[k] = ((B.flatten(1,) @ A.flatten(1,)).view(*B.shape[:2], *A.shape[2:])).to('cpu', dtype)
+                    else:
+                        print('Failed:',k,'\n',e)
+
+        release_memory()
+        return self.deltas
+
+    @torch.inference_mode()
+    def merge_lora(self, original_state_dict:dict[str, torch.Tensor], scale=1.0):
+        #self.lora_state_dict = self.grouped()
+        self.scale = scale
+
+        if not self.deltas:
+            dtype = next(iter(original_state_dict.values())).dtype
+            self.deltas = self.get_deltas(dtype)
+        
+        
+        for k in tqdm(list(self.deltas)):
+            original_state_dict[k] += self.deltas[k] * scale
+
+
+        for k in tqdm(list(self.grouped_lora_sd['bias'])):
+            original_state_dict[k] += self.grouped_lora_sd['bias'][k] #*scale
+        
+        return original_state_dict
     
-    alpha,rank = get_alpha_rank(orig_state_dict)
+    @torch.inference_mode()
+    def unmerge_lora(self, merged_state_dict:dict[str, torch.Tensor]):
+        if self.scale is None:
+            raise ValueError('merge never called, cannot unmerge')
+        
+        #self.lora_state_dict = self.grouped()
+        
+        for k in tqdm(list(self.deltas)):
+            merged_state_dict[k] -= self.deltas[k] * self.scale
+
+
+        for k in tqdm(list(self.grouped_lora_sd['bias'])):
+            merged_state_dict[k] -= self.grouped_lora_sd['bias'][k] #*scale
+        
+        self.scale = 0.0
+        return merged_state_dict
     
-    # scaling should only be applied to either up or down since W+B@A would square otherwise
-    # To apply to all, take sqrt first # torch.sqrt(w_scale)
-    w_scale = alpha/rank
-    print(f'LoRa weight multiplier: {w_scale}')
-
-    keymap_up,keymap_down = to_flux_sd(orig_state_dict)
-
-    up_weights = {keymap_up[k]: orig_state_dict[k] for k in keymap_up if not k.endswith('.alpha')}
-    down_weights = {keymap_down[k]: orig_state_dict[k] for k in keymap_down if not k.endswith('.alpha')}
-
-    conv_up_w, up_unused = flux_lora_to_diffusers(up_weights, True)
-    conv_down_w, down_unused = flux_lora_to_diffusers(down_weights, False)
-
-    lora_B_weights = {k.replace('.weight','.lora_B.weight') : v*w_scale for k,v in conv_up_w.items() if v is not None}
-    lora_A_weights = {k.replace('.weight','.lora_A.weight') : v for k,v in conv_down_w.items() if v is not None}
+    def rescale_merged(self, merged_state_dict:dict[str, torch.Tensor], new_scale:float, previous_scale:float=None):
+        if self.scale is None:
+            raise ValueError('merge never called, cannot rescale')
+        
+        if previous_scale is None:
+            previous_scale = self.scale
+        
+        for k in tqdm(list(self.deltas)):
+            merged_state_dict[k] += self.deltas[k]*(new_scale-previous_scale)
+            # merged_state_dict[k] += -previous_scale*self.deltas[k] + new_scale*self.deltas[k]
+        
+        self.scale = new_scale
+        return merged_state_dict
     
-    converted_lora_sd = {**lora_A_weights, **lora_B_weights}
-    converted_sd = {k: v for k,v in converted_lora_sd.items()}
 
-    return converted_sd, (up_unused, down_unused)
+def convert_sd3_lora(lora_sd_or_path:Path|dict[str,torch.Tensor], dtype=torch.float16, bias=False):
+    base_id = 'stabilityai/stable-diffusion-3.5-large'
+    lora = LoraManager(lora_sd_or_path)
+    
+    lora.A = sdconvert.sd3_to_diffusers(lora.A, dtype=dtype, allow_missing=True, is_lora_A=True, base_model_id=base_id)[0]
+    lora.B = sdconvert.sd3_to_diffusers(lora.B, dtype=dtype, allow_missing=True, is_lora_A=False, base_model_id=base_id)[0]
+    
+    if bias:
+        lora.bias = sdconvert.sd3_to_diffusers(lora.bias, dtype=dtype, allow_missing=True, base_model_id=base_id)[0]
+        
+    return lora.ungroup(only_AB=(not bias))
+
+def convert_flux_lora(lora_sd_or_path:Path|dict[str,torch.Tensor], dtype=torch.bfloat16, bias=False):
+    base_id = 'black-forest-labs/FLUX.1-dev'
+    lora = LoraManager(lora_sd_or_path)
+    
+    lora.A = sdconvert.flux_to_diffusers(lora.A, dtype=dtype, allow_missing=True, is_lora_A=True, base_model_id=base_id)[0]
+    lora.B = sdconvert.flux_to_diffusers(lora.B, dtype=dtype, allow_missing=True, is_lora_A=False, base_model_id=base_id)[0]
+    
+    if bias:
+        lora.bias = sdconvert.flux_to_diffusers(lora.bias, dtype=dtype, allow_missing=True, base_model_id=base_id)[0]
+        
+    return lora.ungroup(only_AB=(not bias))
 
 
-def manual_lora(converted_state_dict:dict[str, torch.Tensor], transformer:FluxTransformer2DModel, adapter_name:str|None=None):
-    #diffutils.convert_all_state_dict_to_peft(converted_state_dict)
-    rank = {k: v.shape[1] for k,v in converted_state_dict.items() if "lora_B" in k}
-    lora_config_kwargs = diffutils.get_peft_kwargs(rank, network_alpha_dict=None, peft_state_dict=converted_state_dict)
+def lora_to_config(lora_state_dict:dict):
+    rank = {k: v.shape[1] for k,v in lora_state_dict.items() if "lora_B" in k}
+    if not rank:
+        if any("lora_up" in k for k in lora_state_dict):
+            raise ValueError('LoRA not in diffusers format. Conversion required.')
+        raise KeyError('State dict does not appear to be LoRA or is using non-standard format.')
+    lora_config_kwargs = diffutils.get_peft_kwargs(rank, network_alpha_dict=None, peft_state_dict=lora_state_dict)
     #lora_config_kwargs.pop('use_dora')
     lora_config = peft.LoraConfig(**lora_config_kwargs)
+    return lora_config
+
+@torch.inference_mode()
+def flux_inject_lora(lora_sd_or_path:dict[str, torch.Tensor]|Path, transformer:FluxTransformer2DModel, adapter_name:str|None=None):
+    #diffutils.convert_all_state_dict_to_peft(converted_state_dict)
+    converted_state_dict = FluxPipeline.lora_state_dict(lora_sd_or_path)
+    lora_config = lora_to_config(converted_state_dict)
 
     if adapter_name is None:
         adapter_name = diffutils.get_adapter_name(transformer)
@@ -284,43 +273,23 @@ def manual_lora(converted_state_dict:dict[str, torch.Tensor], transformer:FluxTr
     
     return transformer, incompatible_keys
 
-def get_lora_state_dict(state_dict:dict|Path):
-    if isinstance(state_dict, (str,Path)):
-        state_dict = sft.load_file(state_dict)
-    
-    k1 = list(state_dict.keys())[0]
-    
-    if any(k1.endswith(ext) for ext in ['.lora_B.weight', '.lora_A.weight']):
-        converted_state_dict = state_dict
-    else:
-        converted_state_dict, (unused_up,unused_down) = convert_sd(state_dict,)
-        if (unused_keys := sorted(list(unused_up.keys())+list(unused_down.keys()))):
-            print(f'WARNING: failed to convert some keys to Diffusers format:\n{unused_keys}')
-    
-    return converted_state_dict
 
-def set_lora_transformer(pipe:FluxPipeline, state_dict:dict, adapter_name:str|None=None):
-    if isinstance(state_dict, (str,Path)):
-        state_dict = sft.load_file(state_dict)
+@torch.inference_mode()
+def state_dict_merge_lora(lora_sd_path:str, model_id="black-forest-labs/FLUX.1-dev", scale = 0.125, strip_prefix = 'transformer.'):
     
-    k1 = list(state_dict.keys())[0]
+    lora_sd = {k.removeprefix(strip_prefix): v.to('cuda') for k,v in read_state_dict(lora_sd_path).items()}
     
-    if any(k1.endswith(ext) for ext in ['.lora_B.weight', '.lora_A.weight']):
-        converted_state_dict = state_dict
-    else:
-        converted_state_dict, (unused_up,unused_down) = convert_sd(state_dict,)
-        if (unused_keys := sorted(list(unused_up.keys())+list(unused_down.keys()))):
-            print(f'WARNING: failed to convert some keys to Diffusers format:\n{unused_keys}')
+    lora_config = lora_to_config(lora_sd)
+    target_modules = set([t.removeprefix(strip_prefix) for t in lora_config.target_modules])
     
-    if adapter_name is not None:
-        transformer_adapters = pipe.get_list_adapters().get('transformer',[])
-        if adapter_name in transformer_adapters:
-            print('removing adapters', adapter_name)
-            pipe.delete_adapters(adapter_name)
-    else:
-        old_adapters = pipe.get_active_adapters()
-        print('removing adapters',old_adapters)
-        pipe.delete_adapters(old_adapters)
+    model_sd = read_state_dict(model_id, subfolder='transformer')
     
-    pipe.transformer, incompat_keys = manual_lora(converted_state_dict, pipe.transformer, adapter_name)
-    print(pipe.get_active_adapters())
+    # cpu -> cuda -> cpu cuts time in half vs all cpu
+    for k in target_modules:
+        p = model_sd[k+'.weight'].to('cuda')
+        p += (lora_sd[k+'.lora_B.weight'] @ lora_sd[k+'.lora_A.weight'] )*scale
+        model_sd[k+'.weight'] = p.to('cpu')
+        
+    del lora_sd
+    release_memory()
+    return model_sd
