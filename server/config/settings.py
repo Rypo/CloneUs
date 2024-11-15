@@ -198,7 +198,14 @@ class MaxSeverityFilter(logging.Filter):
         self.max_level = max_level
 
     def filter(self, record):
-        return super().filter(record) and record.levelno <= self.max_level
+        #return super().filter(record) and record.levelno <= self.max_level
+        return record.levelno <= self.max_level
+
+class UnderErrorFilter(logging.Filter):
+    MAX_LEVEL=logging.WARNING
+    def filter(self, record):
+        #return super().filter(record) and record.levelno <= self.max_level
+        return record.levelno <= self.MAX_LEVEL
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -224,7 +231,7 @@ LOGGING_CONFIG = {
     },
     "filters": {
         "warnings_and_below": {
-            "()" : lambda: MaxSeverityFilter('server', logging.WARNING),
+            "()" : UnderErrorFilter #lambda: MaxSeverityFilter('server', logging.WARNING),
         },
     },
     "handlers": {
@@ -259,7 +266,7 @@ LOGGING_CONFIG = {
         "errfile": {
             "level": "ERROR",
             "class": "logging.FileHandler",
-            "filename": str(LOGS_DIR/"errors.log"),
+            "filename": LOGS_DIR/"errors.log",
             "mode": "w",
             "formatter": "verbose",
         },
@@ -281,7 +288,7 @@ LOGGING_CONFIG = {
         },
     },
     "loggers": {
-       
+        "bot": {"handlers": ["color_console"], "level": "INFO", "propagate": False},
         "server": {"handlers": ["errfile","routefile"], "level": "INFO", "propagate": False},
 
         "pconsole": {"handlers": (["color_console"] if DISCORD_SESSION_INTERACTIVE else ["plain_console"]), # , 

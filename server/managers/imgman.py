@@ -12,18 +12,12 @@ from cloneus.plugins.vision import pipelines
 from cloneus.plugins.vision.pipelines import DiffusionConfig, CfgItem
 
 
-import config.settings as settings
 from utils.globthread import wrap_async_executor, stop_global_executors
 
-bot_logger = settings.logging.getLogger('bot')
-model_logger = settings.logging.getLogger('model')
-cmds_logger = settings.logging.getLogger('cmds')
-event_logger = settings.logging.getLogger('event')
 
 # Resource: https://github.com/CyberTimon/Stable-Diffusion-Discord-Bot/blob/main/bot.py
 
-IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
-PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
+
 #SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
 # other: [(1280, 768),(768, 1280),]
 
@@ -56,19 +50,21 @@ class ImageGenManager:#(pipelines.SingleStagePipeline):
             setattr(self, meth, wrap_async_executor(func, use_alternate_executor=True))
 
 class BaseFluxManager(ImageGenManager, pipelines.FluxBase):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, dict] = None, 
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, 
                 qtype = 'bnb4', te2_qtype = 'bf16', quant_basedir = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, qtype=qtype, te2_qtype=te2_qtype, quant_basedir=quant_basedir)
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, qtype=qtype, te2_qtype=te2_qtype, quant_basedir=quant_basedir)
         
 class BaseSDXLManager(ImageGenManager, pipelines.SDXLBase):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, dict] = None,):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup)   
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype)   
 
 class BaseSD3Manager(ImageGenManager, pipelines.SD3Base):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, dict] = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup)   
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16,
+                 quantize:bool = True):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, quantize=quantize)   
 
-    
+
+
 class SDXLTurboManager(BaseSDXLManager):
     def __init__(self, offload=False):
         super().__init__(
@@ -88,20 +84,6 @@ class SDXLTurboManager(BaseSDXLManager):
         pass
 
 
-class SD3MediumManager(BaseSD3Manager):
-    def __init__(self, offload=False):
-        super().__init__(
-            model_name = 'sd3_medium',
-            model_path = 'stabilityai/stable-diffusion-3-medium-diffusers',
-            config = DiffusionConfig(
-                steps = CfgItem(28, bounds=(24,42)),
-                guidance_scale = CfgItem(7.0, bounds=(5,10)), 
-                strength = CfgItem(0.65, bounds=(0.3, 0.95)),
-                img_dims = [(1024,1024), (832,1216), (1216,832)],
-                locked=[  'refine_guidance_scale']
-            ),
-            offload=offload,
-        )
     
 class ColorfulXLLightningManager(BaseSDXLManager):
     def __init__(self, offload=False):
@@ -119,12 +101,10 @@ class ColorfulXLLightningManager(BaseSDXLManager):
                 locked = [ 'refine_guidance_scale']
             ),
             offload=offload,
-            scheduler_setup = ('Euler A', {'timestep_spacing': "trailing"}),
+            scheduler_setup = ('Euler A', 'sgm_uniform'), # {'timestep_spacing': "trailing"}
             
         )
      
-# https://civitai.com/models/119229/zavychromaxl
-
 class JuggernautXIManager(BaseSDXLManager):
     def __init__(self, offload=False):
         super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XI-v11
@@ -146,29 +126,6 @@ class JuggernautXIManager(BaseSDXLManager):
             
         )
 
-class RealVizXL5Manager(BaseSDXLManager):
-    def __init__(self, offload=False):
-        super().__init__( # https://huggingface.co/SG161222/RealVisXL_V5.0
-            model_name = 'realvisxl_v5', # https://civitai.com/models/139562?modelVersionId=789646
-            model_path = 'https://huggingface.co/SG161222/RealVisXL_V5.0/blob/main/RealVisXL_V5.0_fp16.safetensors', #'SG161222/RealVisXL_V5.0',  
-            
-            config = DiffusionConfig(
-                steps = CfgItem(30, bounds=(20,50)), 
-                guidance_scale = CfgItem(5, bounds=(3,10)),
-                strength = CfgItem(0.60, bounds=(0.3, 0.95)),
-                #negative_prompt='bad hands, bad anatomy, ugly, deformed, (face asymmetry, eyes asymmetry, deformed eyes, deformed mouth, open mouth)',
-                negative_prompt='(bad hands, bad anatomy, deformed eyes, deformed mouth)+',
-                img_dims = [(1024,1024), (896,1152), (1152,896)],
-                aspect='portrait',
-                clip_skip=1, # 2
-                locked = ['refine_guidance_scale']
-            ),
-            offload=offload,
-            scheduler_setup=('DPM++ 2M SDE')#, {'lower_order_final':True})
-            #scheduler_setup=('Euler A', {'timestep_spacing': "trailing"}),
-            #scheduler_setup='Euler A',
-            
-        )
 
 class FluxSchnellManager(BaseFluxManager):
     def __init__(self, offload=False):
@@ -239,35 +196,96 @@ class FluxSchnevManager(BaseFluxManager):
             te2_qtype = 'bf16',
             quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
         )
+class FluxHyperManager(BaseFluxManager):
+    def __init__(self, offload=False):
+        super().__init__(
+            model_name = 'flux_hyper',
+            # model_path = cpaths.ROOT_DIR / 'extras/models/flux/flux-merged',
+            model_path = 'black-forest-labs/FLUX.1-dev',
+            config = DiffusionConfig(
+                steps = CfgItem(8, bounds=(4,16)),
+                guidance_scale = CfgItem(3.5, bounds=(0,5)), 
+                strength = CfgItem(0.70, bounds=(0.6, 0.9)),
+                #img_dims = [(1024,1024), (832,1216), (1216,832)],
+                img_dims = [(1024,1024), (896,1152), (1152,896)],
+                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
+                #refine_steps=CfgItem(0, locked=True),
+                #refine_strength=CfgItem(0, locked=True),
+                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
+            ),
+            offload=offload,
+            #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
+            qtype = 'bnb4',
+            te2_qtype = 'bf16',
+            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
+        )
 
+class PixelWaveManager(BaseFluxManager):
+    def __init__(self, offload=False):
+        super().__init__(
+            model_name = 'flux_pixelwave',
+            model_path = cpaths.ROOT_DIR / 'extras/models/flux/pixelwave_nf4/',
+            
+            config = DiffusionConfig(
+                steps = CfgItem(20, bounds=(25,60)),
+                guidance_scale = CfgItem(3.5, bounds=(1,5)), 
+                strength = CfgItem(0.75, bounds=(0.6, 0.95)),#CfgItem(0.65, bounds=(0.3, 0.95)),
+                #img_dims = [(1024,1024), (832,1216), (1216,832)],
+                img_dims = [(1024,1024), (896,1152), (1152,896)],
+                #refine_strength=CfgItem(0, locked=True),
+                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
+            ),
+            offload=offload,
+            #scheduler_setup='Euler',
+            qtype = 'bnb4',
+            te2_qtype = 'bf16',
+            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
+        )
 
+class SD35LargeManager(BaseSD3Manager):
+    def __init__(self, offload=False):
+        super().__init__(
+            model_name = 'sd35_large',
+            model_path = 'stabilityai/stable-diffusion-3.5-large',
+            config = DiffusionConfig(
+                steps = CfgItem(30, bounds=(20,50)),
+                guidance_scale = CfgItem(4.5, bounds=(3,5)), 
+                strength = CfgItem(0.55, bounds=(0.3, 0.95)),
+                img_dims = [(1024,1024), (720,1280), (1280,720)], # (832,1216), (1216,832)
+                locked=['refine_guidance_scale']
+            ),
+            offload=offload,
+            quantize=True,
+        )
 
-
+class SD35MediumManager(BaseSD3Manager):
+    def __init__(self, offload=False):
+        super().__init__(
+            model_name = 'sd35_medium',
+            model_path = 'stabilityai/stable-diffusion-3.5-medium',
+            config = DiffusionConfig(
+                steps = CfgItem(30, bounds=(20,50)),
+                guidance_scale = CfgItem(4.5, bounds=(3,5)), 
+                strength = CfgItem(0.55, bounds=(0.3, 0.95)),
+                img_dims = [(1024,1024), (768,1280), (1280,768)], # (832,1216), (1216,832)
+                locked=['refine_guidance_scale']
+            ),
+            offload=offload,
+            quantize=False,
+        )
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
         'manager': SDXLTurboManager,
         'desc': 'Turbo SDXL' # (Sm, fast)
     },
-    'sd3_medium': {
-        'manager': SD3MediumManager,
-        'desc': 'SD3 Medium' #  (Lg, slow)
-    },
     'colorfulxl_lightning': {
         'manager': ColorfulXLLightningManager,
         'desc': 'ColorfulXL Lightning' # (M, fast)
     },
-    # 'flux_schnell': {
-    #     'manager': FluxSchnellManager,
-    #     'desc': 'Flux Schnell' # (XLg, avg)
-    # },
     'juggernaut_xi': {
         'manager': JuggernautXIManager,
         'desc': 'Juggernaut XI' # (M, avg)
-    },
-    'realvisxl_v5': {
-        'manager': RealVizXL5Manager,
-        'desc': 'RealVisXL V5' # (M, avg)
     },
     'flux_dev': {
         'manager': FluxDevManager,
@@ -277,7 +295,23 @@ AVAILABLE_MODELS = {
         'manager': FluxSchnevManager,
         'desc': 'Flux Schnev' # (XLg, avg)
     },
+    # https://huggingface.co/mikeyandfriends/PixelWave_FLUX.1-dev_03/blob/main/pixelwave_flux1_dev_nf4_03.safetensors
+    # 'flux_hyper': {
+    #     'manager': FluxHyperManager,
+    #     'desc': 'Flux Hyper' # (XLg, avg)
+    # },
+    'flux_pixelwave': {
+        'manager': PixelWaveManager,
+        'desc': 'PixelWave (Flux)' # (XLg, avg)
+    },
+    'sd35_large': {
+        'manager': SD35LargeManager,
+        'desc': 'Stable Diffusion 3.5 Large' #  (Lg, slow)
+    },
 
-
+    'sd35_medium': {
+        'manager': SD35MediumManager,
+        'desc': 'Stable Diffusion 3.5 Medium' #  (Lg, slow)
+    },
 }
 
