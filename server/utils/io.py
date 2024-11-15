@@ -1,4 +1,5 @@
 import re
+import ast
 import typing
 import datetime
 import subprocess
@@ -147,3 +148,41 @@ def tail(f:str|Path, n:int, offset:int=0):
     
     end = -offset if offset else None
     return out.stdout.splitlines()[:end]
+
+
+
+def _resub_parse_flags(match:re.Match):    
+    flags = match.group(1).strip('><').split()
+    flag_cls_name = flags.pop(0)
+    
+    return str({k:ast.literal_eval(v) for k,v in [x.split('=') for x in flags]})
+
+def parse_log_entry(log_entry:str):
+    # todo: unslop the ai regex
+    pattern = re.compile(
+        r"INFO\s+\[(?P<datetime>[^\]]+)\]\s+cmds\s+:\s+\((?P<logging_func>[^,]+)"
+        r"(?:,\s*(?P<cog_name>[^)]+))?\)-\s+\[(?P<status>[A-Z]+)\]\s+(?P<user_display_name>\w+)"
+        r"\((?P<username>\w+)\)\s+command\s+\"(?P<cmd_call>[^\" ]+)\s+\((?P<cmd_name>[^)]+)\)\"\s+args:(?P<args>.*)", re.I
+    )
+    flags_pattern = re.compile(r'''(?<=['"]flags['"]: )(<[^>]+>)''', re.I)
+    
+    match = pattern.match(log_entry)
+    if not match:
+        return
+    
+    data = match.groupdict()
+    
+    # parse special flags obj into standard str(dict)
+    args_str = flags_pattern.sub(_resub_parse_flags, data.pop('args').strip())
+    
+    try:
+        cmd_args, cmd_kwargs = ast.literal_eval(args_str)
+    except (SyntaxError, ValueError):
+        cmd_args, cmd_kwargs = [], {}
+    
+    # Add parsed arguments back into data
+    data['cmd_args'] = cmd_args
+    data['cmd_kwargs'] = cmd_kwargs
+    
+    data['raw'] = log_entry
+    return data
