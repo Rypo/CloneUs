@@ -33,10 +33,10 @@ from PIL import Image, ImageDraw, ImageFont
 from spandrel import ImageModelDescriptor, ModelLoader
 
 
-from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 from cloneus import cpaths
-from cloneus.plugins.vision.qwen_vl_utils import process_vision_info
+# from cloneus.plugins.vision.qwen_vl_utils import process_vision_info
+from .qwen_vl_utils import process_vision_info
 
 def fig_to_np(fig:mpf.Figure):
     with io.BytesIO() as buff:
@@ -223,6 +223,7 @@ class SAMPlot:
 
 class SAM2:
     def __init__(self, torch_dtype = torch.bfloat16, device="cuda:0", offload:bool=True, image:Image.Image = None) -> None:
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
         # https://github.com/facebookresearch/segment-anything-2/blob/main/notebooks/image_predictor_example.ipynb
         self.torch_dtype = torch_dtype
         self.device = device
