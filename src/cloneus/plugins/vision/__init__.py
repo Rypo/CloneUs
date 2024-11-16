@@ -2,11 +2,12 @@ __all__ = [
     'fluxpatch',
     'interpolation',
     'loraops',
-    'lpw_sdxl'
+    'lpw_sdxl',
     'pipelines',
     'quantops',
     'qwen_vl_utils',
-    'sdconvert'
+    'sdconvert',
     'specialists',
 ]
+
 from . import *
