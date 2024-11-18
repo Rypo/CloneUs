@@ -8,6 +8,8 @@ import peft
 import diffusers.utils as diffutils 
 from diffusers import FluxTransformer2DModel, FluxPipeline, SD3Transformer2DModel
 import safetensors.torch as sft
+from safetensors import safe_open
+from huggingface_hub import snapshot_download
 
 from tqdm.auto import tqdm
 
@@ -275,21 +277,145 @@ def flux_inject_lora(lora_sd_or_path:dict[str, torch.Tensor]|Path, transformer:F
 
 
 @torch.inference_mode()
-def state_dict_merge_lora(lora_sd_path:str, model_id="black-forest-labs/FLUX.1-dev", scale = 0.125, strip_prefix = 'transformer.'):
+def state_dict_merge_lora(lora_sd_path:str, model_idpath_sd:str|Path|dict="black-forest-labs/FLUX.1-dev", scale = 0.125, strip_prefix = 'transformer.'):
     
-    lora_sd = {k.removeprefix(strip_prefix): v.to('cuda') for k,v in read_state_dict(lora_sd_path).items()}
+    lora_sd = {k.removeprefix(strip_prefix): v.to(torch.float32) for k,v in read_state_dict(lora_sd_path, device=0).items()}
     
     lora_config = lora_to_config(lora_sd)
     target_modules = set([t.removeprefix(strip_prefix) for t in lora_config.target_modules])
     
-    model_sd = read_state_dict(model_id, subfolder='transformer')
+    if isinstance(model_idpath_sd, dict):
+        model_sd = model_idpath_sd
+    else:
+        model_sd = read_state_dict(model_idpath_sd, subfolder='transformer')
     
     # cpu -> cuda -> cpu cuts time in half vs all cpu
-    for k in target_modules:
-        p = model_sd[k+'.weight'].to('cuda')
-        p += (lora_sd[k+'.lora_B.weight'] @ lora_sd[k+'.lora_A.weight'] )*scale
-        model_sd[k+'.weight'] = p.to('cpu')
+    for k in tqdm(target_modules):
+        p = model_sd.pop(k+'.weight').to(0, torch.float32)
+        p += ((lora_sd.pop(k+'.lora_B.weight') @ lora_sd.pop(k+'.lora_A.weight'))*scale)
+        model_sd[k+'.weight'] = p.to('cpu', torch.bfloat16)
         
     del lora_sd
     release_memory()
     return model_sd
+
+
+
+
+@torch.inference_mode()
+def svd_extract(value_o:torch.Tensor, value_t:torch.Tensor, lora_r:int = 256, clamp_quantile:float=0.99):#, save_dtype:torch.dtype=torch.bfloat16, store_device='cpu',):
+    # calculate tensor difference
+    mat = value_t - value_o
+    #del value_o, value_t
+
+    # extract LoRA weights
+    out_dim, in_dim = mat.size()[0:2]
+    rank = min(lora_r, in_dim, out_dim)  # LoRA rank cannot exceed the original dim
+
+    mat = mat.squeeze()
+    
+    U, S, Vh = torch.linalg.svd(mat)
+
+    U:torch.Tensor = U[:, :rank]
+    S:torch.Tensor = S[:rank]
+    U = U @ torch.diag(S)
+
+    Vh:torch.Tensor = Vh[:rank, :]
+
+    dist = torch.cat([U.flatten(), Vh.flatten()])
+    hi_val = torch.quantile(dist, clamp_quantile)
+    low_val = -hi_val
+
+    U = U.clamp(low_val, hi_val)
+    Vh = Vh.clamp(low_val, hi_val)
+
+    #del mat, S
+    return U, Vh
+
+# https://github.com/kijai/ComfyUI-FluxTrainer/blob/971e1cf553d7b282d514c9e9db9f923903f58add/flux_extract_lora.py#L4
+def svd_extract_flux_lora(
+    base_model_id="black-forest-labs/FLUX.1-dev",
+    tuned_sd_filepath:str=None,
+    out_filepath:str|Path=None,
+    lora_r:int=256,
+    include_keys = ("single_transformer_blocks", "transformer_blocks", ),
+    exclude_keys = (".bias", "norm",),
+    device=0,
+    store_device='cpu',
+    store_dtype=torch.bfloat16,
+    clamp_quantile=0.99,
+    min_diff=0.01,
+    # no_metadata=False,
+    # mem_eff_safe_open=False,
+):
+    str_to_dtype = {"float": torch.float, "fp16": torch.float16, "bf16": torch.bfloat16}
+
+    calc_dtype = torch.float
+    #save_dtype = str_to_dtype.get(store_dype, None)
+
+    # open models
+    lora_weights = {}
+
+    # use original safetensors.safe_open
+    #open_fn = lambda fn: safe_open(fn, framework="pt")
+    base_weights = Path(snapshot_download(repo_id=base_model_id, allow_patterns=f"transformer/*", local_files_only=True)).joinpath("transformer")
+
+        
+    with (safe_open(tuned_sd_filepath, framework="pt", device=device) as ft, tqdm(total=0) as pbar):
+        targ_keys = [k for k in ft.keys() if any(include_key in k for include_key in include_keys) and not any(exclude_key in k for exclude_key in exclude_keys)]
+        pbar.total = len(targ_keys)
+        for shard in base_weights.glob('*.safetensors'):
+            
+            with safe_open(shard, framework="pt", device=device) as fo:
+                # filter keys
+                keys = []
+                for key in fo.keys():
+                    # if not ("single_block" in key or "double_block" in key):
+                    if not any(include_key in key for include_key in include_keys):
+                        continue
+                    if any(exclude_key in key for exclude_key in exclude_keys):
+                        continue
+
+                    keys.append(key)
+            
+                #pbar.total += len(keys)
+                for key in tqdm(keys):
+                    # get tensors and calculate difference
+                    value_o = fo.get_tensor(key).to(calc_dtype)
+                    value_t = ft.get_tensor(key).to(calc_dtype)
+                    
+                    U,Vh = svd_extract(value_o, value_t, lora_r=lora_r, clamp_quantile=clamp_quantile)#, save_dtype=save_dtype, store_device=store_device)
+
+                    pbar.set_postfix({"key": key, "U": U.size(), "Vh": Vh.size()})
+                    pbar.update(1)
+                    lora_weights[key] = (U.to(store_device, dtype=store_dtype).contiguous(), Vh.to(store_device, dtype=store_dtype).contiguous())
+                    #lora_weights[key] = (U.to(store_device).contiguous(), Vh.to(store_device).contiguous())
+                    del U, Vh, value_o, value_t
+                    #del mat, U, S, Vh
+
+    # make state dict for LoRA
+    lora_sd = {}
+    for key, (up_weight, down_weight) in lora_weights.items():
+        lora_name = key.replace(".weight", "")#.replace(".", "_")
+        # lora_name = lora_flux.LoRANetwork.LORA_PREFIX_FLUX + "_" + lora_name
+        lora_sd[lora_name + ".lora_B.weight"] = up_weight
+        lora_sd[lora_name + ".lora_A.weight"] = down_weight
+        #lora_sd[lora_name + ".alpha"] = torch.tensor(down_weight.size()[0])  # same as rank
+
+    # minimum metadata
+    # net_kwargs = {}
+    metadata = {
+        "lora_r": str(lora_r),
+        #"ss_v2": str(False),
+        # "ss_base_model_version": flux_utils.MODEL_VERSION_FLUX_V1,
+        #"ss_network_module": "networks.lora_flux",
+        #"ss_network_dim": str(lora_r),
+        #"ss_network_alpha": str(float(lora_r)),
+        # "ss_network_args": json.dumps(net_kwargs),
+    }
+
+    
+    sft.save_file(lora_sd, out_filepath, metadata=metadata)
+    del lora_weights, lora_sd
+    #logger.info(f"LoRA weights saved to {save_to}")
+    return out_filepath
