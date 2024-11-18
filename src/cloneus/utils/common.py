@@ -36,12 +36,12 @@ def batched(iterable, n:int):
         yield batch
 
 
-def read_state_dict(model_id_or_path:str|Path, subfolder:str|None=None, local_files_only:bool = False, allow_empty:bool = False,) -> dict[str, torch.Tensor]:
+def read_state_dict(model_id_or_path:str|Path, subfolder:str|None=None, local_files_only:bool = False, allow_empty:bool = False, device:str|int='cpu') -> dict[str, torch.Tensor]:
     '''Read sharded safetensors files into a unified state dict from a remote HF repo or local filepath'''
     
     if (model_path := Path(model_id_or_path)).exists():
         if model_path.is_file():
-            return sft.load_file(model_path)
+            return sft.load_file(model_path, device)
         
         weights_loc = model_path
         
@@ -53,7 +53,7 @@ def read_state_dict(model_id_or_path:str|Path, subfolder:str|None=None, local_fi
     
     state_dict = {}
     for shard in sorted(Path(weights_loc).glob('*.safetensors')):
-        state_dict.update(sft.load_file(shard))
+        state_dict.update(sft.load_file(shard, device))
 
     if not state_dict and not allow_empty:
         raise RuntimeError('Failed to read state dict data from given path')
