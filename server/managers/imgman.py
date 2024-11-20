@@ -203,7 +203,7 @@ class FluxHyperManager(BaseFluxManager):
             # model_path = cpaths.ROOT_DIR / 'extras/models/flux/flux-merged',
             model_path = 'black-forest-labs/FLUX.1-dev',
             config = DiffusionConfig(
-                steps = CfgItem(8, bounds=(4,16)),
+                steps = CfgItem(16, bounds=(10,24)),
                 guidance_scale = CfgItem(3.5, bounds=(0,5)), 
                 strength = CfgItem(0.70, bounds=(0.6, 0.9)),
                 #img_dims = [(1024,1024), (832,1216), (1216,832)],

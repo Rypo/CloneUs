@@ -112,7 +112,9 @@ def manual_4bit_model(meta_model:FluxTransformer2DModel|SD3Transformer2DModel, c
 def flux_hyper_transformer_4bit(model_id="black-forest-labs/FLUX.1-dev", scale=0.125, dtype=torch.bfloat16, bnb_qconfig=None):
     transformer = meta_transformer('flux_dev', dtype)
     
-    hyper_path = hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors")
+    
+    # hyper_path = hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors")
+    hyper_path = hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-16steps-lora.safetensors")
     merged_state_dict = loraops.state_dict_merge_lora(hyper_path, model_id, scale)
     if bnb_qconfig is None:
         bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=torch.bfloat16, )
@@ -123,25 +125,6 @@ def flux_hyper_transformer_4bit(model_id="black-forest-labs/FLUX.1-dev", scale=0
     
     return transformer
     
-
-# @torch.inference_mode()
-# def load_flux_hyper(model_path:str="black-forest-labs/FLUX.1-dev", offload=False):    
-#     #qconfig = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype=torch.bfloat16, ) # bnb_4bit_compute_dtype='bf16', 
-#     #transformer: FluxTransformer2DModel = FluxTransformer2DModel.from_pretrained(model_path, subfolder="transformer", quantization_config = qconfig, torch_dtype=torch.bfloat16)
-#     device = torch.device('cuda')
-#     transformer = flux_hyper_transformer_4bit(model_path, scale=0.125).to(device, dtype=torch.bfloat16)
-#     pipe: FluxPipeline = FluxPipeline.from_pretrained(model_path, transformer=transformer, torch_dtype=torch.bfloat16,)
-
-#     #pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"))
-    
-#     # this does not work as of diffusers 0.31.0
-#     #pipe.fuse_lora(lora_scale=0.125)#, components=["transformer"])
-#     #pipe.to('cuda', torch_dtype=torch.bfloat16)
-#     #pipe.unload_lora_weights()
-    
-    
-    
-#     return pipe
 
 @torch.inference_mode()
 def _replace_with_bnb_linear(
@@ -199,7 +182,8 @@ def _replace_with_bnb_linear(
 @torch.inference_mode()
 def check_quantized_param(model, param_name: str,) -> bool:
     module, tensor_name = get_module_from_name(model, param_name)
-    if isinstance(module, bnb.nn.Params4bit) or isinstance(module._parameters.get(tensor_name, None), bnb.nn.Params4bit):
+    # if isinstance(module, bnb.nn.Params4bit) or isinstance(module._parameters.get(tensor_name, None), bnb.nn.Params4bit):
+    if isinstance(module._parameters.get(tensor_name, None), bnb.nn.Params4bit):
         # Add here check for loaded components' dtypes once serialization is implemented
         return True
     elif isinstance(module, bnb.nn.Linear4bit) and tensor_name == "bias":
@@ -247,11 +231,11 @@ def create_quantized_param(
 
     if pre_quantized:
         if (param_name + ".quant_state.bitsandbytes__fp4" not in state_dict) and (
-                param_name + ".quant_state.bitsandbytes__nf4" not in state_dict
-            ):
-                raise ValueError(
-                    f"Supplied state dict for {param_name} does not contain `bitsandbytes__*` and possibly other `quantized_stats` components."
-                )
+            param_name + ".quant_state.bitsandbytes__nf4" not in state_dict
+        ):
+            raise ValueError(
+                f"Supplied state dict for {param_name} does not contain `bitsandbytes__*` and possibly other `quantized_stats` components."
+            )
 
         quantized_stats = {}
         for k, v in state_dict.items():
