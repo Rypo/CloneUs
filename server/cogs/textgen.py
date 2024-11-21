@@ -1,6 +1,7 @@
 import os
 import gc
 import re
+import yaml
 import random
 import itertools
 import typing
@@ -38,9 +39,6 @@ from run import BotUs
 
 from .gen.gencfg import SetTextConfig
 
-# Determine if initials based commmands can be used.
-
-
 
 cmds_logger = logging.getLogger('server.cmds')
 event_logger = logging.getLogger('server.event')
@@ -48,21 +46,26 @@ event_logger = logging.getLogger('server.event')
 
 class TextGen(commands.Cog, SetTextConfig):
     '''Imitate a user or chat with the base model.'''
-    def __init__(self, bot: BotUs):#, pstore:io_utils.PersistentStorage, clomgr: CloneusManager, msgmgr:MessageManager):
+    def __init__(self, bot: BotUs):
         self.bot = bot
-        self.clomgr = CloneusManager(bot,)#,clomgr
-        self.msgmgr = MessageManager(bot, n_init_messages=15, message_cache_limit=31)#msgmgr
-        self.pstore = self.bot.pstore #io_utils.PersistentStorage()
+        self.clomgr = CloneusManager(bot,)
+        self.msgmgr = MessageManager(bot, n_init_messages=15, message_cache_limit=31)
+        self.pstore = self.bot.pstore 
         self.ctx_menu = app_commands.ContextMenu(name='🔂 Redo (Text)', callback=self._cm_redo,)
         self.bot.tree.add_command(self.ctx_menu, override=True)
-        #self.active_checkpoint = settings.ACTIVE_MODEL_CKPT
-        self.active_model_kwargs = {'checkpoint_path':settings.ACTIVE_MODEL_CKPT,'gen_config':'best_generation_config.json', 'dtype': None, 'attn_implementation': None}
         
+        self.active_model_kwargs = {'checkpoint_path':settings.ACTIVE_MODEL_CKPT, 'gen_config':'best_generation_config.json', 'dtype': None, 'attn_implementation': None}
+        self.task_prompts = self._read_task_prompts()
+
         self._log_extra = {'cog_name': self.qualified_name}
         self._load_lock = asyncio.Lock()
         self._model_load_commands = set(
             [self.ctx_menu.name,'pbot','ubot','mbot','xbot', 'ask','chat', 'reword', ])
-        
+
+    def _read_task_prompts(self, filename='prompts.yaml'):
+        with open(settings.CONFIG_DIR/'text'/filename) as f:
+            task_prompts = yaml.load(f, yaml.SafeLoader)
+        return task_prompts
 
     @property
     def youtube_quota(self):
@@ -667,7 +670,7 @@ class TextGen(commands.Cog, SetTextConfig):
                 sent_messages = await self.clomgr.base_streaming_generate(ctx, prompt, system_msg)
             else:
                 sent_messages = await self.clomgr.base_generate(ctx, prompt, system_msg)
-            
+        return sent_messages    
     
     @commands.hybrid_command(name='chat')            
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
@@ -700,49 +703,24 @@ class TextGen(commands.Cog, SetTextConfig):
             
         # Re-join any splits from the 2000 char limit 
         # TODO: Watch for any missing spaces
-        self.msgmgr.base_message_cache.append(''.join([m.clean_content for m in sent_messages]))
-        # for msg in sent_messages:
-        #     self.msgmgr.base_message_cache.append(msg)
+        sent_text = ''.join([m.clean_content for m in sent_messages])
+        self.msgmgr.base_message_cache.append(sent_text)
+        return sent_text
     
     # provide 4 creative rewritings of this text to image prompt, be detailed and highly creative but keep try to stay true to 
     @commands.hybrid_command(name='reword')
-    async def reword_t2i_prompt(self, ctx:commands.Context, prompt:str):
-        '''Reword a image prompt to add details for use in /draw or /redraw
+    async def reword_t2i_prompt(self, ctx:commands.Context, *, prompt:str):
+        '''Reword an image prompt to add details for use in /draw or /redraw
 
         Args:
-            prompt: The base simple prompt to add details to
+            prompt: The prompt to enrich with details
         '''
-        # https://github.com/TencentQQGYLab/ELLA?tab=readme-ov-file#1-caption-upscale
-        instr = ('Generate the long prompt version of the short one according to the given examples. '#'Please generate the long prompt version of the short one according to the given examples. '
-                'Long prompt version should consist of 3 to 5 sentences that enrich the short prompt. Long prompt version must specify the color, shape, texture or spatial relation of the included objects. ')
-                #'DO NOT generate sentences that describe any atmosphere!!!')
-        
-        samples = [
-            {'short':'A calico cat with eyes closed is perched upon a Mercedes.',
-            'long':("a multicolored cat perched atop a shiny black car. the car is parked in front of a building with wooden walls and a green fence. "
-                    "the reflection of the car and the surrounding environment can be seen on the car's glossy surface.")
-            },
-            {'short':"A boy sitting on a chair holding a video game remote.",
-            'long':("a young boy sitting on a chair, wearing a blue shirt and a baseball cap with the letter 'm'. he has a red medal around his neck and is holding a white game controller. "
-                    "behind him, there are two other individuals, one of whom is wearing a backpack. to the right of the boy, there's a blue trash bin with a sign that reads 'automatic party'.")
-            },
-            {'short':"man on a bank of the water fishing.",
-            'long':("a serene waterscape where a person, dressed in a blue jacket and a red beanie, stands in shallow waters, fishing with a long rod. "
-                    "the calm waters are dotted with several sailboats anchored at a distance, and a mountain range can be seen in the background under a cloudy sky.")
-            },
-            {'short':"A kitchen with a cluttered counter and wooden cabinets.",
-            'long':("a well-lit kitchen with wooden cabinets, a black and white checkered floor, and a refrigerator adorned with a floral decal on its side. "
-                    "the kitchen countertop holds various items, including a coffee maker, jars, and fruits.")
-            },
-            {'short': prompt, 'long':""}
-        ]
-        
-        few_shots = '\n\n'.join([f"Short: {s['short']}\nLong: {s['long']}" for s in samples])
-        formatted_prompt = f'{instr}\n\n{few_shots}'
-        return await self.ask(ctx, formatted_prompt, system_msg='')
+        formatted_prompt = "\n".join(self.task_prompts['reword']['enhanced_prompt']).format(prompt=prompt)
+        sent_messages = await self.ask(ctx, formatted_prompt, system_msg=None)
+        return ''.join([m.clean_content for m in sent_messages])
         #return formatted_prompt
 
 
-async def setup(bot):
+async def setup(bot:BotUs):
     #load_nowait = bool(os.getenv('EAGER_LOAD',False))
     await bot.add_cog(TextGen(bot))#, load_nowait=load_nowait))
