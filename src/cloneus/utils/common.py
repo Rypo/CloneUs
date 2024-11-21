@@ -37,7 +37,18 @@ def batched(iterable, n:int):
 
 
 def read_state_dict(model_id_or_path:str|Path, subfolder:str|None=None, local_files_only:bool = False, allow_empty:bool = False, device:str|int='cpu') -> dict[str, torch.Tensor]:
-    '''Read sharded safetensors files into a unified state dict from a remote HF repo or local filepath'''
+    '''Read sharded safetensors files into a unified state dict from a remote HF repo or local filepath.
+    
+    Args:
+        model_id_or_path: The name of the HF repo or local filepath.
+        subfolder: The subfolder within the remote repo. Ignored if `model_id_or_path` is a local filepath.
+        local_files_only: Whether to only look for files locally. If False, will try to download from HF hub.
+        allow_empty: Whether to raise an error if no weights are found.
+        device: The device to load the tensors onto. 
+        
+        Returns:
+            A unified state dict.
+    '''
     
     if (model_path := Path(model_id_or_path)).exists():
         if model_path.is_file():
