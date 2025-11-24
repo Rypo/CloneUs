@@ -233,7 +233,7 @@ class BotUs(commands.Bot):
                 'user_global_name': interaction.user.global_name,
                 'user_name': interaction.user.name,
                 'user_id': interaction.user.id,
-                'type': interaction.type,
+                'type': interaction.type.name,
                 'created_at':interaction.created_at.strftime('%Y-%m-%d %H:%M:%S%z'),
                 'guild_id':interaction.guild_id,
                 'channel_id':interaction.channel_id,
@@ -262,7 +262,7 @@ class BotUs(commands.Bot):
             'interaction.data':interaction.data,
             'interaction.id':interaction.id,
             'interaction.created_at':interaction.created_at.strftime('%Y-%m-%d %H:%M:%S%z'),
-            'interaction.type':interaction.type,
+            'interaction.type':interaction.type.name,
             'interaction.user':{'id':interaction.user.id, 'name':interaction.user.name, 'global_name':interaction.user.global_name},
             'interaction.guild_id':interaction.guild_id,
             'interaction.channel_id':interaction.channel_id,
@@ -279,7 +279,7 @@ class BotUs(commands.Bot):
             i_msg_data = {
                 'interaction.message': {
                     'id':interaction.message.id,
-                    'type':interaction.message.type,
+                    'type':interaction.message.type.name,
                     'created_at':interaction.message.created_at.strftime('%Y-%m-%d %H:%M:%S%z'),
                     'author.id':interaction.message.author.id,
                     'application_id':interaction.message.application_id,
@@ -301,7 +301,7 @@ class BotUs(commands.Bot):
                 'command.qualified_name': command.qualified_name,
                 'command.description': command.description,
                 'command.parameters': [{'name': param.name, 
-                                        'type': param.type, 
+                                        'type': param.type.name, 
                                         'default': (str(param.default) if param.required else param.default), 
                                         'required': param.required} 
                                         for param in command.parameters],
@@ -365,7 +365,7 @@ async def main(args, bot=None):
             msg = await ctx.send('Attempting soft reboot..')
             await bot.toggle_extensions('cogs', 'reload')
             os.environ.pop('EAGER_LOAD')
-            await msg.edit('Done.', delete_after=3)
+            await msg.edit(content='Done.', delete_after=3)
         
         elif spec == '-h':
             await ctx.send('⚠️ **Reboot Request Received** ⚠️ Razing and Rebuilding to Remedy RuhRos...')
