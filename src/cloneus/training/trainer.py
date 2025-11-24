@@ -94,7 +94,7 @@ def get_trainer(model, data, tokenizer, args, callbacks=None, collator_pad_multi
         model=model,
         train_dataset=data["train"],
         eval_dataset=data['validation'],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=collator_pad_multiple),
         args=args,
         callbacks=callbacks,
@@ -113,7 +113,7 @@ def get_sft_trainer(model, data, tokenizer, args, peft_config, callbacks=None, m
         data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
         train_dataset=data['train'],
         eval_dataset=data['validation'],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         peft_config=peft_config,
         dataset_text_field="text",
         packing=True,
@@ -147,7 +147,7 @@ def create_resumable_save(trainer:Trainer|SFTTrainer):
     # The underscore prefix implies this is not a recommended way to save, but it works for now.
     # TODO: look in to implications
     if trainer.state.global_step:
-        trainer._save_checkpoint(trainer.model, trainer._trial, metrics=None)
+        trainer._save_checkpoint(trainer.model, trainer._trial)
 
 
 def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens, attn_implementation, custom_scheduler):

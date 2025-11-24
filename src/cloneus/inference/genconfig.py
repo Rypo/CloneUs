@@ -47,7 +47,7 @@ class GenOpts:
     stop_strings: str| list[str] = None
     token_healing: bool = False
     cache_implementation: str =  None # "quantized"
-    cache_config: transformers.CacheConfig|dict= None # transformers.QuantizedCacheConfig('HQQ', nbits=4, compute_dtype=torch.bfloat16, device='cuda')
+    cache_config: dict = None
     #dola_layers https://github.com/huggingface/transformers/blob/main/docs/source/en/generation_strategies.md#dola-decoding
 
     

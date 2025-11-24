@@ -8,7 +8,7 @@ import logging
 import functools
 import torch
 import transformers
-from transformers import LogitsWarper, is_torch_xpu_available
+from transformers import LogitsProcessor
 from transformers.generation.logits_process import (
     LogitNormalization,
     LogitsProcessor,
@@ -16,10 +16,27 @@ from transformers.generation.logits_process import (
 )
 logger = logging.getLogger(__name__)
 VERBOSE = False
+original_init = transformers.GenerationConfig.__init__
+original_get_logits_processor = transformers.GenerationMixin._get_logits_processor
+
 global_scores = None
 TOKENIZER = None
 
-class TemperatureLogitsWarperCustom(LogitsWarper):
+def get_device():
+    # https://github.com/oobabooga/text-generation-webui/blob/main/modules/torch_utils.py#L10
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    elif transformers.is_torch_xpu_available():
+        return torch.device('xpu:0')
+    elif transformers.is_torch_npu_available():
+        return torch.device('npu:0')
+    else:
+        return None
+
+
+class TemperatureLogitsWarperCustom(LogitsProcessor):
     '''
     A copy of the original Transformers temperature logits warper.
     '''
@@ -42,7 +59,7 @@ class TemperatureLogitsWarperCustom(LogitsWarper):
         return scores
 
 
-class DynamicTemperatureLogitsWarper(LogitsWarper):
+class DynamicTemperatureLogitsWarper(LogitsProcessor):
     '''
     Dynamic temperature.
     '''
@@ -100,7 +117,7 @@ class DynamicTemperatureLogitsWarper(LogitsWarper):
         return scores
 
 
-class QuadraticSamplingLogitsWarper(LogitsWarper):
+class QuadraticSamplingLogitsWarper(LogitsProcessor):
     '''
     Quadratic sampling with smoothing factor and smoothing curve parameters.
     '''
@@ -127,7 +144,7 @@ class QuadraticSamplingLogitsWarper(LogitsWarper):
         return transformed_logits
 
 
-class TailFreeLogitsWarper(LogitsWarper):
+class TailFreeLogitsWarper(LogitsProcessor):
     def __init__(self, tfs: float, filter_value: float = -float("Inf"), min_tokens_to_keep: int = 1):
         tfs = float(tfs)
         if tfs < 0 or tfs > 1.0:
@@ -167,7 +184,7 @@ class TailFreeLogitsWarper(LogitsWarper):
         return scores
 
 
-class TopALogitsWarper(LogitsWarper):
+class TopALogitsWarper(LogitsProcessor):
     def __init__(self, top_a: float, filter_value: float = -float("Inf"), min_tokens_to_keep: int = 1):
         top_a = float(top_a)
         if top_a < 0 or top_a > 1.0:
@@ -193,7 +210,7 @@ class TopALogitsWarper(LogitsWarper):
         return scores
 
 # Exclude Top Choices (XTC)
-class XTCLogitsWarper(LogitsWarper):
+class XTCLogitsWarper(LogitsProcessor):
     def __init__(self, threshold: float, probability: float, filter_value: float = -float("Inf"), _tokenizer=None):
         self.threshold = threshold
         self.probability = probability
@@ -237,6 +254,7 @@ class XTCLogitsWarper(LogitsWarper):
         # Otherwise, remove tokens with the mask
         scores = scores.masked_fill(indices_to_remove, self.filter_value)
         return scores
+
 
 class DRYLogitsProcessor(LogitsProcessor):
     def __init__(self, multiplier: float, base: float, allowed_length: int, sequence_breakers: set[int], _range: int):
@@ -310,7 +328,7 @@ class DRYLogitsProcessor(LogitsProcessor):
         return scores
 
 
-class MirostatLogitsWarper(LogitsWarper):
+class MirostatLogitsWarper(LogitsProcessor):
     def __init__(self, mirostat_mode: int, mirostat_tau: float, mirostat_eta: float, filter_value: float = -float("Inf"), min_tokens_to_keep: int = 1):
         if mirostat_mode not in [2]:
             raise ValueError(f"`mirostat` has to be a an integer 2, but is {mirostat_mode}")
@@ -338,12 +356,11 @@ class MirostatLogitsWarper(LogitsWarper):
                 break
 
         # Normalize the probabilities of the remaining words
-        if is_torch_xpu_available():
-            prob_topk = torch.softmax(sorted_logits, dim=0).to("xpu")
-            prev_i = torch.multinomial(prob_topk, num_samples=1, replacement=True).to("xpu")
-        else:
-            prob_topk = torch.softmax(sorted_logits, dim=0).to('cuda')
-            prev_i = torch.multinomial(prob_topk, num_samples=1, replacement=True).to('cuda')
+        prob_topk = torch.softmax(sorted_logits, dim=0)
+        prev_i = torch.multinomial(prob_topk, num_samples=1, replacement=True)
+        if (device := get_device()):
+            prob_topk = prob_topk.to(device)
+            prev_i = prev_i.to(device)
 
         observed_surprise = -math.log2(prob_topk[prev_i])
         self.e = observed_surprise - self.mirostat_tau
@@ -359,7 +376,7 @@ class MirostatLogitsWarper(LogitsWarper):
         return scores
 
 
-class SpyLogitsWarper(LogitsWarper):
+class SpyLogitsWarper(LogitsProcessor):
     def __init__(self):
         pass
 
@@ -392,6 +409,7 @@ class RepetitionPenaltyLogitsProcessorWithRange(LogitsProcessor):
 
         return scores
 
+
 class PresencePenaltyLogitsProcessor(LogitsProcessor):
     def __init__(self, presence_penalty: float, _range: int):
         self.presence_penalty = presence_penalty
@@ -411,6 +429,7 @@ class PresencePenaltyLogitsProcessor(LogitsProcessor):
         for input_ids_row, scores_row in zip(input_ids, scores):
             scores_row = self.apply_presence_penalty(input_ids_row, scores_row)
         return scores
+
 
 class FrequencyPenaltyLogitsProcessor(LogitsProcessor):
     def __init__(self, frequency_penalty: float, _range: int):
@@ -450,7 +469,7 @@ def get_logits_processor_patch(self, **kwargs):
         generation_config.temperature = float(generation_config.temperature)  # Must be float
 
     # Get the original warpers
-    warpers = self._get_logits_processor_old(**kwargs)
+    warpers = original_get_logits_processor(self, **kwargs)
     # warpers = self._get_logits_warper_old(generation_config, **kwargs) # Tweak from: https://github.com/oobabooga/text-generation-webui/issues/6184
     for i in range(len(warpers) - 1, -1, -1):
         # Replace temperature with our modified class.
@@ -584,11 +603,10 @@ def get_logits_processor_patch(self, **kwargs):
     if generation_config.temperature_last:
         for param_name in ['temperature', 'dynamic_temperature', 'quadratic_sampling']:
             if param_name in sampler_priority:
-                if param_name in sampler_priority:
-                    index = sampler_priority.index(param_name)
-                    sampler_priority.append(sampler_priority.pop(index))
-                else:
-                    sampler_priority.append(param_name)
+                index = sampler_priority.index(param_name)
+                sampler_priority.append(sampler_priority.pop(index))
+            else:
+                sampler_priority.append(param_name)
 
     class_name_to_nickname = {
         'DynamicTemperatureLogitsWarper': 'dynamic_temperature',
@@ -637,7 +655,7 @@ def get_logits_processor_patch(self, **kwargs):
 
 
 def generation_config_init_patch(self, **kwargs):
-    self.__init___old(**kwargs)
+    original_init(self, **kwargs)
     # self.min_p = kwargs.pop("min_p", 0.0)
     self.dynamic_temperature = kwargs.pop("dynamic_temperature", False)
     self.dynatemp_low = kwargs.pop("dynatemp_low", 1)
@@ -667,21 +685,13 @@ def generation_config_init_patch(self, **kwargs):
 # - TIMELINE -> "Generate: unify `LogitsWarper..."
 
 def restore_samplers():
-    if hasattr(transformers.GenerationMixin, '_get_logits_processor_old'):        
-        transformers.GenerationMixin._get_logits_processor = transformers.GenerationMixin._get_logits_processor_old
-        transformers.GenerationConfig.__init__ = transformers.GenerationConfig.__init___old
-        
-        del transformers.GenerationMixin._get_logits_processor_old
-        del transformers.GenerationConfig.__init___old
+    transformers.GenerationMixin._get_logits_processor = original_get_logits_processor
+    transformers.GenerationConfig.__init__ = original_init
 
 def hijack_samplers(tokenizer=None):
     global TOKENIZER
     TOKENIZER = tokenizer
 
     restore_samplers()
-
-    transformers.GenerationMixin._get_logits_processor_old = transformers.GenerationMixin._get_logits_processor
-    transformers.GenerationMixin._get_logits_processor = get_logits_processor_patch#(tokenizer)
-
-    transformers.GenerationConfig.__init___old = transformers.GenerationConfig.__init__
+    transformers.GenerationMixin._get_logits_processor = get_logits_processor_patch
     transformers.GenerationConfig.__init__ = generation_config_init_patch
