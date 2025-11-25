@@ -3,6 +3,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from omegaconf import OmegaConf
 
+import unsloth # Unsloth should be imported before trl, transformers, peft to ensure all optimizations are applied.
 import cloneus.training.evaluation as meval
 from cloneus.types import cpaths
 

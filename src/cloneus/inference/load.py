@@ -7,6 +7,8 @@ import warnings
 from pathlib import Path
 
 import torch
+from unsloth import FastLanguageModel
+
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -125,7 +127,6 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
 
 
 def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
-    from unsloth import FastLanguageModel
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
     #print('NAME OR PATH',f'{tokenizer.name_or_path=}')
     #warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')

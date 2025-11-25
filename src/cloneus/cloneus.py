@@ -15,6 +15,8 @@ import numpy as np
 from omegaconf import OmegaConf, DictConfig
 
 import torch
+import unsloth # Unsloth should be imported before trl, transformers, peft to ensure all optimizations are applied.
+
 from transformers import (
     AutoConfig,
     AutoTokenizer,

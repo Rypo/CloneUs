@@ -1,6 +1,9 @@
 import typing
 from pathlib import Path
 import torch
+
+from unsloth import FastLanguageModel, FastModel
+
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -34,9 +37,6 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
     return model, tokenizer
 
 def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
-    from unsloth import FastLanguageModel
-    # pip install -e "git+https://github.com/unslothai/unsloth.git#egg=unsloth
-    # https://pip.pypa.io/en/stable/cli/pip_install/
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_id,

@@ -6,13 +6,17 @@ import warnings
 import argparse
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
-import torch
-from peft import LoraConfig, LoftQConfig, AutoPeftModelForCausalLM
 
-import cloneus.training.trainer as mtrain
+import torch
+import unsloth # Unsloth should be imported before trl, transformers, peft to ensure all optimizations are applied.
+from peft import LoraConfig
+
 import cloneus.training.model as mllm
+import cloneus.training.trainer as mtrain
+
 from cloneus.data import dataset, tokenization, useridx
 from cloneus.types import cpaths
+
 
 logger = logging.getLogger('scripts')
 
