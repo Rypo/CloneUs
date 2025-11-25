@@ -71,6 +71,7 @@ class GenerationExtendedFlags(commands.FlagConverter):
     smoothing_curve: Range[float, 1, ]      = commands.flag(default=None, description='Quadratic Sampling dropoff curve factor (default: 1)') # 1
     
     top_a: Range[float, 0, 1]               = commands.flag(default=None, description='Discard words with proba < (top_a) * max(proba words)^2 (default: 0)') # 0
+    top_n_sigma: Range[float, 0, ]          = commands.flag(default=None, description="Discard words with proba < top_n_sigma*stdv from highest proba (default: 0) ") # 2
     tfs: Range[float, 0, 1]                 = commands.flag(default=None, description='Discard long tail proba words (lower than others). Closer to 0 = more discarded (default: 1)') # 1
     
     mirostat_mode: bool                     = commands.flag(default=None, description='Enable Mirostat - technique for sampling perplexity control using active learning (default: False)') # 0 or 2

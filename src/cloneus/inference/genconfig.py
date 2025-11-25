@@ -78,6 +78,7 @@ class GenOptsExtended(GenOpts):
     repetition_penalty_range: int = 0 #1024
     tfs: float = 1
     top_a: float = 0
+    top_n_sigma: float = 0.0
     #negative_prompt: str = ''
     mirostat_mode: int = 0 # 0 or 2
     mirostat_tau: float = 5

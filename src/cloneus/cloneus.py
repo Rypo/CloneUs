@@ -217,7 +217,7 @@ class GenConfigUtilities:
         
         changes = {}
         if prev_conf != new_conf:
-            changes = {k: {'prev':prev_conf[k], 'new':new_conf[k]} for k in new_conf if prev_conf[k]!=new_conf[k]}
+            changes = {k: {'prev':prev_conf.get(k), 'new':new_conf.get(k)} for k in new_conf if prev_conf.get(k)!=new_conf.get(k)}
             if save_on_change:
                 self.save_genconfig()
         
