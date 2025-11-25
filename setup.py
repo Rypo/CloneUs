@@ -13,7 +13,7 @@ setup(
         'omegaconf',
         'more-itertools',
         'unidecode',
-        'ujson',
+        'orjson',
         'ipython',
         'matplotlib',
         'google-api-python-client',

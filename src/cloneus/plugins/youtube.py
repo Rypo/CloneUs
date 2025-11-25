@@ -4,7 +4,7 @@ import re
 import random
 import warnings
 from dataclasses import dataclass, field
-import ujson as json
+import orjson
 import more_itertools
 import numpy as np
 import pandas as pd
@@ -281,16 +281,23 @@ class YouTubeManager:
 
     def write_video_data(self, result, query, result_type):
         filepath = self.search_data_filepath if result_type=='search' else self.video_data_filepath
-        with open(filepath, 'a') as f:
-            json.dump({'query': query, 'result': result}, f)
-            f.write('\n')
+        with open(filepath, 'ab') as f:
+            f.write(orjson.dumps({'query': query, 'result': result}))
+            f.write(b'\n')
         
         print(f"wrote {len(result['items'])} items to {result_type} file")
 
     def read_video_data(self, result_type='lookup'):
         filepath = self.search_data_filepath if result_type=='search' else self.video_data_filepath
-        with open(filepath, 'r') as f:
-            video_data = list(map(json.loads, f.read().splitlines()))
+        video_data = []
+
+        with open(filepath, 'rb') as f:
+            for i,line in enumerate(f.read().splitlines()):
+                try:
+                    video_data.append(orjson.loads(line))
+                except Exception as e:
+                    print(i,e)
+
         return video_data
     
 

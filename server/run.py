@@ -10,7 +10,7 @@ import logging
 import argparse
 import datetime
 from contextlib import asynccontextmanager
-import ujson as json
+import orjson
 import uvloop
 import discord
 from discord import app_commands
@@ -77,9 +77,13 @@ def cmd_cache_init(cache_filepath:str, n:int = 100):
     last_n_cmds = io_utils.tail(cache_filepath, n=n)
     cmd_cache = {}
     
-    for cmd_str in last_n_cmds:
-        cmd = json.loads(cmd_str)['cmd']
-        cmd_cache[cmd.pop('interaction_id')] = cmd
+    for i,cmd_str in enumerate(last_n_cmds):
+        try:
+            cmd = orjson.loads(cmd_str)['cmd']
+            cmd_cache[cmd.pop('interaction_id')] = cmd
+        except Exception as e:
+            logger.warn(f'failed to load cmd {i}/{n}', exc_info=e)
+            
     return cmd_cache
 
 
@@ -225,6 +229,7 @@ class BotUs(commands.Bot):
             cmd_attrs = {'qualified_name': ctx.command.qualified_name, 'args':args, 'kwargs':kwargs, } #  'namespace': ctx.interaction.namespace
             self.cmd_cache[interaction.id] = cmd_attrs
             
+            cmd_attrs['kwargs'] = {k : (v.to_dict() if hasattr(v, 'to_dict') else v) for k,v in cmd_attrs['kwargs'].items()}
             # this is what we will use to rebuild cache on start
             data = {'cmd': {'interaction_id': interaction.id, **cmd_attrs}}
             
@@ -248,7 +253,7 @@ class BotUs(commands.Bot):
                 'log_time': datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S%z')
             }
 
-            cmdcache_logger.info(json.dumps(data))
+            cmdcache_logger.info(orjson.dumps(data).decode())
         
 
     async def on_app_command_completion(self, interaction:discord.Interaction, command:app_commands.Command|app_commands.ContextMenu):
@@ -302,7 +307,7 @@ class BotUs(commands.Bot):
                 'command.description': command.description,
                 'command.parameters': [{'name': param.name, 
                                         'type': param.type.name, 
-                                        'default': (str(param.default) if param.required else param.default), 
+                                        'default': (str(param.default) if param.required else str(param.default)), 
                                         'required': param.required} 
                                         for param in command.parameters],
                 #'command': command.to_dict(self.tree), 
@@ -313,7 +318,7 @@ class BotUs(commands.Bot):
             data.update(cmd_data)
         
         #data.update(ctx_data)
-        struct_logger.info(json.dumps(data))
+        struct_logger.info(orjson.dumps(data).decode())
         
 
 async def main(args, bot=None):
