@@ -133,7 +133,7 @@ def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing
     # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
     peft_config = PeftConfig.from_pretrained(checkpoint_dirpath)
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = peft_config.base_model_name_or_path,
+        model_name = checkpoint_dirpath.as_posix(), #peft_config.base_model_name_or_path,
         max_seq_length = tokenizer.model_max_length,
         dtype = dtype,
         load_in_4bit = True,
@@ -143,13 +143,7 @@ def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing
 
     )
     
-    # From https://github.com/huggingface/peft/issues/184
-    # Now add PEFT adapters
-    #model.enable_input_require_grads()
-    model = PeftModelForCausalLM(model, peft_config)
-    # Patch it as well!
-    model = FastLanguageModel.patch_peft_model(model, False)
-    FastLanguageModel.for_inference(model)
+    model = FastLanguageModel.for_inference(model).to(dtype)
 
     return model, tokenizer
 

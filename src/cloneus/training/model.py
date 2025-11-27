@@ -37,7 +37,8 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
     return model, tokenizer
 
 def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
-
+    # NOTE: FastModel is used for Multimodal and some MoE models (?)
+    # model, tokenizer = FastModel.from_pretrained( 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_id,
         max_seq_length = max_seq_length,
@@ -58,7 +59,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
     model = FastLanguageModel.get_peft_model(
         model,
         r = peft_config.r,
-        target_modules = peft_config.target_modules,
+        target_modules = list(peft_config.target_modules),
         lora_alpha = peft_config.lora_alpha,
         lora_dropout = 0, # Currently only supports dropout = 0
         bias = "none",    # Currently only supports bias = "none"
