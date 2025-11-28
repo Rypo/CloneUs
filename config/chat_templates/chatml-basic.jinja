@@ -1,0 +1,8 @@
+{{- bos_token -}}
+{%- for message in messages -%}
+	{{- "<|im_start|>" + message["role"] + "\n" + message["content"] + "<|im_end|>" + "\n" -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+	{# {{- "<|im_start|>assistant\n" -}} remove "assistant\n" for role_replace #}
+	{{- "<|im_start|>" -}}
+{%- endif -%}

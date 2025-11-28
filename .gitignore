@@ -30,6 +30,8 @@ config/train/*
 !config/train/train_config.yaml
 config/eval/*
 !config/eval/eval_config.yaml
+config/chat_templates/*
+!config/chat_templates/chatml-basic.jinja
 # Dev files
 nbs
 imgs

@@ -30,6 +30,8 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
             # tweaked based on Hermes models
         model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlH', custom_roles=True)
         custom_chat_template = tokenizer.chat_template
+    elif custom_chat_template.endswith('.jinja'):
+        custom_chat_template = Path(custom_chat_template).read_text()
     #else:
     #    raise ValueError(f'Unsupported chat_template_format: {chat_template_format!r}')
     
