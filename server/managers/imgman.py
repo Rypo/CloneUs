@@ -242,37 +242,6 @@ class PixelWaveManager(BaseFluxManager):
             quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
         )
 
-class SD35LargeManager(BaseSD3Manager):
-    def __init__(self, offload=False):
-        super().__init__(
-            model_name = 'sd35_large',
-            model_path = 'stabilityai/stable-diffusion-3.5-large',
-            config = DiffusionConfig(
-                steps = CfgItem(30, bounds=(20,50)),
-                guidance_scale = CfgItem(4.5, bounds=(3,5)), 
-                strength = CfgItem(0.55, bounds=(0.3, 0.95)),
-                img_dims = [(1024,1024), (720,1280), (1280,720)], # (832,1216), (1216,832)
-                locked=['refine_guidance_scale']
-            ),
-            offload=offload,
-            quantize=True,
-        )
-
-class SD35MediumManager(BaseSD3Manager):
-    def __init__(self, offload=False):
-        super().__init__(
-            model_name = 'sd35_medium',
-            model_path = 'stabilityai/stable-diffusion-3.5-medium',
-            config = DiffusionConfig(
-                steps = CfgItem(30, bounds=(20,50)),
-                guidance_scale = CfgItem(4.5, bounds=(3,5)), 
-                strength = CfgItem(0.55, bounds=(0.3, 0.95)),
-                img_dims = [(1024,1024), (768,1280), (1280,768)], # (832,1216), (1216,832)
-                locked=['refine_guidance_scale']
-            ),
-            offload=offload,
-            quantize=False,
-        )
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
@@ -304,14 +273,6 @@ AVAILABLE_MODELS = {
         'manager': PixelWaveManager,
         'desc': 'PixelWave (Flux)' # (XLg, avg)
     },
-    'sd35_large': {
-        'manager': SD35LargeManager,
-        'desc': 'Stable Diffusion 3.5 Large' #  (Lg, slow)
-    },
 
-    'sd35_medium': {
-        'manager': SD35MediumManager,
-        'desc': 'Stable Diffusion 3.5 Medium' #  (Lg, slow)
-    },
 }
 
