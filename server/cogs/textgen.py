@@ -167,7 +167,8 @@ class TextGen(commands.Cog, SetTextConfig):
 
     async def check_defer(self, ctx: commands.Context):
         needs_defer = False
-        if ctx.interaction and not ctx.interaction.response.is_done():
+        interaction = getattr(ctx, 'interaction', ctx) # ctx.interaction unless ctx is an interaction
+        if interaction and not interaction.response.is_done():
             await ctx.defer()
             await asyncio.sleep(1)
             needs_defer = True
@@ -457,13 +458,12 @@ class TextGen(commands.Cog, SetTextConfig):
         
         await interaction.response.defer(thinking=True, ephemeral=True)
         await asyncio.sleep(1)
-        #try:
-        await self.redo(interaction, message, author=None, seed_text=None, _needsdefer=False)
+
+        await self.redo(interaction, message, author=None, seed_text=None)
         await interaction.delete_original_response()
 
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
-    async def redo(self, ctx:commands.Context, message: discord.Message, author:str=None, seed_text:str=None, _needsdefer=True):
-        #ctx = await self.bot.get_context(message)
+    async def redo(self, ctx:commands.Context, message: discord.Message, author:str=None, seed_text:str=None):
         if author is None:
             try:
                 author = text_utils.extract_author(message.content)
@@ -475,15 +475,12 @@ class TextGen(commands.Cog, SetTextConfig):
             await ctx.send("Can't re-roll. Message not in context.", ephemeral=True)
 
         await self.check_defer(ctx)
-        # if _needsdefer:
-        #     await ctx.defer()
-        #     await asyncio.sleep(1)
-        
-        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
-            #message.reply()
-            sent_messages = await self.clomgr.pipeline(message, mcache_slice, [author], seed_text, ('stream_one' if self.streaming_mode else 'gen_one'))
 
-            await self.msgmgr.replace_message(message, sent_messages)
+        async with (self.bot.busy_status(activity='chat')):
+            sent_messages = await self.clomgr.pipeline(message, mcache_slice, [author], seed_text, ('stream_one' if self.streaming_mode else 'gen_one'))
+        
+        await self.msgmgr.replace_message(message, sent_messages)
+        self.bot.add_temporary_reaction(sent_messages[0], '🔂', 15.0)
 
     @commands.hybrid_command(name='pbot')
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
@@ -504,7 +501,6 @@ class TextGen(commands.Cog, SetTextConfig):
             seed_text: Text to start off the bot's response with
 
         """
-        
         await self.check_defer(ctx)
         author_candidates = None
         
@@ -512,11 +508,10 @@ class TextGen(commands.Cog, SetTextConfig):
             author_candidates = [useridx.get_users('dname', by='initial')[i] for i in author_initials]
 
             if len(author_candidates) == 1:
-                return await self.anybot(ctx, author_candidates[0], seed_text=seed_text, _needsdefer=False)
+                return await self.anybot(ctx, author_candidates[0], seed_text=seed_text)
                 
-        
         next_author = await self.clomgr.predict_author(self.msgmgr.get_mcache(ctx), auto_mode, author_candidates)
-        await self.anybot(ctx, next_author, seed_text=seed_text, _needsdefer=False)
+        await self.anybot(ctx, next_author, seed_text=seed_text)
 
     async def auto_respond(self, message_cache):
         if self.auto_reply_mode in ['rbest','irbest','urand','top']:
@@ -528,47 +523,51 @@ class TextGen(commands.Cog, SetTextConfig):
         ctx = await self.bot.get_context(message_cache[-1])
         await self.anybot(ctx, next_author, seed_text=None)
     
-    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
-    async def streambot(self, ctx: commands.Context, author:str, seed_text:str,*, _needsdefer=True):        
+
+    async def streambot(self, ctx: commands.Context, author:str, seed_text:str):        
         await self.check_defer(ctx)
-        # if _needsdefer:
-        #     await ctx.defer()
-        #     await asyncio.sleep(1)
         
-        #author_tag_prefix = f"[{author}] " + ((seed_text + ' ') if seed_text else '')
-        #msg = await ctx.send(author_tag_prefix)
-        
+        # when use ctx.channel.typing() will always show "is typing...", but to clear early, must channel.send
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), [author], seed_text, 'stream_one')
-            for msg in sent_messages:
-                await self.msgmgr.add_message(msg)
+        
+        delete_delay = 0.5 # 0.0 is sort of jarring. Almost better to keep it long enough to see the nothing.
+        await ctx.channel.send('​', delete_after=delete_delay, reference=sent_messages[-1], silent=True)
+        
+        # m0=await ctx.channel.fetch_message(sent_messages[0].id)
 
-    #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
+        for msg in sent_messages:
+            await self.msgmgr.add_message(msg)
+
     async def batch_streambot(self, ctx: commands.Context, authors:list[str], seed_text:str):        
         await self.check_defer(ctx)
-        # await ctx.defer()
-        # await asyncio.sleep(1)
+
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'stream_batch')
-            for msg in sent_messages:
-                await self.msgmgr.add_message(msg)
+        
+        delete_delay = 0.5
+        await ctx.channel.send('​', delete_after=delete_delay, reference=sent_messages[-1], silent=True)
+        
+        for msg in sent_messages:
+            await self.msgmgr.add_message(msg)
                 
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
-    async def anybot(self, ctx: commands.Context, author: str, seed_text=None, *, _needsdefer=True):
+    async def anybot(self, ctx: commands.Context, author: str, seed_text=None):
         """Generalist bot generator."""
         
         if self.streaming_mode:
-            return await self.streambot(ctx, author=author, seed_text=seed_text, _needsdefer=_needsdefer)
-        await self.check_defer(ctx)    
-        # if _needsdefer:
-        #     await ctx.defer()
-        #     await asyncio.sleep(1)
+            return await self.streambot(ctx, author=author, seed_text=seed_text)
         
+        await self.check_defer(ctx)    
+
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
+
+        # when ctx is interaction, ctx.typing() is ≈ ctx.defer() i.e. "is typing..." is not displayed
+        async with (ctx.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), [author], seed_text, 'gen_one')
-            for msg in sent_messages:
-                await self.msgmgr.add_message(msg)
+
+        for msg in sent_messages:
+            await self.msgmgr.add_message(msg)
 
     @commands.hybrid_command(name='ubot')
     @app_commands.choices(user=cmd_choices.AUTHOR_DISPLAY_NAMES)
@@ -604,12 +603,11 @@ class TextGen(commands.Cog, SetTextConfig):
             return await self.batch_streambot(ctx, authors, seed_text)
             
         await self.check_defer(ctx)
-        # await ctx.defer()
-        # await asyncio.sleep(1)
 
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'gen_batch')
+            
             for msg in sent_messages:
                 await self.msgmgr.add_message(msg)
             
@@ -640,7 +638,7 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.anybot(ctx, author, seed_text=seed_text)
 
 
-
+    # ------------------------------------- Base model commands -------------------------------------
 
     @commands.hybrid_command(name='ask')
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
@@ -660,9 +658,8 @@ class TextGen(commands.Cog, SetTextConfig):
 
         if system_msg is None:
             system_msg = self.default_system_msg
+        
         await self.check_defer(ctx)
-        # await ctx.defer()
-        # await asyncio.sleep(1)
         
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
@@ -691,8 +688,7 @@ class TextGen(commands.Cog, SetTextConfig):
             system_msg = self.default_system_msg
         
         await self.check_defer(ctx)
-        # await ctx.defer()
-        # await asyncio.sleep(1)
+
         self.msgmgr.base_message_cache.append(prompt)
         self.clomgr.tts_mode = self.tts_mode
         async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):

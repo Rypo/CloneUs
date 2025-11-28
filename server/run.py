@@ -169,8 +169,10 @@ class BotUs(commands.Bot):
         for ext_stem in ext_filestems:
             await state_func(f'{extdir}.{ext_stem}')
 
+    def add_temporary_reaction(self, message: discord.Message, emoji:str, delete_after:float = 60.0):
+        self.loop.create_task(self._add_temporary_reaction(message, emoji, delete_after), name='_add_temporary_reaction')
 
-    async def add_temporary_reaction(self, message: discord.Message, emoji:str, delete_after:float=60.0):
+    async def _add_temporary_reaction(self, message: discord.Message, emoji:str, delete_after:float = 60.0):
         await message.add_reaction(emoji)
         def check(reaction, user):
             return not user.bot and str(reaction.emoji) == emoji 
