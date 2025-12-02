@@ -40,24 +40,22 @@ class PromptCanceled(Exception):
     '''Raised when user cancels command after prompt spellcheck.'''
 
 class Autocorrect:
-    def __init__(self, model_relpath:str='extras/models/jamspell/en.bin') -> None:
-        import jamspell
-        from cloneus import cpaths
-        self.corrector = jamspell.TSpellCorrector()
-        self.corrector.LoadLangModel(str(cpaths.ROOT_DIR/model_relpath))
+    def __init__(self) -> None:
+        from spellchecker import SpellChecker
+
+        self.corrector = SpellChecker()
+        self.re_word = re.compile(r"[a-zA-Z']+")
         self.ignored_texts = set()
         self.ignored_words = set()
 
     def __call__(self, text:str) -> tuple[str, bool]:
         return self.filtered_correction(text=text)
-        #fixed_text = self.corrector.FixFragment(text)
-        #return fixed_text, fixed_text!=text
 
     def correct(self, text:str):
-        return self.corrector.FixFragment(text)
+        return self.re_word.sub(lambda m: self.corrector.correction(m.group()) or m.group(), text)
     
     def check(self, text:str):
-        return self.corrector.FixFragment(text) != text
+        return self.correct(text) != text
     
     def filtered_correction(self, text:str):
         # whole phrase ignored
@@ -82,7 +80,7 @@ class Autocorrect:
         
         # some filtered, some not
         new_text = text
-        for o,n in corrections:
+        for o,n in corrections.items():
             new_text = new_text.replace(o, n)
         
         return new_text, True
@@ -91,22 +89,22 @@ class Autocorrect:
     def ban_texts(self, old:str, new:str):
         self.ignored_texts.add(old)
 
-        corrected,_ = self.get_corrections(old, new)
-        for o,_ in corrected:
+        corrections,_ = self.get_corrections(old, new)
+        for o in corrections:
             self.ignored_words.add(o)
         
-    def get_corrections(self, old:str, new:str, filter_ignored:bool = True):
-        corrections = [(o,n) for o,n in zip(old.split(), new.split()) if o != n]
+    def get_corrections(self, old:str, new:str, filter_ignored:bool = True) -> tuple[dict[str,str], int]:
+        corrections = {o:n for o,n in zip(self.re_word.findall(old), self.re_word.findall(new)) if o != n}
         n_chg = len(corrections)
         if filter_ignored:
-            corrections = list(filter(lambda o_: o_[0] not in self.ignored_words, corrections))
+            corrections = {k: corrections[k] for k in corrections.keys()-self.ignored_words}
         n_filtered = n_chg - len(corrections)
         return corrections, n_filtered
 
     @staticmethod
     def show_diff(old:str, new:str):
         diffed = []
-        for oword,nword in zip(old.split(), new.split()):
+        for oword,nword in zip(old.split(' '), new.split(' ')):
             if oword != nword:
                 diffed.append(f'[[[ ~~{oword}~~ **{nword}** ]]]')
             else:
