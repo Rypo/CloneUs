@@ -605,11 +605,11 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.check_defer(ctx)
 
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
+        async with (ctx.typing(), self.bot.busy_status(activity='chat')):
             sent_messages = await self.clomgr.pipeline(ctx, self.msgmgr.get_mcache(ctx), authors, seed_text, 'gen_batch')
             
-            for msg in sent_messages:
-                await self.msgmgr.add_message(msg)
+        for msg in sent_messages:
+            await self.msgmgr.add_message(msg)
             
     @commands.command(name='author_initial', aliases=useridx.get_users('initial'))
     async def author_initial_commands(self, ctx: commands.Context, *, seed_text:str = None):
@@ -662,11 +662,19 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.check_defer(ctx)
         
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
+        
+        typing_ctx = ctx.channel if self.streaming_mode else ctx
+        
+        async with (typing_ctx.typing(), self.bot.busy_status(activity='chat')):
             if self.streaming_mode:
                 sent_messages = await self.clomgr.base_streaming_generate(ctx, prompt, system_msg)
             else:
                 sent_messages = await self.clomgr.base_generate(ctx, prompt, system_msg)
+        
+        if self.streaming_mode:
+            delete_delay = 0.5
+            await ctx.channel.send('​', delete_after=delete_delay, reference=sent_messages[-1], silent=True)
+                
         return sent_messages    
     
     @commands.hybrid_command(name='chat')            
@@ -691,12 +699,19 @@ class TextGen(commands.Cog, SetTextConfig):
 
         self.msgmgr.base_message_cache.append(prompt)
         self.clomgr.tts_mode = self.tts_mode
-        async with (ctx.channel.typing(), self.bot.busy_status(activity='chat')):
+        
+        typing_ctx = ctx.channel if self.streaming_mode else ctx
+
+        async with (typing_ctx.typing(), self.bot.busy_status(activity='chat')):
             if self.streaming_mode:
                 sent_messages = await self.clomgr.base_streaming_generate(ctx, self.msgmgr.base_message_cache, system_msg)
             else:
                 sent_messages = await self.clomgr.base_generate(ctx, self.msgmgr.base_message_cache, system_msg)
-            
+        
+        if self.streaming_mode:
+            delete_delay = 0.5
+            await ctx.channel.send('​', delete_after=delete_delay, reference=sent_messages[-1], silent=True)
+        
         # Re-join any splits from the 2000 char limit 
         # TODO: Watch for any missing spaces
         sent_text = ''.join([m.clean_content for m in sent_messages])
