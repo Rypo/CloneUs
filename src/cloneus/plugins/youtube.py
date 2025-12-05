@@ -2,7 +2,10 @@ import os
 import re
 #import json
 import random
+import logging
 import warnings
+import typing
+from pathlib import Path
 from dataclasses import dataclass, field
 import orjson
 import more_itertools
@@ -17,20 +20,26 @@ from dotenv import load_dotenv
 
 from cloneus.types import cpaths
 
+logger = logging.getLogger(__name__)
 
 YOUTUBE_DATA_DIR = cpaths.DATA_DIR / 'youtube'
+YOUTUBE_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # # https://stackoverflow.com/questions/3717115/regular-expression-for-youtube-links
 RE_YOUTUBE_URL_ID = re.compile(r'(?P<url>(?:https?://)?(?:www\.|m\.)?youtu(?:\.be/|be.com/\S*(?:watch|embed|shorts)(?:(?:(?=/[-a-zA-Z0-9_]{11,}(?!\S))/)|(?:\S*v=|v/)))(?P<video_id>[-a-zA-Z0-9_]{11,})\S*)', re.I)
 
-PARTS = ['snippet', 'contentDetails', 'statistics', 'topicDetails']
+# private (uploader only): fileDetails, processingDetails, suggestions
+PARTS = ['snippet', 'contentDetails', 'status', 'statistics', 'topicDetails', 'paidProductPlacementDetails']
 
 NFFIELDS = '''items(
 etag, id, 
 snippet(publishedAt, channelId, title, channelTitle, categoryId, tags, description),
-contentDetails(definition, duration, licensedContent), 
-statistics(commentCount, likeCount, viewCount),  
-topicDetails)'''.replace('\n','').replace(' ','')
+contentDetails(definition, duration, licensedContent, caption, contentRating(ytRating)),
+status,
+statistics(commentCount, likeCount, viewCount),
+topicDetails,
+paidProductPlacementDetails
+)'''.replace('\n','').replace(' ','')
 
 VIDEO_CATEGORY_MAP = {
     # 0: 'Unknown',
@@ -78,6 +87,14 @@ RE_YT_TEMPLATE = re.compile(r'< *youtube ([^>]+) *>',) # This should be safe sin
 #ALT_YT_TEMPLATE = '{{youtube id="{video_id}" title="{title}" channel="{channel}" topics="{topics}"}}'
 #ALT_YT_TEMPLATE = '/youtube(id="{video_id}", title="{title}", channel="{channel}", topics="{topics}")'
 
+def quick_check(video_id: str) -> dict:
+    # https://www.reddit.com/r/learnprogramming/comments/7ioxra/how_to_check_if_a_youtube_link_is_valid_or_not/
+    # (['title', 'author_name', 'author_url', 'type', 'height', 'width', 'version', 'provider_name', 'provider_url', 'thumbnail_height', 'thumbnail_width', 'thumbnail_url', 'html'])
+    resp = requests.get(f'https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v={video_id}')
+    if resp.ok:
+        data = resp.json()
+        return {'video_id': video_id, 'title': data['title'], 'channel': data['author_name']}
+    return {}
 
 @dataclass
 class YouTubeVideo:
@@ -92,10 +109,10 @@ class YouTubeVideo:
     #raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_search_item(cls, search_item, query):
+    def from_search_item(cls, search_item:dict, query:str):
         video_id = search_item['id']['videoId']
 
-        _snippet = search_item['snippet']
+        _snippet: dict[str,] = search_item['snippet']
         title = _snippet['title']
         channel = _snippet['channelTitle']
 
@@ -105,10 +122,10 @@ class YouTubeVideo:
         return cls(video_id, title, channel, description, publish_time, topics=[], tags=[], query=query)#, raw=search_item)
 
     @classmethod
-    def from_video_item(cls, video_item, query='', filter_tags=True):
+    def from_video_item(cls, video_item:dict, query='', filter_tags=True):
         video_id = video_item['id']
 
-        _snippet = video_item['snippet']#.get('snippet', dict())
+        _snippet: dict[str,] = video_item['snippet']#.get('snippet', dict())
         title = _snippet['title'] #_snippet.get('title','')
         channel = _snippet['channelTitle'] #_snippet.get('channelTitle','')
 
@@ -132,7 +149,7 @@ class YouTubeVideo:
             # keep tags that contain words not included in the video title or channel
             tags = list(filter(lambda tag: any(map(lambda w: w not in _titlechannel, tag.lower().split())), tags))  # [:3]
 
-        return cls(video_id, title, channel, description, publish_time, topics, tags, query=query)#, raw=video_item)
+        return cls(video_id, title, channel, description, publish_time, topics, tags, query=query)
     
 
     def to_url(self):
@@ -141,65 +158,89 @@ class YouTubeVideo:
     def to_template(self, max_topics=None):
         return YT_TEMPLATE.format(video_id=self.video_id, title=self.title, channel=self.channel, topics=', '.join(self.topics[:max_topics])) # ', '.join(self.tags)
     
-    # def to_dict(self, parsed=False):
-    #     if parsed:
-    #         data = self.__dict__.copy()
-    #         data.pop('raw')
-    #         return data
+    
+def read_video_data(data_filepath: str|Path) -> list[dict]:
+    video_data = []
 
-    #     return self.raw
+    with open(data_filepath, 'rb') as f:
+        for i,line in enumerate(f.read().splitlines()):
+            try:
+                video_data.append(orjson.loads(line))
+            except Exception as e:
+                print(i,e)
+
+    return video_data
+
+def write_video_data(result: dict[str, ], query:str, filepath:Path):
+    with open(filepath, 'ab') as f:
+        f.write(orjson.dumps({'query': query, 'result': result}))
+        f.write(b'\n')
     
+    logger.info(f"wrote {len(result['items'])} items to {filepath.name} file")
+
+class YouTubeVideoCollection(dict[str,YouTubeVideo]):
+    
+    @classmethod
+    def from_files(cls, video_data_filepath:str|Path, search_data_filepath:str|Path):
+        video_data_filepath = Path(video_data_filepath)
+        search_data_filepath = Path(search_data_filepath)
+
+        for filepath in [video_data_filepath, search_data_filepath]: 
+            filepath.touch()
+            
+        video_data = read_video_data(video_data_filepath)
+        
+        ytv_collection = {}
+        for video_items in video_data:
+            query = video_items['query']
+            result = video_items['result']
+            
+            for item in result['items']:
+                video_id = item['id']
+                ytv = YouTubeVideo.from_video_item(item, query=query, filter_tags=True)
+                # keep higher information entry
+                if query:
+                    ytv_collection.update({video_id: ytv})
+                else:
+                    ytv_collection.setdefault(video_id, ytv)
+
+        return cls(ytv_collection)
     
 
+    def add_result_items(self, result_items:list[dict], query:str) -> list[str, YouTubeVideo]:
+        '''add parsed result items to collection, return a list of video_ids'''
+        
+        video_ids = []
+        for item in result_items: #result['items']:
+            video_id = item['id']
+            ytv = YouTubeVideo.from_video_item(item, query=query, filter_tags=True)
+            # We don't want to clobber items with higher information
+            # For example, if got the same video twice, but once with a query and once without
+            # we want to keep the query no mater what
+            
+            # TODO: UNHANDLED CASE - two different queries return the same video
+            # -- this is likely very common, but code has no way of handling it
+            if query:
+                self.update({video_id: ytv})
+            else:
+                self.setdefault(video_id, ytv)
+            
+            video_ids.append(video_id)
 
-class YouTubeVideoCollection(dict):
-    #def __init__(self, collection: dict[str, YouTubeVideo]):
-    #    super().__init__(collection)
-
-    # @classmethod
-    # def from_search(cls, search_results:dict, query:str):
-    #     return cls([YouTubeVideo.from_search_item(item, query) for item in search_results['items']], raw=search_results)
+        return video_ids
     
-    # @classmethod
-    # def from_idquery(cls, idquery_results:dict):
-    #     return cls([YouTubeVideo.from_video_item(item, filter_tags=True) for item in idquery_results['items']], raw=idquery_results)
     
-    # @classmethod
-    # def from_dict(cls, ndict):
-    #    return cls(ndict)
-    
-    # @classmethod
-    # def reindex(self, key='video_id'):
-    #     return self.from_dict({ytv.__getattribute__(key): ytv for ytv in self.values()})
-    
-    def find_all(self, predicate):
+    def find_all(self, predicate: typing.Callable[[YouTubeVideo], bool]) -> list[YouTubeVideo]:
         return list(filter(predicate, self.values()))
     
-    def find(self, predicate, default=None):
-        #return more_itertools.first_true(self.collection, default=default, pred=predicate)
+    def find(self, predicate: typing.Callable[[YouTubeVideo], bool], default=None) -> YouTubeVideo | None:
         return next(filter(predicate, self.values(),), default)
         
 
 
-# def chunk_unique(items, max_chunk_size=50):
-#     items = np.unique(items)
-#     if items.shape[0] <= max_chunk_size:
-#         return [items]
-#     ngroup, nrem = divmod(items.shape[0], max_chunk_size)
-#     chunk_splits = np.split(items[:-nrem], ngroup) + [items[-nrem:]]
-#     return chunk_splits
-
-def fast_check(video_id):
-    # https://www.reddit.com/r/learnprogramming/comments/7ioxra/how_to_check_if_a_youtube_link_is_valid_or_not/
-    # (['title', 'author_name', 'author_url', 'type', 'height', 'width', 'version', 'provider_name', 'provider_url', 'thumbnail_height', 'thumbnail_width', 'thumbnail_url', 'html'])
-    resp = requests.get(f'https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v={video_id}')
-    if resp.ok:
-        data = resp.json()
-        return {'video_id': video_id, 'title': data['title'], 'channel': data['author_name']}
-    return {}
 
 
-def parse_template_string(template_string: str):
+def parse_template_string(template_string: str) -> dict[str,str]:
     '''Takes a templated youtube string <youtube title="..." channel="..." ...>
     and returns a dict(title="...", channel...)
     '''
@@ -215,20 +256,29 @@ def parse_template_string(template_string: str):
             k,v = kvs.replace('"','').split('=')
             matched_params[k.strip()] = v.strip()
         except Exception as e:
-            print(f"Couldn't parse: {kvs}\n{e}")
+            logger.error(f"Couldn't parse: {kvs}", exc_info=e)
 
     return matched_params
     
 
-    
+
+# TODO: Use stored raw search results to build a structure that maps query: video_ids, or query: {video_id: id, relevance_rank: idx}
+
 class YouTubeManager:
     def __init__(self, video_data_file='video_data.jsonl', search_data_file='search_data.jsonl', invalid_ids_file='invalid_ids.txt', allow_fetch=True, enabled=True):
         self.enabled = enabled
         self.allow_fetch = allow_fetch
         self.quota_usage = 0
 
-        self.invalid_ids = set()
-        self.video_index = YouTubeVideoCollection()
+        self.video_data_filepath  = YOUTUBE_DATA_DIR.joinpath(video_data_file)
+        self.search_data_filepath = YOUTUBE_DATA_DIR.joinpath(search_data_file)
+        self.invalid_ids_filepath = YOUTUBE_DATA_DIR.joinpath(invalid_ids_file)
+
+        for filepath in [self.video_data_filepath, self.search_data_filepath, self.invalid_ids_filepath]:
+            filepath.touch()
+        
+        self.video_index = YouTubeVideoCollection.from_files(self.video_data_filepath, self.search_data_filepath)
+        self.invalid_ids = set(self.invalid_ids_filepath.read_text().splitlines())
 
         if not os.getenv('YOUTUBE_API_KEY'):
             if self.enabled:
@@ -237,234 +287,169 @@ class YouTubeManager:
         
         if self.enabled:
             yt = gbuild('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
-            
             self.ytv = yt.videos()
             self.yts = yt.search()
-        
-            self.video_data_filepath = YOUTUBE_DATA_DIR.joinpath(video_data_file)
-            self.search_data_filepath = YOUTUBE_DATA_DIR.joinpath(search_data_file)
-            self.invalid_ids_filepath = YOUTUBE_DATA_DIR.joinpath(invalid_ids_file)    
-            
-            self.video_index = YouTubeVideoCollection()
-            self._build_initial_index()
-
-            self.invalid_ids = self.read_invalid_ids()
-
-
-    def _build_initial_index(self):
-        YOUTUBE_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.video_data_filepath.touch()
-        self.search_data_filepath.touch()
-        self.invalid_ids_filepath.touch()
-        raw_vid_index = self.read_video_data(result_type='lookup')
-
-        for video_items in raw_vid_index:
-            query = video_items['query']
-            result = video_items['result']
-            self.parse_result(result, query)
-        
-    def read_invalid_ids(self):
-        with open(self.invalid_ids_filepath, 'r') as f:
-            invalid_ids = f.read().splitlines()
-        return set(invalid_ids)
     
-    def write_invalid_ids(self, new_invalid_ids):
+
+    def write_invalid_ids(self, new_invalid_ids: str | list[str]):
         '''writes to invalid_ids file and updates self.invalid_ids'''
+        if not new_invalid_ids: 
+            return
+        
         if isinstance(new_invalid_ids, str):
             new_invalid_ids = [new_invalid_ids]
-        with open(self.invalid_ids_filepath, 'a') as f:
-            f.writelines([ii + '\n' for ii in new_invalid_ids])
-
+        
         self.invalid_ids.update(new_invalid_ids)
-        print(f'added {len(new_invalid_ids)} ids to known invalid_ids')
 
+        with open(self.invalid_ids_filepath, 'a') as f:
+            f.write('\n'.join(new_invalid_ids) + '\n')
+            # f.writelines([ii + '\n' for ii in new_invalid_ids])
 
-    def write_video_data(self, result, query, result_type):
-        filepath = self.search_data_filepath if result_type=='search' else self.video_data_filepath
-        with open(filepath, 'ab') as f:
-            f.write(orjson.dumps({'query': query, 'result': result}))
-            f.write(b'\n')
-        
-        print(f"wrote {len(result['items'])} items to {result_type} file")
+        logger.info(f'added {len(new_invalid_ids)} ids to known invalid_ids')
 
-    def read_video_data(self, result_type='lookup'):
-        filepath = self.search_data_filepath if result_type=='search' else self.video_data_filepath
-        video_data = []
-
-        with open(filepath, 'rb') as f:
-            for i,line in enumerate(f.read().splitlines()):
-                try:
-                    video_data.append(orjson.loads(line))
-                except Exception as e:
-                    print(i,e)
-
-        return video_data
     
-
-    def parse_result(self, result, query):
-        '''Parse a result and update self.video_index'''
-        vidx = {}
-        for item in result['items']:
-            viddata = YouTubeVideo.from_video_item(item, query=query, filter_tags=True)
-            vidx[viddata.video_id] = viddata
-        # We don't want to clobber items with higher information
-        # For example, if got the same video twice, but once with a query and once without
-        # we want to keep the query no mater what
-        if query:
-            self.video_index.update(vidx)
-        else:
-            # if in index, assume equal or greater information and don't update
-            # TODO: UNHANDLED CASE - two different queries return the same video
-            # -- this is likely a very common occurance, but code has no way of handling it at the moment
-            # -- will need major revisions to accomodate
-            for k,v in vidx.items():
-                self.video_index.setdefault(k, v)
-        
-        return vidx
-    
-    def encode(self, text, allow_fetch=None):
-        if not self.enabled:
+    def encode(self, text:str, allow_fetch:bool = None) -> str:
+        if not self.enabled: 
             return text
-        allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
-        if 'youtu' in text.lower():
-            text = RE_YOUTUBE_URL_ID.sub(lambda m: self._encode_re_helper(m, allow_fetch=allow_fetch), text)
-        return text
-
-    def decode(self, text, allow_fetch=None, return_matchdict=False):
-        if not self.enabled:
+        
+        if 'youtu' not in text.lower():
             return text
+                
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
-        if '<youtube' in text:
-            text = RE_YT_TEMPLATE.sub(lambda m: self._decode_re_helper(m, allow_fetch=allow_fetch), text)
-            if return_matchdict:
-                matched_params = parse_template_string(RE_YT_TEMPLATE.search(text))
-                return text, matched_params
 
-        return text
-    
-    def _encode_re_helper(self, match_obj: re.Match, allow_fetch):
-        video_id = match_obj.groupdict()['video_id']
-        if video_id in self.invalid_ids:
-            return ''
-        videos = self.get_videos(video_id, query='', allow_fetch=allow_fetch)
-        if not videos:
+        def _encode_re_helper(match_obj: re.Match) -> str:
+            video_id = match_obj.groupdict()['video_id']
+            if video_id in self.invalid_ids:
+                return ''
+            if (videos := self.get_video_metadata(video_id, query='', allow_fetch=allow_fetch)):
+                return videos[0].to_template()
             if allow_fetch:
-                print('NO RECORD FOUND FOR:',video_id)
+                logger.info(f'No record found for: {video_id}')
                 self.write_invalid_ids(video_id)
             return ''
-        return videos[0].to_template()
-
-    def _decode_re_helper(self, match_obj: re.Match, allow_fetch):
-        template_str = match_obj.group(1)
-        matched_params = parse_template_string(template_str)
         
-        #video_id = matched_params.get('id','')
-        title = matched_params.get('title','')
-        #channel = matched_params.get('channel','')
-
-        # there are two competing interests here.
-        # If we are decoding a known valid url (i.e user:youtube.com/... -> <youtube ...> -> youtube.com/)
-        # wait, would that ever even happen?
-        # If this function will ONLY be called on generated templates, then we can remove the cache_video look up
-        # but if not, then would be spamming api calls for no reason.
-        #if (cached_video := self.video_index.get(video_id)):
-        #    return cached_video.to_url()
         
-        # assume video_id is a fake if not cached, so don't both querying
-       
-        if len(title) >= 3:
-            videos, from_cache = self.get_search(title, allow_fetch=allow_fetch)
-            pick = videos[0] if not from_cache else random.choice(videos)
-            return pick.to_url()
+        text = RE_YOUTUBE_URL_ID.sub(_encode_re_helper, text)
+        
+        return text
+
+    def decode(self, text:str, allow_fetch:bool = None) -> str:
+        if not self.enabled:
+            return text
+        
+        if '<youtube' not in text:
+            return text
+
+        allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
+        
+        def _decode_re_helper(match_obj: re.Match) -> str:
+            template_str = match_obj.group(1)
+            matched_params = parse_template_string(template_str)
             
-        # elif len(channel) >= 3:
-        #     videos, from_cache = self.get_search(channel, allow_fetch=allow_fetch)
-        #     pick = random.choice(videos)
-        #     return pick.to_url()
-        else:
-            # TODO: can we do better than just randomly picking something?
-            print('USING RANDOM VIDEO')
-            rand_id = random.choice(list(self.video_index.keys()))
-            return self.video_index[rand_id].to_url()
+            video_id = matched_params.get('id','')
+            title = matched_params.get('title','')
+            channel = matched_params.get('channel','')
+            
+            if len(title) >= 3:
+                return self.get_search_results(title, allow_fetch=allow_fetch)[0].to_url() # return top/first search result
+            elif video_id and (video := self.video_index.get(video_id)): 
+                return video.to_url() # unless in collection, assume video_id is a hallucinated. Not worth querying. NOTE: could quick_check
+            elif len(channel) >= 3:
+                return self.get_search_results(channel, allow_fetch=allow_fetch)[0].to_url() # return top/first search result
+            else:
+                logger.warning('Failed to extract useable metadata. Using random video.')
+                return random.choice(list(self.video_index.values())).to_url()
+                
+    
+        text = RE_YT_TEMPLATE.sub(_decode_re_helper, text)
+            
+        return text
 
-
-
-    def get_videos(self, video_ids:list[str], query:str, allow_fetch=None) -> list[YouTubeVideo]: # (should it return a list of YouTubeVideo or {'viDeoID': YouTubeVideo})??
+    def get_video_metadata(self, video_ids:list[str], query: str | None, allow_fetch:bool = None) -> list[YouTubeVideo]:
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
         if isinstance(video_ids, str):
             video_ids = [video_ids]
-
-        # filter out any known invalid ids
-        video_ids = (set(video_ids)-self.invalid_ids)
-        found_ids = set()
+        
+        # filter out any known invalid ids, preserve relevance sort order
+        video_id_order = {k: i for i,k in enumerate(filter(lambda t: t not in self.invalid_ids, video_ids))}
+        
+        ids_to_lookup = list(video_id_order.keys())
+        
         output = []
 
-        for vid in video_ids:
-            if (vdata:=self.video_index.get(vid)):
-                output.append(vdata)
-                found_ids.add(vid)
+        for v_id in video_id_order:
+            if (vid_data := self.video_index.get(v_id)):
+                output.append(vid_data) # this makes final sort required
+                ids_to_lookup.remove(v_id)
         
-        video_ids -= found_ids
-        
-        if not video_ids:
-            return output
+        if not ids_to_lookup: 
+            return output # all ids present in collection
         
         if not allow_fetch:
-            print('WARNING: some ids not index and `allow_fetch=False`:', video_ids)
+            logger.warning('IDs not index and `allow_fetch=False`:', ids_to_lookup)
             return output
             
-        # TODO: consider moving write logic outside of the loop so don't do multiple rounds of io
-        for video_ids_chunk in more_itertools.chunked(video_ids, 50):
+        
+        for video_ids_chunk in more_itertools.chunked(ids_to_lookup, 50):
             v_idstr = ','.join(video_ids_chunk)
 
-            new_videos_result = self._fetch_videos(v_idstr)
-            if new_videos_result['items']:
-                self.write_video_data(new_videos_result, query, result_type='lookup')
-                new_vididxs = self.parse_result(new_videos_result, query=query)
-                # any ids excluded from result were not returned by api, and therefore not valid
-                if (new_invalid_ids := set(video_ids_chunk)-set(new_vididxs.keys())):
-                    self.write_invalid_ids(new_invalid_ids)
-                output.extend(list(new_vididxs.values()))
+            video_response_data = self._fetch_videos(v_idstr)
 
+            if video_response_data['items']:
+                write_video_data(video_response_data, query, self.video_data_filepath)
+                video_ids = self.video_index.add_result_items(video_response_data['items'], query=query)
+                
+                for v_id in video_ids:
+                    output.append(self.video_index.get(v_id))
+                
+                # any ids excluded from result were not returned by api, and therefore not valid
+                if (new_invalid_ids := set(video_ids_chunk)-set(video_ids)):
+                    self.write_invalid_ids(new_invalid_ids)
+                               
+        # preserve original sort order
+        output = sorted(output, key=lambda ytv: video_id_order[ytv.video_id])
         return output
 
-    def get_search(self, query, allow_fetch=None):
+    def get_search_results(self, query:str, allow_fetch:bool = None) -> list[YouTubeVideo]:
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
-        # LOGIC FOR lookup by query/title goes here
-        #cache_output = []
-        cache_output = self.video_index.find_all(lambda v: query in [v.title,v.query])
-        from_cache = True
         
-        if cache_output:
-            return cache_output, from_cache
+        if not query:
+            logger.warning('Search attempted with empty query')
+            return []
+        # If there is an *exact* match for query, return from collection
+        if (cached_results := self.video_index.find_all(lambda v: query in [v.title,v.query])):
+            return cached_results
         
-        new_output = []
-        from_cache = False
+        search_results = []
         
         if allow_fetch:
-            new_search_result = self._fetch_search(query)
-            if new_search_result['items']:
-                self.write_video_data(new_search_result, query, result_type='search')
-                new_video_ids = [item['id']['videoId'] for item in new_search_result['items'] if item['id']['kind']=='youtube#video']
-                # NOTE: these are not _strictly_ new outputs since some of the ids may be cached already
-                new_output = self.get_videos(new_video_ids, query=query, allow_fetch=allow_fetch)
+            search_response_data = self._fetch_search(query)
 
-        return new_output, from_cache
+            if search_response_data['items']:
+                write_video_data(search_response_data, query, self.search_data_filepath)
+                video_ids = [item['id']['videoId'] for item in search_response_data['items'] if item['id']['kind']=='youtube#video'] # omit youtube#playlist, youtube#channel
+                
+                # Only API cost +1 to get detailed metadata for all search results now  
+                search_results = self.get_video_metadata(video_ids, query=query, allow_fetch=allow_fetch)
+
+        return search_results
 
 
     
-    def _fetch_videos(self, video_idstr:str):
+    def _fetch_videos(self, video_idstr:str) -> dict[str, ]:
+        # https://developers.google.com/youtube/v3/docs/videos/list
         resp = self.ytv.list(part=PARTS, id=video_idstr, fields=NFFIELDS)
         result = resp.execute()
         self.quota_usage+=1
-        print(f'API CALL: fetch_videos({video_idstr}) | QUOTA_USAGE: {self.quota_usage}')
+        logger.info(f'API CALL: fetch_videos({video_idstr}) | QUOTA_USAGE: {self.quota_usage}')
         return result   
     
-    def _fetch_search(self, query):
-        resp = self.yts.list(part='snippet', safeSearch='none', maxResults=50, q=query)
+    def _fetch_search(self, query:str) -> dict[str, ]:
+        # https://developers.google.com/youtube/v3/docs/search/list
+        resp = self.yts.list(part='snippet', safeSearch='none', maxResults=50, q=query, order='relevance', type='video')
         result = resp.execute()
         self.quota_usage+=100
-        print(f'API CALL: fetch_search("{query}") | QUOTA_USAGE: {self.quota_usage}')
+        logger.info(f'API CALL: fetch_search("{query}") | QUOTA_USAGE: {self.quota_usage}')
         return result
     
 

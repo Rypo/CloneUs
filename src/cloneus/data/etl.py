@@ -197,7 +197,7 @@ def apply_youtube_encoding(text_col:pd.Series, youtube_encode_fetch: bool|tuple[
     if yt_fetch and ytm.enabled:
         # do fetch in a batches of 50 for best api quota usage efficency
         video_ids = text_col.str.extractall(youtube.RE_YOUTUBE_URL_ID).video_id.to_list()
-        _ = ytm.get_videos(video_ids=video_ids, query='', allow_fetch=yt_fetch)
+        _ = ytm.get_video_metadata(video_ids=video_ids, query='', allow_fetch=yt_fetch)
     
     # Transform all youtube URLs into custom metadata tag for better LLM comprehension
     return text_col.apply(ytm.encode)
