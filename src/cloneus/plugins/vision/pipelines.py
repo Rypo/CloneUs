@@ -404,7 +404,16 @@ class DeepCacheMixin:
 
     
 class SingleStagePipeline:
-    def __init__(self, model_name: str, model_path:str, config:DiffusionConfig, offload=False, scheduler_setup:str|tuple[str, str, dict]=None, dtype=torch.bfloat16, root_name:str='base'):
+    def __init__(self, 
+                 model_name: str, 
+                 model_path: str, 
+                 config: DiffusionConfig, 
+                 offload: bool = False, 
+                 scheduler_setup: str|tuple[str, dict] = None, 
+                 dtype = torch.bfloat16, 
+                 init_loras: list[tuple[str,float]] = None, 
+                 root_name: str = 'base',):
+        
         self.is_compiled = False
         self.is_ready = False
         self.dc_enabled = None
@@ -419,12 +428,14 @@ class SingleStagePipeline:
         self.scheduler_kwargs = None
 
         self.dtype = dtype
+        
+        self.init_loras = init_loras
+        self.adapter_weights = {}
+
         self.root_name = root_name
+
         self.clip_skip = self.config.clip_skip
 
-        self.adapter_names = []
-        self.adapter_weight = None
-        self.lora_dirpath = cpaths.ROOT_DIR/f'extras/loras/{self.root_name}'
         # core
         self.base = None
         self.basei2i = None
@@ -478,8 +489,48 @@ class SingleStagePipeline:
     def set_pag_config(self, pag_scale:float=0.0, pag_applied_layers: str|list[str] = None, disable_on_zero:bool=False):
         raise NotImplementedError('PAG not implemented for this pipeline type')
     
-    def load_lora(self, weight_name:str, init_weight:float=None):
-        pass
+    @torch.inference_mode()
+    def load_loras(self, path_weights: list[tuple[str,float]] = None):
+        if path_weights is None:
+            path_weights = self.init_loras
+        
+        if not path_weights:
+            return
+        
+        for lora_path,lora_weight in path_weights:
+            if isinstance(lora_path, Path):
+                lora_path = lora_path.as_posix()
+            
+            adapter_name = lora_path.split('/')[-1].rsplit('.', maxsplit=1)[0].replace('-','_')
+
+            try:
+                self.base.load_lora_weights(lora_path, adapter_name=adapter_name)
+                self.adapter_weights[adapter_name] = lora_weight
+            except IOError as e:
+                raise NotImplementedError(f'Unsupported lora adapter {adapter_name!r}')
+        
+        if sum(self.adapter_weights.values()) > 0:
+            self.base.set_adapters(self.adapter_weights.keys(), self.adapter_weights.values())
+        
+    @torch.inference_mode()
+    def toggle_loras(self):
+        if self.base.get_active_adapters():
+            self.base.disable_lora()
+        elif self.adapter_weights:
+            self.base.enable_lora()
+
+        logger.debug(f'Active Adapters: {self.base.get_active_adapters()}\nAll Adapters: {self.base.get_list_adapters()}' )
+              
+    @torch.inference_mode()
+    def set_adapter_weight(self, adapter_name:str, weight: float):            
+        try:
+            self.adapter_weights[adapter_name] = weight
+        except KeyError:
+            raise KeyError(f'Unknown adapter_name: {adapter_name!r}')
+        
+        self.base.set_adapters(self.adapter_weights.keys(), self.adapter_weights.values())
+
+        logger.debug(f'Active Adapters: {self.base.get_active_adapters()}\nAdapter Weights: {self.adapter_weights}')
 
 
     def _scheduler_init(self) -> None:
@@ -607,25 +658,6 @@ class SingleStagePipeline:
         release_memory()
         return [Image.fromarray(img) for img in frames]
         
-    @torch.inference_mode()
-    def toggle_loras(self, detail_weight:float|None = None):
-        lora_scale = None
-        if self.adapter_names and detail_weight != self.adapter_weight:
-            print('Detail weight:', detail_weight, 'Current adapter weight:', self.adapter_weight)
-            if detail_weight:
-                lora_scale = detail_weight
-                self.base.enable_lora()
-                #self.base.enable_adapters()
-                self.base.set_adapters(self.adapter_names, detail_weight)
-            else:
-                #self.base.disable_adapters()
-                self.base.disable_lora()
-            self.adapter_weight = detail_weight
-        
-            print('Active Adapters:', self.base.get_active_adapters())
-            print('All Adapters:', self.base.get_list_adapters())
-        return lora_scale
-
 
     @torch.inference_mode()
     def _pipe_txt2img(self, prompt_encodings:dict, num_inference_steps:int, guidance_scale:float, target_size:tuple[int,int], seed=None):
@@ -654,19 +686,19 @@ class SingleStagePipeline:
         return self._pipe_img2img(prompt_encodings, image, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
     
     @torch.inference_mode()
-    def _batched_txt2img(self, prompts_encodings:dict[str, torch.Tensor], num_images:int, batch_size:int, num_inference_steps:int, guidance_scale:float, target_size:tuple[int, int], seed:list[int]|None, output_type:str='pil'):
+    def _batched_txt2img(self, prompt_encodings:dict[str, torch.Tensor], num_images:int, batch_size:int, num_inference_steps:int, guidance_scale:float, target_size:tuple[int, int], seed:list[int]|None, output_type:str='pil'):
         generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
         if generators is None:
             generators = [None]*num_images
         h,w = target_size
 
         batch_size = min(num_images, batch_size)
-        batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
 
 
         for gen_batch in batched(generators, batch_size):
             if (batch_len := len(gen_batch)) != batch_size:
-               batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
+               batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
             
             if gen_batch[0] is None:
                 gen_batch = None
@@ -679,14 +711,14 @@ class SingleStagePipeline:
             yield images
 
     @torch.inference_mode()
-    def _batched_img2img(self, prompts_encodings:dict[str, torch.Tensor], image:Image.Image, num_images:int, batch_size:int, num_inference_steps:int, strength:float, guidance_scale:float, seed:list[int]|None, output_type:str='pil'):
+    def _batched_img2img(self, prompt_encodings:dict[str, torch.Tensor], image:Image.Image, num_images:int, batch_size:int, num_inference_steps:int, strength:float, guidance_scale:float, seed:list[int]|None, output_type:str='pil'):
         generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
         if generators is None:
             generators = [None]*num_images
         w,h = image.size
 
         batch_size = min(num_images, batch_size)
-        batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
         
         # n_full_batches,final_batch_size = divmod(num_images, batch_size)
         # batch_lengths = [batch_size]*n_full_batches
@@ -696,7 +728,7 @@ class SingleStagePipeline:
         # gen_batch = generators
         for gen_batch in batched(generators, batch_size):
             if (batch_len := len(gen_batch)) != batch_size:
-                batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
+                batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
             if gen_batch[0] is None:
                 gen_batch = None
             #if generators is not None:
@@ -762,7 +794,6 @@ class SingleStagePipeline:
                        steps:int=None, 
                        negative_prompt:str=None, 
                        guidance_scale:float=None, 
-                       detail_weight:float=0,
                        aspect:typing.Literal['square','portrait','landscape']=None, 
                        refine_strength:float=None, 
                        seed:int = None,
@@ -779,12 +810,12 @@ class SingleStagePipeline:
         target_size = (img_dims[1], img_dims[0]) # h,w
         
 
-        lora_scale = self.toggle_loras(detail_weight)
+        
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip)
 
         call_kwargs = dict(prompt=prompt, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                           detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed)
+                           aspect=aspect, refine_strength=refine_strength, seed=seed)
                 
         if n_images > 1:
             _,BSZ = self.batch_settings('full')
@@ -792,14 +823,14 @@ class SingleStagePipeline:
                 BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
             
             call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
-            batchgen = self._batched_txt2img(prompt_encodings, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seeds, output_type='pil')
+            batchgen = self._batched_txt2img(prompt_encodings=prompt_encodings, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seeds, output_type='pil')
             
             for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
                 yield (imbatch, kwbatch)
         else:
-            image = self._pipe_txt2img(prompt_encodings, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seed)
+            image = self._pipe_txt2img(prompt_encodings=prompt_encodings, num_inference_steps=steps, guidance_scale=guidance_scale, target_size=target_size, seed=seed)
             if refine_strength:
-                image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
+                image = self._pipe_img2upimg(prompt_encodings=prompt_encodings, image=image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
             yield ([image], [call_kwargs])
         
         release_memory()
@@ -811,7 +842,6 @@ class SingleStagePipeline:
                          strength: float = None, 
                          negative_prompt: str = None, 
                          guidance_scale: float = None, 
-                         detail_weight: float = 0,
                          aspect: typing.Literal['square','portrait','landscape'] = None, 
                          
                          refine_strength: float = None, 
@@ -830,13 +860,12 @@ class SingleStagePipeline:
         image = self._resize_image(image, aspect)
                 
 
-        lora_scale = self.toggle_loras(detail_weight)
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip, image=image)
         
         # don't want to pass around full image, going to replace with image_url in imagegen anyway
         call_kwargs = dict(prompt=prompt, image='PLACEHOLDER', steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                           detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed,)
+                        aspect=aspect, refine_strength=refine_strength, seed=seed,)
         
         
         if n_images > 1:
@@ -866,7 +895,6 @@ class SingleStagePipeline:
                      steps: int = None, 
                      negative_prompt: str = None, 
                      guidance_scale: float = None, 
-                     detail_weight: float = 0,
                      seed: int = None,
                      **kwargs) -> tuple[Image.Image, dict]:
         
@@ -876,17 +904,16 @@ class SingleStagePipeline:
         guidance_scale = fkwg['guidance_scale']
         negative_prompt=fkwg['negative_prompt']
 
-        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         image = self._resize_image(image, aspect=None, dim_choices=None) # Resize to best dim match
 
-        lora_scale = self.toggle_loras(detail_weight)
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt,  clip_skip=self.clip_skip, image=image)
 
         image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
         
         call_kwargs = dict(image=image, prompt=prompt, refine_strength=refine_strength, steps=steps, negative_prompt=negative_prompt, 
-                           guidance_scale=guidance_scale, detail_weight=detail_weight, seed=seed,)
+                           guidance_scale=guidance_scale, seed=seed,)
         release_memory()
         return image, call_kwargs
     
@@ -899,7 +926,6 @@ class SingleStagePipeline:
                             strength_start: float = 0.30, 
                             negative_prompt: str = None, 
                             guidance_scale: float = None, 
-                            detail_weight: float = 0, 
                             aspect: typing.Literal['square','portrait','landscape'] = None, 
                             mid_frames:int=0,
                             seed: int = None, 
@@ -911,7 +937,6 @@ class SingleStagePipeline:
         # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
         # the minimal representation of the prompt. If you 
         
-        # TODO: https://huggingface.co/THUDM/CogVideoX-5b-I2V
         fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
         
         negative_prompt=fkwg['negative_prompt']
@@ -919,11 +944,10 @@ class SingleStagePipeline:
         steps = fkwg['steps']
         aspect = fkwg['aspect']
 
-        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
-        lora_scale = self.toggle_loras(detail_weight)
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip, partial_offload=True, image=image)
         
         # subtract 1 for first image
         nframes = nframes - 1
@@ -967,8 +991,8 @@ class SingleStagePipeline:
     
 
     @torch.inference_mode()
-    def _batched_imgs2imgs(self, prompts_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
-        batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+    def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
+        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
         batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
         w,h = img_wh # need wh in case `images` is a batch of latents
         
@@ -979,7 +1003,7 @@ class SingleStagePipeline:
             generators = generator_batch(seed, batch_len, device='cpu')
                 
             if batch_len != batch_size:
-               batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_len)
+               batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
 
             latents = self.i2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=generators, output_type='latent', **kwargs).images 
 
@@ -995,7 +1019,6 @@ class SingleStagePipeline:
 
                           negative_prompt: str = None, 
                           guidance_scale: float = None, 
-                          detail_weight: float = 0,
                           two_stage: bool = False, 
                           aseed: int = None, 
                           **kwargs):   
@@ -1006,11 +1029,6 @@ class SingleStagePipeline:
             aseed = np.random.randint(1e9, 1e10-1)
         elif aseed < 0:
             aseed = None
-            
-        # if self.has_adapters and detail_weight is not None:
-        #     self.base.set_adapters(self.base.get_active_adapters(), detail_weight)
-        
-        # lora_scale = detail_weight if detail_weight and self.has_adapters else None
 
         fkwg = self.config.get_if_none(steps=steps, strength=astrength, negative_prompt=negative_prompt, guidance_scale=guidance_scale)
         steps = fkwg['steps']
@@ -1026,16 +1044,15 @@ class SingleStagePipeline:
         dim_out = resized_images[0].size
         w,h = dim_out
         
-        lora_scale = self.toggle_loras(detail_weight)
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, clip_skip=self.clip_skip, partial_offload=True, image=resized_images)
         
         # First, yield the total number of frames since it may have changed from slice
         yield len(resized_images)
 
         latents = []
         t0 = time.perf_counter()
-        for img_lats in self._batched_imgs2imgs(prompts_encodings, resized_images, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+        for img_lats in self._batched_imgs2imgs(prompt_encodings, resized_images, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
             latents.append(img_lats)
             yield len(img_lats)
  
@@ -1046,7 +1063,7 @@ class SingleStagePipeline:
             latent_blend = self._interpolate_latents(raw_image_latents, latents, latent_soft_mask, dim_out, time_blend=True, keep_dims=True)
             
             latents = []
-            for img_lats in self._batched_imgs2imgs(prompts_encodings, latent_blend, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+            for img_lats in self._batched_imgs2imgs(prompt_encodings, latent_blend, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
                 latents.append(img_lats)
                 yield len(img_lats)
             
@@ -1094,9 +1111,9 @@ class SingleStagePipeline:
 
 
 class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, root_name='sdxl')
-
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sdxl')
+        
     def load_pipeline(self):
         _pipe_kwargs = dict(torch_dtype=self.dtype, variant="fp16", use_safetensors=True, add_watermarker=False, )
         if str(self.model_path).endswith('.safetensors'):
@@ -1109,10 +1126,8 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
             self.base = self.base.to(0)
         
         self.base.vae.enable_slicing()
-
         self._scheduler_init()
-        
-        self.load_lora(weight_name='detail-tweaker-xl.safetensors')
+        self.load_loras()
         # https://github.com/comfyanonymous/ComfyUI/blob/f58475827150c2ac610cbb113019276efcd1a733/comfy/sd1_clip.py#L234
         # self.compeler = Compel(
         #     tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
@@ -1171,23 +1186,6 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         print(self.base.__class__,self.base.__class__.__name__)
         print(self.basei2i.__class__, self.basei2i.__class__.__name__)
         return pag_config
-
-        
-
-    @torch.inference_mode()
-    def load_lora(self, weight_name:str, init_weight:float=None):        
-        adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
-        
-        try:
-            self.base.load_lora_weights(self.lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
-            self.adapter_names.append(adapter_name)
-            if init_weight is None:
-                self.base.disable_lora()
-            else:
-                self.base.set_adapters(adapter_name, init_weight)
-        except IOError as e:
-            raise NotImplementedError(f'Unsupported lora adapter {adapter_name!r}')
-            
 
     def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
         dims_opts = {
@@ -1285,16 +1283,12 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
-    
-    
-class SD3Base(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, 
-                 quantize:bool=True):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, root_name='sd35')
-        self.max_seq_len = 512
-        self.quantize = quantize
-
         
+        
+class SD3Base(SingleStagePipeline):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sd35')
+        self.max_seq_len = 512
     
     @torch.inference_mode()
     def load_pipeline(self):
@@ -1302,7 +1296,7 @@ class SD3Base(SingleStagePipeline):
             self.base = StableDiffusion3Pipeline.from_single_file(self.model_path, torch_dtype=self.dtype,  use_safetensors=True,)
             # SD3Transformer2DModel.from_single_file
         else:
-            quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16) if self.quantize else None
+            quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
             transformer = SD3Transformer2DModel.from_pretrained(self.model_path, subfolder="transformer", quantization_config = quant_config, torch_dtype=self.dtype)
             
             self.base: StableDiffusion3Pipeline =  StableDiffusion3Pipeline.from_pretrained(
@@ -1314,13 +1308,12 @@ class SD3Base(SingleStagePipeline):
         if not self.offload:
             self.base = self.base.to(device)
             self.base.text_encoder_3 = self.base.text_encoder_3.to(device, self.dtype)
-            #if self.quantize:
             self.base.text_encoder_3 = cpu_offload(self.base.text_encoder_3, execution_device = device)
 
         self.base.vae.enable_slicing()
 
         self._scheduler_init()
-        
+        self.load_loras()
 
         self.basei2i: StableDiffusion3Img2ImgPipeline = StableDiffusion3Img2ImgPipeline.from_pipe(self.base,)
 
@@ -1331,29 +1324,6 @@ class SD3Base(SingleStagePipeline):
         
         self.is_ready = True
     
-    @torch.inference_mode()
-    def load_lora(self, weight_name:str, init_weight:float=None):
-        
-        adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
-        
-        try:
-            #loraops.set_lora_transformer(self.base, Path(lora_dirpath).joinpath(weight_name), adapter_name)
-            #lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
-            lora_sd = Path(self.lora_dirpath).joinpath(weight_name)
-            #self.base.transformer,skipped_keys = loraops.manual_lora(lora_sd, self.base.transformer, adapter_name=adapter_name)
-            self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
-            #self.base.load_lora_into_transformer(self.base.lora_state_dict(lora_sd), transformer=self.base.transformer, adapter_name=adapter_name, low_cpu_mem_usage=True)
-            #self.base.load_lora_into_transformer(lora_sd, None, self.base.transformer, adapter_name=adapter_name)
-            #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
-            if init_weight is None:
-                self.base.disable_lora()
-            else:
-                self.base.set_adapters(adapter_name, init_weight)
-            #self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
-            self.adapter_names.append(adapter_name)
-            
-        except IOError as e:
-            raise NotImplementedError(f'Unsupported lora adapter {weight_name!r}')
         
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
@@ -1421,16 +1391,10 @@ class SD3Base(SingleStagePipeline):
 
 
 class FluxBase(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16,
-                 qtype:typing.Literal['bnb4','qint4','qint8','qfloat8'] = 'bnb4', te2_qtype:typing.Literal['bnb4','bnb8','bf16', 'qint4','qint8','qfloat8'] = 'bf16', quant_basedir:Path = None):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='flux')
         
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, root_name='flux')
-        
-        self.text_enc_model_id = "black-forest-labs/FLUX.1-dev" # use same shared text_encoder_2, avoid 2x-download
-        self.qtype = qtype
-        self.te2_qtype = te2_qtype
-        self.quant_basedir = quant_basedir if quant_basedir is not None else cpaths.ROOT_DIR / 'extras/quantized/flux/'
-        
+        self.adapter_paths = {}
         self.variant = model_name.split('_')[-1] # flux_schell,flux_dev,flux_* -> *
         self.max_seq_len = 512
         self.text_pipe:FluxPipeline = None
@@ -1482,6 +1446,7 @@ class FluxBase(SingleStagePipeline):
         self.base.vae.enable_slicing() # all this does is iterate over batch instead of all at once, no reason to ever disable
         
         self._scheduler_init()
+        self.load_loras()
         
         #self.load_lora('detail-maximizer_v02.safetensors')
         #self.load_lora('midjourneyV61_v02.safetensors')

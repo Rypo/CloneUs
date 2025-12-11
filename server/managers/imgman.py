@@ -14,6 +14,7 @@ from cloneus.plugins.vision.pipelines import DiffusionConfig, CfgItem
 
 from utils.globthread import wrap_async_executor, stop_global_executors
 
+LORA_DIR = cpaths.ROOT_DIR/f'extras/loras/'
 
 # Resource: https://github.com/CyberTimon/Stable-Diffusion-Discord-Bot/blob/main/bot.py
 
@@ -50,18 +51,16 @@ class ImageGenManager:#(pipelines.SingleStagePipeline):
             setattr(self, meth, wrap_async_executor(func, use_alternate_executor=True))
 
 class BaseFluxManager(ImageGenManager, pipelines.FluxBase):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, 
-                qtype = 'bnb4', te2_qtype = 'bf16', quant_basedir = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, qtype=qtype, te2_qtype=te2_qtype, quant_basedir=quant_basedir)
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
         
 class BaseSDXLManager(ImageGenManager, pipelines.SDXLBase):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype)   
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
 
 class BaseSD3Manager(ImageGenManager, pipelines.SD3Base):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16,
-                 quantize:bool = True):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, quantize=quantize)   
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)   
 
 
 
@@ -77,7 +76,9 @@ class SDXLTurboManager(BaseSDXLManager):
                 img_dims = (512,512),
                 locked=['guidance_scale', 'negative_prompt', 'aspect',  'refine_guidance_scale']
             ), 
-            offload=offload)
+            offload=offload,
+            init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
+        )
         
     
     def dc_fastmode(self, enable:bool, img2img=False):
@@ -102,7 +103,7 @@ class ColorfulXLLightningManager(BaseSDXLManager):
             ),
             offload=offload,
             scheduler_setup = ('Euler A', 'sgm_uniform'), # {'timestep_spacing': "trailing"}
-            
+            init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
         )
      
 class JuggernautXIManager(BaseSDXLManager):
@@ -122,8 +123,8 @@ class JuggernautXIManager(BaseSDXLManager):
                 locked = ['refine_guidance_scale']
             ),
             offload=offload,
-            scheduler_setup=('DPM++ 2M SDE'),#, {'lower_order_final':True})
-            
+            scheduler_setup=('DPM++ 2M SDE', {'euler_at_final':True}),#, {'lower_order_final':True}) # https://huggingface.co/docs/diffusers/en/api/pipelines/stable_diffusion/stable_diffusion_xl#tips
+            init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
         )
 
 
@@ -142,9 +143,10 @@ class FluxSchnellManager(BaseFluxManager):
             ),
             offload=offload,
             #scheduler_setup='Euler',
-            qtype = 'bnb4',
-            te2_qtype = 'bf16',
-            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
+            init_loras=[
+                (LORA_DIR.joinpath('flux','detail-maximizer_v02.safetensors').as_posix(), 0.0),
+                (LORA_DIR.joinpath('flux','midjourneyV61_v02.safetensors').as_posix(), 0.0),
+            ],
            
         )
 
@@ -164,10 +166,10 @@ class FluxDevManager(BaseFluxManager):
                 locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
-            #scheduler_setup='Euler',
-            qtype = 'bnb4',
-            te2_qtype = 'bf16',
-            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
+            init_loras=[
+                (LORA_DIR.joinpath('flux','detail-maximizer_v02.safetensors').as_posix(), 0.0),
+                (LORA_DIR.joinpath('flux','midjourneyV61_v02.safetensors').as_posix(), 0.0),
+            ],
         )
 
 # https://old.reddit.com/r/StableDiffusion/comments/1f83d0t/new_vitl14_clipl_text_encoder_finetune_for_flux1/
@@ -192,9 +194,10 @@ class FluxSchnevManager(BaseFluxManager):
             ),
             offload=offload,
             #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
-            qtype = 'bnb4',
-            te2_qtype = 'bf16',
-            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
+            init_loras=[
+                (LORA_DIR.joinpath('flux','detail-maximizer_v02.safetensors').as_posix(), 0.0),
+                (LORA_DIR.joinpath('flux','midjourneyV61_v02.safetensors').as_posix(), 0.0),
+            ],
         )
 class FluxHyperManager(BaseFluxManager):
     def __init__(self, offload=False):
@@ -214,10 +217,8 @@ class FluxHyperManager(BaseFluxManager):
                 locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
             ),
             offload=offload,
+            init_loras = [("alimama-creative/FLUX.1-Turbo-Alpha/diffusion_pytorch_model.safetensors", 1.0),]
             #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
-            qtype = 'bnb4',
-            te2_qtype = 'bf16',
-            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
         )
 
 class PixelWaveManager(BaseFluxManager):

@@ -513,7 +513,6 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
             'steps': kwargs.get('steps'),
             'negative_prompt':kwargs.get('negative_prompt'),
             'guidance_scale':kwargs.get('guidance_scale'),
-            'detail_weight':kwargs.get('detail_weight'),
             'seed':kwargs.get('seed'),
         }
         

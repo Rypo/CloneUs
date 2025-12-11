@@ -194,7 +194,28 @@ class SetImageConfig:
             return await ctx.send(f'```json\nPAG {"Enabled" if scale else "Disabled"}: {pag_config}\n```')
         except NotImplementedError:
             return await ctx.send('PAG not implemented for this model type. Try an SDXL based model.')
+    
+    async def _adapter_autocomplete(self, interaction: discord.Interaction, current: str,) -> list[app_commands.Choice[str]]:
+        if not self.igen.is_ready:
+            return []
+        
+        adapter_names = self.igen.adapter_weights.keys()
+        return [app_commands.Choice(name=name, value=name) for name in adapter_names if current.lower() in name.lower()]
 
+    @isetarg.command(name='lora')
+    @app_commands.autocomplete(adapter=_adapter_autocomplete)
+    async def iset_lora(self, ctx: commands.Context, weight: float, adapter: str,):
+        '''Change the weight of an active LoRA adapter
+        
+        Args:
+            weight: The strength of the adapter. Commonly 0.0-1.0, but varies.
+            adapter: The name of lora adapter.
+        '''
+        if not self.igen.is_ready:
+            return await ctx.send(f'Image model not loaded! Call `!imgup` first.')
+
+        self.igen.set_adapter_weight(adapter_name=adapter, weight=weight)            
+        return await ctx.send(f'Adapter set.\n' + f'```json\n{self.igen.adapter_weights}\n```')
     
 class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='img'
     '''Suite of tools for generating images.'''
@@ -570,7 +591,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
             negprompt: Negative prompt. What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
-            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). square w=h = 1:1. portrait w<h = 13:19. Default='square'. 
             
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Default=0.
@@ -586,7 +606,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                steps = flags.steps, 
                                negative_prompt = flags.negprompt, 
                                guidance_scale = flags.guidance, 
-                               detail_weight= flags.detail,
                                aspect = flags.aspect, 
                                
                                refine_strength = flags.hdstrength, 
@@ -600,7 +619,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                    steps: int = None, 
                    negative_prompt: str = None, 
                    guidance_scale: float = None, 
-                   detail_weight: float = 0,
                    aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                   
                    refine_strength: float = None, 
@@ -621,7 +639,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast)
             output = await self.igen.generate_image(prompt, n_images=n_images, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                                                    detail_weight=detail_weight, aspect=aspect, refine_strength=refine_strength, seed=seed)
+                                                    aspect=aspect, refine_strength=refine_strength, seed=seed)
             
             if needs_view:
                 msg = await view.send(ctx, n_init_images = n_images, )
@@ -647,7 +665,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
-            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             aspect: Image aspect ratio (shape). If None, will pick nearest to imgfile.
 
             hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored unless > 0.
@@ -663,7 +680,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  strength = flags.strength, 
                                  negative_prompt = flags.negprompt, 
                                  guidance_scale = flags.guidance, 
-                                 detail_weight= flags.detail,
                                  aspect = flags.aspect, 
                                  
                                  refine_strength = flags.hdstrength, 
@@ -679,7 +695,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                      strength: float = None, 
                      negative_prompt: str = None, 
                      guidance_scale: float = None, 
-                     detail_weight: float = 0,
                      aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                 
                      refine_strength: float = None,
@@ -713,7 +728,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         async with self.bot.busy_status(activity='draw'):
             self.igen.dc_fastmode(enable=fast)
             output = await self.igen.regenerate_image(prompt=prompt, image=image, n_images=n_images, steps=steps, strength=strength, 
-                                                                  negative_prompt=negative_prompt, guidance_scale=guidance_scale, detail_weight=detail_weight, 
+                                                                  negative_prompt=negative_prompt, guidance_scale=guidance_scale,
                                                                   aspect=aspect, refine_strength=refine_strength, seed=seed)
             if needs_view:
                 msg = await view.send(ctx, n_init_images = n_images)
@@ -740,7 +755,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
-            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             seed: Random Seed. An arbitrary number to make results reproducible. Default=None.
         """
         return await self.hd_upsample(ctx, imgurl, prompt, imgfile=imgfile, 
@@ -749,7 +763,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                  
                                  negative_prompt = flags.negprompt, 
                                  guidance_scale = flags.guidance, 
-                                 detail_weight = flags.detail,
                                  seed = flags.seed,
                                  _needs_view=True, # if calling as a command, need "view" (aka send img), if calling from UI, no view
                                  )
@@ -759,7 +772,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                           steps:int = None, 
                           negative_prompt: str = None, 
                           guidance_scale: float = None,
-                          detail_weight: float = 0,
                           seed: int = None,
                           _needs_view=False,
                           ):
@@ -784,8 +796,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         async with self.bot.busy_status(activity='draw'):
             image, call_kwargs = await self.igen.refine_image(image=image, prompt=prompt, 
                                                            refine_strength=refine_strength, steps=steps,
-                                                           negative_prompt=negative_prompt, guidance_scale=guidance_scale,
-                                                           detail_weight=detail_weight, seed=seed, )
+                                                           negative_prompt=negative_prompt, guidance_scale=guidance_scale, seed=seed, )
             if needs_view:
                 msg = await ctx.send(file=imgutil.to_bytes_file(image, prompt=prompt, ext='WebP', lossless=True))
                 out_imgpath = imgutil.save_image_prompt(image, prompt, ext='WebP', lossless=True)
@@ -810,7 +821,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
-            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             midframes: The number of frames to add between each pair of images. Default=4.
             aspect: Image aspect ratio (shape). If None, will pick nearest to img if provided.
 
@@ -824,7 +834,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                   strength_start = flags.strength_start, 
                                   negative_prompt = flags.negprompt, 
                                   guidance_scale = flags.guidance, 
-                                  detail_weight = flags.detail,
                                   mid_frames = flags.midframes,
                                   aspect = flags.aspect, 
                                   fast = flags.fast,
@@ -838,7 +847,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                       strength_start: float = 0.30, 
                       negative_prompt: str = None, 
                       guidance_scale: float = None, 
-                      detail_weight: float = 0.,
                       mid_frames: int = 4,
                       aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
                       fast: bool = False,
@@ -869,7 +877,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_frames, fwkg
             frame_gen = await self.igen.generate_frames(prompt=prompt, image=image, nframes=nframes, steps=steps, 
                                                     strength_end=strength_end,strength_start=strength_start, negative_prompt=negative_prompt, 
-                                                    guidance_scale=guidance_scale, detail_weight=detail_weight, aspect=aspect, mid_frames=mid_frames,
+                                                    guidance_scale=guidance_scale, aspect=aspect, mid_frames=mid_frames,
                                                     seed=seed)
             
             cf = 0
@@ -909,7 +917,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             
             negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
             guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
-            detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
             
             stage2: If True, run it twice to refine the output result. Default=True. 
             fast: Trades image quality for speed - about 2-3x faster. Default=False (Turbo ignores).
@@ -922,7 +929,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                                     imsize = flags.imsize, 
                                     negative_prompt = flags.negprompt, 
                                     guidance_scale = flags.guidance, 
-                                    detail_weight= flags.detail,
                                     #aspect = flags.aspect, 
                                     two_stage = flags.stage2,
                                     fast = flags.fast,
@@ -935,7 +941,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                         imsize: typing.Literal['small','med','full']='small',
                         negative_prompt: str = None, 
                         guidance_scale: float = None, 
-                        detail_weight: float = 0.,
                         two_stage: bool = False,
                         fast: bool = False,
                         aseed: int = None
@@ -970,7 +975,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             #image_frames, fwkg
             frame_gen = await self.igen.regenerate_frames(frame_array=gif_array, prompt=prompt, imsize=imsize, steps=steps, 
                                                            astrength=astrength, negative_prompt=negative_prompt, 
-                                                           guidance_scale=guidance_scale, detail_weight=detail_weight, two_stage=two_stage, aseed=aseed)
+                                                           guidance_scale=guidance_scale, two_stage=two_stage, aseed=aseed)
             # first item yielded is total number of frames
             nf = next(frame_gen)
             
