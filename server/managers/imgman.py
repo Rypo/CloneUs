@@ -106,11 +106,11 @@ class ColorfulXLLightningManager(BaseSDXLManager):
             init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
         )
      
-class JuggernautXIManager(BaseSDXLManager):
+class JuggernautRagnarokManager(BaseSDXLManager):
     def __init__(self, offload=False):
-        super().__init__( # https://huggingface.co/RunDiffusion/Juggernaut-XI-v11
-            model_name = 'juggernaut_xi', # https://civitai.com/models/133005?modelVersionId=782002
-            model_path = 'https://huggingface.co/RunDiffusion/Juggernaut-XI-v11/blob/main/Juggernaut-XI-byRunDiffusion.safetensors',#'RunDiffusion/Juggernaut-XI-v11', 
+        super().__init__( # https://huggingface.co/RunDiffusion/
+            model_name = 'juggernaut_ragnarok', # https://civitai.com/models/133005?modelVersionId=1759168
+            model_path = cpaths.ROOT_DIR / 'extras/models/sdxl/juggernautXL_ragnarok.safetensors',  
             
             config = DiffusionConfig(
                 steps = CfgItem(30, bounds=(30,40)), 
@@ -127,29 +127,6 @@ class JuggernautXIManager(BaseSDXLManager):
             init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
         )
 
-
-class FluxSchnellManager(BaseFluxManager):
-    def __init__(self, offload=False):
-        super().__init__(
-            model_name = 'flux_schnell',
-            model_path = 'black-forest-labs/FLUX.1-schnell',
-            config = DiffusionConfig(
-                steps = CfgItem(4, bounds=(1,4)),
-                guidance_scale = CfgItem(0.0, locked=True), 
-                strength = CfgItem(0, locked=True),#CfgItem(0.65, bounds=(0.3, 0.95)),
-                img_dims = [(1024,1024), (832,1216), (1216,832)],
-                #refine_strength=CfgItem(0, locked=True),
-                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
-            ),
-            offload=offload,
-            #scheduler_setup='Euler',
-            init_loras=[
-                (LORA_DIR.joinpath('flux','detail-maximizer_v02.safetensors').as_posix(), 0.0),
-                (LORA_DIR.joinpath('flux','midjourneyV61_v02.safetensors').as_posix(), 0.0),
-            ],
-           
-        )
-
         
 class FluxDevManager(BaseFluxManager):
     def __init__(self, offload=False):
@@ -163,7 +140,7 @@ class FluxDevManager(BaseFluxManager):
                 #img_dims = [(1024,1024), (832,1216), (1216,832)],
                 img_dims = [(1024,1024), (896,1152), (1152,896)],
                 #refine_strength=CfgItem(0, locked=True),
-                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
+                locked=['refine_guidance_scale'] # 'refine_strength',
             ),
             offload=offload,
             init_loras=[
@@ -172,76 +149,24 @@ class FluxDevManager(BaseFluxManager):
             ],
         )
 
-# https://old.reddit.com/r/StableDiffusion/comments/1f83d0t/new_vitl14_clipl_text_encoder_finetune_for_flux1/
-# https://huggingface.co/zer0int/CLIP-GmP-ViT-L-14/tree/main
-class FluxSchnevManager(BaseFluxManager):
-    def __init__(self, offload=False):
+class FluxTurboManager(BaseFluxManager):
+    def __init__(self, offload=True):
         super().__init__(
-            model_name = 'flux_schnev',
-            # model_path = cpaths.ROOT_DIR / 'extras/models/flux/flux-merged',
-            model_path = cpaths.ROOT_DIR / 'extras/quantized/flux/nf4/diffusion_pytorch_model.safetensors',
-            # model_path = cpaths.ROOT_DIR / 'extras/quantized/flux/nf4_bnb/diffusion_pytorch_model.safetensors',
-            config = DiffusionConfig(
-                steps = CfgItem(10, bounds=(4,16)),
-                guidance_scale = CfgItem(2.5, bounds=(0,5)), 
-                strength = CfgItem(0.70, bounds=(0.6, 0.9)),
-                #img_dims = [(1024,1024), (832,1216), (1216,832)],
-                img_dims = [(1024,1024), (896,1152), (1152,896)],
-                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
-                #refine_steps=CfgItem(0, locked=True),
-                #refine_strength=CfgItem(0, locked=True),
-                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
-            ),
-            offload=offload,
-            #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
-            init_loras=[
-                (LORA_DIR.joinpath('flux','detail-maximizer_v02.safetensors').as_posix(), 0.0),
-                (LORA_DIR.joinpath('flux','midjourneyV61_v02.safetensors').as_posix(), 0.0),
-            ],
-        )
-class FluxHyperManager(BaseFluxManager):
-    def __init__(self, offload=False):
-        super().__init__(
-            model_name = 'flux_hyper',
-            # model_path = cpaths.ROOT_DIR / 'extras/models/flux/flux-merged',
+            model_name = 'flux_turbo',
             model_path = 'black-forest-labs/FLUX.1-dev',
             config = DiffusionConfig(
-                steps = CfgItem(16, bounds=(10,24)),
+                steps = CfgItem(8, bounds=(6,12)),
                 guidance_scale = CfgItem(3.5, bounds=(0,5)), 
                 strength = CfgItem(0.70, bounds=(0.6, 0.9)),
                 #img_dims = [(1024,1024), (832,1216), (1216,832)],
                 img_dims = [(1024,1024), (896,1152), (1152,896)],
-                #refine_strength=CfgItem(0.3, bounds=(0.2, 0.4)),
-                #refine_steps=CfgItem(0, locked=True),
-                #refine_strength=CfgItem(0, locked=True),
-                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
+                locked=['refine_guidance_scale'] # 'refine_strength',
             ),
             offload=offload,
             init_loras = [("alimama-creative/FLUX.1-Turbo-Alpha/diffusion_pytorch_model.safetensors", 1.0),]
             #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
         )
 
-class PixelWaveManager(BaseFluxManager):
-    def __init__(self, offload=False):
-        super().__init__(
-            model_name = 'flux_pixelwave',
-            model_path = cpaths.ROOT_DIR / 'extras/models/flux/pixelwave_nf4/',
-            
-            config = DiffusionConfig(
-                steps = CfgItem(20, bounds=(25,60)),
-                guidance_scale = CfgItem(3.5, bounds=(1,5)), 
-                strength = CfgItem(0.75, bounds=(0.6, 0.95)),#CfgItem(0.65, bounds=(0.3, 0.95)),
-                #img_dims = [(1024,1024), (832,1216), (1216,832)],
-                img_dims = [(1024,1024), (896,1152), (1152,896)],
-                #refine_strength=CfgItem(0, locked=True),
-                locked=['refine_guidance_scale','negative_prompt'] # 'refine_strength',
-            ),
-            offload=offload,
-            #scheduler_setup='Euler',
-            qtype = 'bnb4',
-            te2_qtype = 'bf16',
-            quant_basedir = cpaths.ROOT_DIR / 'extras/quantized/flux/',
-        )
 
 
 AVAILABLE_MODELS = {
@@ -253,27 +178,16 @@ AVAILABLE_MODELS = {
         'manager': ColorfulXLLightningManager,
         'desc': 'ColorfulXL Lightning' # (M, fast)
     },
-    'juggernaut_xi': {
-        'manager': JuggernautXIManager,
-        'desc': 'Juggernaut XI' # (M, avg)
+    'juggernaut_ragnarok': {
+        'manager': JuggernautRagnarokManager,
+        'desc': 'Juggernaut Ragnarok' # (M, avg)
     },
     'flux_dev': {
         'manager': FluxDevManager,
         'desc': 'Flux Dev' # (XLg, slow)
     },
-    'flux_schnev': {
-        'manager': FluxSchnevManager,
-        'desc': 'Flux Schnev' # (XLg, avg)
+    'flux_turbo': {
+        'manager': FluxTurboManager,
+        'desc': 'Flux Turbo' # (XLg, avg)
     },
-    # https://huggingface.co/mikeyandfriends/PixelWave_FLUX.1-dev_03/blob/main/pixelwave_flux1_dev_nf4_03.safetensors
-    # 'flux_hyper': {
-    #     'manager': FluxHyperManager,
-    #     'desc': 'Flux Hyper' # (XLg, avg)
-    # },
-    'flux_pixelwave': {
-        'manager': PixelWaveManager,
-        'desc': 'PixelWave (Flux)' # (XLg, avg)
-    },
-
 }
-

@@ -223,9 +223,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     def __init__(self, bot: BotUs):
         self.bot = bot
         #self.igen = imgman.ColorfulXLLightningManager(offload=False)
-        # self.igen = imgman.FluxSchnevManager(offload=False)
-        self.igen = imgman.JuggernautXIManager(offload=False)
-        #self.igen = imgman.SD35MediumManager(offload=False)
+        self.igen = imgman.FluxTurboManager(offload=False)
+
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
 

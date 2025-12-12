@@ -41,6 +41,7 @@ from diffusers import (
     UniPCMultistepScheduler,
     FluxPipeline, 
     FluxTransformer2DModel,
+    FluxImg2ImgPipeline,
     AutoencoderKL,
     AnimateDiffSDXLPipeline,
     BitsAndBytesConfig,
@@ -49,16 +50,24 @@ from diffusers import (
 
 from diffusers.schedulers import AysSchedules
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img import retrieve_latents
+
+from diffusers.hooks import apply_group_offloading
 from huggingface_hub import hf_hub_download, snapshot_download
 
-
+from nunchaku import NunchakuFluxTransformer2dModel, NunchakuT5EncoderModel, NunchakuQwenImageTransformer2DModel
+from nunchaku.lora.flux.compose import compose_lora
+from nunchaku.utils import get_precision
 
 from transformers.image_processing_utils import select_best_resolution
-
+from transformers import Qwen2_5_VLForConditionalGeneration, T5Model, T5EncoderModel, T5PreTrainedModel, BitsAndBytesConfig as TransBitsAndBytesConfig
 
 from optimum import quanto
 from accelerate import cpu_offload,init_empty_weights
 from accelerate.utils import BnbQuantizationConfig, load_and_quantize_model
+from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
+
+from transformers import AutoConfig, AutoModelForTextEncoding
+import safetensors.torch as sft
 
 
 from PIL import Image
@@ -67,7 +76,6 @@ from spandrel import ImageModelDescriptor, ModelLoader
 
 from cloneus import cpaths
 from . import quantops,specialists,loraops,interpolation
-from .fluxpatch import FluxImg2ImgPipeline
 from .lpw_sdxl import get_weighted_text_embeddings_sdxl
 
 from cloneus.utils.common import release_memory, batched
@@ -1124,7 +1132,10 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         
         if not self.offload:
             self.base = self.base.to(0)
-        
+        self.base.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
+        # Workaround for not accepting attention shape using VAE for Flash Attention
+        self.base.vae.enable_xformers_memory_efficient_attention(attention_op=None)
+
         self.base.vae.enable_slicing()
         self._scheduler_init()
         self.load_loras()
@@ -1416,34 +1427,61 @@ class FluxBase(SingleStagePipeline):
         super().unload_pipeline()
     
     @torch.inference_mode()
-    def load_pipeline(self):
-        bnb_qconfig = BnbQuantizationConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_use_double_quant=False, bnb_4bit_compute_dtype='bf16', torch_dtype=self.dtype, )
-
-        if self.model_name == 'flux_hyper':
-            transformer = quantops.flux_hyper_transformer_4bit(self.model_path, scale=0.125,dtype=self.dtype, bnb_qconfig=bnb_qconfig).to(0, dtype=self.dtype)
-            self.base: FluxPipeline = FluxPipeline.from_pretrained(self.model_path, transformer=transformer, torch_dtype=self.dtype,)
-            
-        elif self.model_name == 'flux_pixelwave':
-            
-            
-            transformer = FluxTransformer2DModel.from_pretrained(self.model_path, quantization_config=bnb_qconfig, torch_dtype=self.dtype, low_cpu_mem_usage = True)
-            self.base = FluxPipeline.from_pretrained(self.text_enc_model_id, transformer=transformer, torch_dtype=self.dtype,)
-
-        elif self.qtype == 'bnb4' and self.te2_qtype == 'bf16':
-            if str(self.model_path).endswith('.safetensors'):
-                transformer = quantops.load_prequantized_transformer(safetensor_filepath=self.model_path)
-            else:
-                transformer = quantops.bnb4_transformer(self.model_path, self.dtype, bnb_qconfig)
-        else:
-            qloader = quantops.FluxLoadHelper(self.model_path, self.quant_basedir, self.text_enc_model_id, self.variant)
-            self.base: FluxPipeline = qloader.load_quant(qtype=self.qtype, offload=self.offload, te2_qtype=self.te2_qtype)
-            
-        if not self.offload: 
-            self.base = self.base.to(0)
-            # if not offloading everything, just offload text_encoder_2
-            self.base.text_encoder_2 = cpu_offload(self.base.text_encoder_2, execution_device = torch.device('cuda:0'))
+    def _load_text_encoder2(self, source: typing.Literal['nunchaku','unchained','default','default_nf4'] = 'default'):
+        match source:
+            case 'nunchaku':
+                text_encoder_2 = NunchakuT5EncoderModel.from_pretrained(
+                    "nunchaku-tech/nunchaku-t5/awq-int4-flux.1-t5xxl.safetensors", 
+                    torch_dtype=torch.bfloat16, 
+                    offload=self.offload
+                )
+            case 'unchained':
+                with init_empty_weights():
+                    config = AutoConfig.from_pretrained('Kaoru8/T5XXL-Unchained')
+                    text_encoder_2 = AutoModelForTextEncoding.from_config(config, dtype=torch.float16)
+                    sd_path = hf_hub_download("Kaoru8/T5XXL-Unchained", "t5xxl-unchained-f16.safetensors")
         
+                text_encoder_2.load_state_dict(sft.load_file(sd_path), assign=True)
+                text_encoder_2 = text_encoder_2.to(dtype=torch.bfloat16)
+            case 'default' | 'default_nf4':
+                quant_config = TransBitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_compute_dtype=torch.bfloat16)
+                text_encoder_2 = AutoModelForTextEncoding.from_pretrained(
+                    self.model_path,
+                    subfolder = 'text_encoder_2',
+                    low_cpu_mem_usage = True,
+                    dtype=torch.bfloat16,
+                    quantization_config = (quant_config if source.endswith('nf4') else None),
+                )
+            case _:
+                raise ValueError(f'unknown source: {source!r}')
+        
+        text_encoder_2 = text_encoder_2.eval().requires_grad_(False)
+        return text_encoder_2
+
+    @torch.inference_mode()
+    def load_pipeline(self):
+        transformer_model_path = f"nunchaku-tech/nunchaku-flux.1-dev/svdq-{get_precision()}_r32-flux.1-dev.safetensors"
+        transformer = NunchakuFluxTransformer2dModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)
+
+        self.base = FluxPipeline.from_pretrained(
+            self.model_path, 
+            transformer = transformer,
+            text_encoder_2 = self._load_text_encoder2('default_nf4'),
+            torch_dtype = torch.bfloat16,
+            dtype = torch.bfloat16,
+            low_cpu_mem_usage = True,
+        ).to("cuda")
+        
+        self.base.enable_xformers_memory_efficient_attention()
         self.base.vae.enable_slicing() # all this does is iterate over batch instead of all at once, no reason to ever disable
+
+        if self.offload:
+            self.base.enable_model_cpu_offload()
+        elif not self.offload and not getattr(self.base.text_encoder_2, 'is_quantized', False): 
+           # if not offloading everything, just offload text_encoder_2
+           apply_group_offloading(self.base.text_encoder_2, onload_device=torch.device('cuda'), offload_type="block_level", 
+                                  num_blocks_per_group=1, use_stream=True, record_stream=True, non_blocking=True)
+
         
         self._scheduler_init()
         self.load_loras()
@@ -1451,40 +1489,46 @@ class FluxBase(SingleStagePipeline):
         #self.load_lora('detail-maximizer_v02.safetensors')
         #self.load_lora('midjourneyV61_v02.safetensors')
         
-        self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base)
+        self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base, transformer=self.base.transformer, torch_dtype=torch.bfloat16) # Do NOT forget torch_dtype or will 2x Vram
 
-        if self.offload:
-            # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
-            self.base.enable_model_cpu_offload()
-            self.basei2i.enable_model_cpu_offload()
         
         self.is_ready = True
         release_memory()
     
-
     @torch.inference_mode()
-    def load_lora(self, weight_name:str, init_weight:float=None):
+    def load_loras(self, path_weights: list[tuple[str,float]] = None):
+        if path_weights is None:
+            path_weights = self.init_loras
         
-        adapter_name = weight_name.rsplit('.', maxsplit=1)[0].replace('-','_')
-        # https://civitai.green/user/nakif0968/models?types=LORA&baseModels=Flux.1+D&baseModels=Flux.1+S
-        try:
-            #loraops.set_lora_transformer(self.base, Path(lora_dirpath).joinpath(weight_name), adapter_name)
-            #lora_sd = loraops.get_lora_state_dict(Path(lora_dirpath).joinpath(weight_name))
-            lora_sd = Path(self.lora_dirpath).joinpath(weight_name)
-            #self.base.transformer,skipped_keys = loraops.manual_lora(lora_sd, self.base.transformer, adapter_name=adapter_name)
-            #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
-            self.base.load_lora_into_transformer(*self.base.lora_state_dict(lora_sd, return_alphas=True), transformer=self.base.transformer, adapter_name=adapter_name, low_cpu_mem_usage=True)
-            #self.base.load_lora_into_transformer(lora_sd, None, self.base.transformer, adapter_name=adapter_name)
-            #self.base.load_lora_weights(lora_sd, adapter_name=adapter_name)
-            if init_weight is None:
-                self.base.disable_lora()
-            else:
-                self.base.set_adapters(adapter_name, init_weight)
-            #self.base.load_lora_weights(lora_dirpath, weight_name=weight_name, adapter_name=adapter_name)
-            self.adapter_names.append(adapter_name)
+        if not path_weights:
+            return
+        
+        lora_path_weights = []
+        for path,weight in path_weights:
+            if isinstance(path, Path):
+                path = path.as_posix()
             
-        except IOError as e:
-            raise NotImplementedError(f'Unsupported lora adapter {weight_name!r}')
+            lora_path_weights.append((path, weight))
+            adapter_name = path.split('/')[-1].rsplit('.', maxsplit=1)[0].replace('-','_')
+            
+            self.adapter_weights[adapter_name] = weight
+            self.adapter_paths[adapter_name] = path
+            
+        self.base.transformer.update_lora_params(compose_lora(lora_path_weights))
+        
+    
+    @torch.inference_mode()
+    def set_adapter_weight(self, adapter_name:str, weight: float):            
+        try:
+            self.adapter_weights[adapter_name] = weight
+        except KeyError:
+            raise KeyError(f'Unknown adapter_name: {adapter_name!r}')
+        
+        self.base.transformer.update_lora_params(compose_lora([
+            (self.adapter_paths[name], self.adapter_weights[name]) for name in self.adapter_weights
+        ]))
+        
+        logger.debug(f'Active Adapters: {self.base.get_active_adapters()}\nAll Adapters: {self.base.get_list_adapters()}\nAdapter Weights: {self.adapter_weights}' )
 
     def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
         dims_opts = {
@@ -1494,9 +1538,8 @@ class FluxBase(SingleStagePipeline):
             'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
         }
         
-        # batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2} # With out vae_slicing
+        # Max batch size is 8 due to awq_gemv kernel restriction
         batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
-        #batch_sizes = {'tiny': 24, 'small': 16, 'med': 12, 'full': 4} 
 
         return (dims_opts[imsize], batch_sizes[imsize])
     
