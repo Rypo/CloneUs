@@ -306,7 +306,7 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
         image = iio.imread(imbytes)
     else:
         try:
-            imeta = iio.immeta(imbytes)
+            imeta = iio.immeta(image_uri)
             image = iio.imread(image_uri)
         except HTTPError as e:
             print(e)
