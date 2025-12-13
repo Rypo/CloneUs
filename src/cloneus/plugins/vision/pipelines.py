@@ -73,6 +73,7 @@ import safetensors.torch as sft
 from PIL import Image
 from spandrel import ImageModelDescriptor, ModelLoader
 # from compel import Compel, ReturnedEmbeddingsType
+from compel import CompelForSDXL, CompelForFlux # alternative: https://github.com/xhinker/sd_embed
 
 from cloneus import cpaths
 from . import quantops,specialists,loraops,interpolation
@@ -1140,13 +1141,8 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         self._scheduler_init()
         self.load_loras()
         # https://github.com/comfyanonymous/ComfyUI/blob/f58475827150c2ac610cbb113019276efcd1a733/comfy/sd1_clip.py#L234
-        # self.compeler = Compel(
-        #     tokenizer=[self.base.tokenizer, self.base.tokenizer_2],
-        #     text_encoder=[self.base.text_encoder, self.base.text_encoder_2],
-        #     truncate_long_prompts=False,
-        #     returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
-        #     requires_pooled=[False, True]
-        # )
+
+        self.compeler = CompelForSDXL(self.base)
         
         self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base)
 
@@ -1214,32 +1210,21 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
 
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
-        if negative_prompt is None:
-            negative_prompt = ""
+        # compel handles prompt -> [prompt]
+        if not negative_prompt:
+            negative_prompt = None # compel treats None different than empty string. Save a few steps by ""->None.
 
-        prompt_encodings = {}
-        #compel_tokens = set('()-+')
+        device = torch.device('cuda')
+        conditioning = self.compeler(prompt, negative_prompt=negative_prompt)
 
-        # if set(prompt) & compel_tokens:
-        #     conditioning, pooled = self.compeler(prompt)
-        #     prompt_encodings.update(prompt_embeds=conditioning, pooled_prompt_embeds=pooled)
-        #     prompt = None
-
-        # if negative_prompt is not None and set(negative_prompt) & compel_tokens:
-        #     neg_conditioning, neg_pooled = self.compeler(negative_prompt)
-        #     prompt_encodings.update(negative_prompt_embeds=neg_conditioning, negative_pooled_prompt_embeds=neg_pooled)
-        #     negative_prompt = None
-        
-        # https://github.com/huggingface/diffusers/blob/main/examples/community/lpw_stable_diffusion_xl.py
-        # https://github.com/huggingface/diffusers/issues/2136#issuecomment-1514338525
-        (p_emb, neg_p_emb, pooled_p_emb, neg_pooled_p_emb) = get_weighted_text_embeddings_sdxl( # self.base.encode_prompt(
-            self.base, prompt=prompt, neg_prompt=negative_prompt, device=0, **prompt_encodings, num_images_per_prompt=batch_size,
-             lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'))
-        
-        prompt_encodings.update(
-            prompt_embeds=p_emb, negative_prompt_embeds=neg_p_emb, 
-            pooled_prompt_embeds=pooled_p_emb, negative_pooled_prompt_embeds=neg_pooled_p_emb
+        prompt_encodings = dict(
+            prompt_embeds = conditioning.embeds, 
+            pooled_prompt_embeds = conditioning.pooled_embeds,
+            negative_prompt_embeds = conditioning.negative_embeds,
+            negative_pooled_prompt_embeds = conditioning.negative_pooled_embeds,
         )
+        prompt_encodings = {k: v.to(device) for k,v in prompt_encodings.items() if v is not None}
+
         torch.cuda.empty_cache()    
         return prompt_encodings
     
@@ -1295,7 +1280,7 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         
         return image
         
-        
+
 class SD3Base(SingleStagePipeline):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sd35')
@@ -1408,7 +1393,6 @@ class FluxBase(SingleStagePipeline):
         self.adapter_paths = {}
         self.variant = model_name.split('_')[-1] # flux_schell,flux_dev,flux_* -> *
         self.max_seq_len = 512
-        self.text_pipe:FluxPipeline = None
     
     def i2i(self, *args, **kwargs):
         # because latents shape cannot be reliably inferred, height and width are required for flux img2img
@@ -1423,7 +1407,6 @@ class FluxBase(SingleStagePipeline):
                 setattr(self.base, comp, None)
                 setattr(self.basei2i, comp, None)
             
-        self.text_pipe = None
         super().unload_pipeline()
     
     @torch.inference_mode()
@@ -1486,12 +1469,10 @@ class FluxBase(SingleStagePipeline):
         self._scheduler_init()
         self.load_loras()
         
-        #self.load_lora('detail-maximizer_v02.safetensors')
-        #self.load_lora('midjourneyV61_v02.safetensors')
+        self.compeler = CompelForFlux(self.base) 
         
         self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base, transformer=self.base.transformer, torch_dtype=torch.bfloat16) # Do NOT forget torch_dtype or will 2x Vram
 
-        
         self.is_ready = True
         release_memory()
     
@@ -1545,21 +1526,25 @@ class FluxBase(SingleStagePipeline):
     
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
-        prompt = [prompt]
-        # lora weights for Flux should ONLY be loaded into transformer, not text_encoder
-        lora_scale = kwargs.get('lora_scale', None) # None
-        device = torch.device('cuda:0')
-        if self.text_pipe is None:
-            (prompt_embeds, pooled_prompt_embeds,_,) = self.base.encode_prompt(
-                prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size, 
-                device=device, lora_scale=lora_scale)
-        else:
-            (prompt_embeds, pooled_prompt_embeds,_,) = self.text_pipe.encode_prompt(
-                prompt=prompt, prompt_2=None, max_sequence_length=self.max_seq_len, num_images_per_prompt=batch_size,
-                  device=self.text_pipe.device, lora_scale=lora_scale)
+        # compel handles prompt -> [prompt]
+        if not negative_prompt:
+            negative_prompt = None # compel treats None different than empty string. Save a few steps by ""->None.
         
+        device = torch.device('cuda')
+        
+        conditioning = self.compeler(prompt, style_prompt=None, negative_prompt=negative_prompt, negative_style_prompt=None)
+                
+        prompt_encodings = dict(
+            prompt_embeds = conditioning.embeds, 
+            pooled_prompt_embeds = conditioning.pooled_embeds,
+            negative_prompt_embeds = conditioning.negative_embeds,
+            negative_pooled_prompt_embeds = conditioning.negative_pooled_embeds,
+        )
+        # required for text_encoder_2 independent offload
+        prompt_encodings = {k: v.to(device) for k,v in prompt_encodings.items() if v is not None}
+            
         torch.cuda.empty_cache()
-        return dict(prompt_embeds=prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds) # neg not supported (offically)
+        return prompt_encodings
     
     
     @torch.inference_mode()
