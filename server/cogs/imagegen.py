@@ -213,7 +213,8 @@ class SetImageConfig:
         '''
         if not self.igen.is_ready:
             return await ctx.send(f'Image model not loaded! Call `!imgup` first.')
-
+        
+        await ctx.defer()
         self.igen.set_adapter_weight(adapter_name=adapter, weight=weight)            
         return await ctx.send(f'Adapter set.\n' + f'```json\n{self.igen.adapter_weights}\n```')
     
