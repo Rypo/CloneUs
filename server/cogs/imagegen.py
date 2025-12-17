@@ -340,9 +340,48 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         return prompt, was_corrected
     
-    async def validate_prompt(self, ctx: commands.Context, prompt:str):
-        prompt_new, was_sp_corrected = self.fix_prompt(prompt)
+    async def substitute_prompt_command(self, ctx: commands.Context, prompt:str):
+        supported_cmds = ['reword']
+
+        supcmd_re = '|'.join(supported_cmds)
+        re_cmd = re.compile(rf'`!({supcmd_re}) ([^`]+)`', flags=re.I)
+        if (matched := re_cmd.search(prompt)):
+            tgen = self.bot.get_cog('TextGen')
+            if not tgen.clomgr.is_ready:
+                msg = await tgen.txtup(ctx.channel)
+            
+            cmd_name, cmd_argstr = matched.groups()
+            
+            cmd = self.bot.get_command(cmd_name)
+            
+            cmd_args, cmd_kwargs = [], {}
+            
+            # https://github.com/Rapptz/discord.py/blob/v2.6.4/discord/ext/commands/core.py#L867
+            
+            for name, param in cmd.params.items():
+                if param.kind == param.KEYWORD_ONLY:
+                    cmd_kwargs[name] = cmd_argstr
+                    break
+                else:
+                    cmd_args = [cmd_argstr]
+            
+            sent_messages: list[discord.Message] = await ctx.invoke(cmd, *cmd_args, **cmd_kwargs)
+            result = ''.join([m.clean_content for m in sent_messages])
+            
+            color_logger.info(f'{matched.group()} -> {result}')
+            prompt = prompt.replace(matched.group(), result)
+            
+            for msg in sent_messages:
+                await msg.delete(delay = 5.0)
         
+        return prompt
+
+    async def validate_prompt(self, ctx: commands.Context, prompt:str):
+        if "`" in prompt:
+            prompt = await self.substitute_prompt_command(ctx, prompt)
+                
+        prompt_new, was_sp_corrected = self.fix_prompt(prompt)
+
         if was_sp_corrected:
             #diff_old, diff_new = self.spell_check.show_diff(prompt, prompt_new)
             diffed = self.spell_check.show_diff(prompt, prompt_new)
@@ -362,6 +401,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 prompt_new,was_sp_corrected = self.fix_prompt(prompt, check_spelling=False)
                 
             await msg.delete()
+
         return prompt_new
 
     def status_list(self, keep_advanced:bool=True, ctx=None):

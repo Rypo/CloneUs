@@ -728,7 +728,7 @@ class TextGen(commands.Cog, SetTextConfig):
         '''
         formatted_prompt = "\n".join(self.task_prompts['reword']['enhanced_prompt']).format(prompt=prompt)
         sent_messages = await self.ask(ctx, formatted_prompt, system_msg=None)
-        return ''.join([m.clean_content for m in sent_messages])
+        return sent_messages
         #return formatted_prompt
 
 
