@@ -337,7 +337,7 @@ class YouTubeManager:
         if not self.enabled:
             return text
         
-        if '<youtube' not in text:
+        if '<youtube' not in text.lower():
             return text
 
         allow_fetch = self.allow_fetch if allow_fetch is None else allow_fetch
