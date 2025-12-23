@@ -45,9 +45,15 @@ from diffusers import (
     AutoencoderKL,
     AnimateDiffSDXLPipeline,
     BitsAndBytesConfig,
-    StableDiffusion3PAGPipeline
+    StableDiffusion3PAGPipeline,
+    QwenImagePipeline, 
+    QwenImageImg2ImgPipeline, 
+    QwenImageTransformer2DModel, 
+    QwenImageEditPlusPipeline
 )
-
+from unsloth import FastModel
+from diffusers.quantizers import PipelineQuantizationConfig
+from diffusers.quantizers.quantization_config import GGUFQuantizationConfig, QuantoConfig, TorchAoConfig, BitsAndBytesConfig as DiffuBitsAndBytesConfig
 from diffusers.schedulers import AysSchedules
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img import retrieve_latents
 
@@ -1607,3 +1613,557 @@ class FluxBase(SingleStagePipeline):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
+
+
+class QwenImageBase(SingleStagePipeline):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None, 
+                 num_inference_steps = 4, rank=32):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='qwen')
+        
+        self.num_inference_steps = num_inference_steps #8
+        self.rank = rank
+
+        self.max_seq_len = 1024
+        self.pipe_xkwgs['true_cfg_scale'] = 1.0
+
+    def i2i(self, *args, **kwargs):
+        # because latents shape cannot be reliably inferred, height and width are required for img2img
+        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
+            
+    @torch.inference_mode()
+    def _scheduler_get(self):
+        #  From https://github.com/ModelTC/Qwen-Image-Lightning/blob/342260e8f5468d2f24d084ce04f55e101007118b/generate_with_diffusers.py#L82C9-L97C10
+        scheduler_config = {
+            "base_image_seq_len": 256,
+            "base_shift": math.log(3),  # We use shift=3 in distillation
+            "invert_sigmas": False,
+            "max_image_seq_len": 8192,
+            "max_shift": math.log(3),  # We use shift=3 in distillation
+            "num_train_timesteps": 1000,
+            "shift": 1.0,
+            "shift_terminal": None,  # set shift_terminal to None
+            "stochastic_sampling": False,
+            "time_shift_type": "exponential",
+            "use_beta_sigmas": False,
+            "use_dynamic_shifting": True,
+            "use_exponential_sigmas": False,
+            "use_karras_sigmas": False,
+        }
+        return FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
+
+    def unload_pipeline(self):
+        if self.is_ready:
+            #self.base.to('cpu')
+            components = self.base.components.keys()
+            for comp in components:
+                #getattr(self.base, comp).to('cpu')
+                setattr(self.base, comp, None)
+                setattr(self.basei2i, comp, None)
+            
+        super().unload_pipeline()
+
+    @torch.inference_mode()
+    def load_pipeline(self):
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            'unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit',
+            dtype=torch.bfloat16,
+            # torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            # device_map="auto",
+            low_cpu_mem_usage = True,
+        )
+        text_encoder: Qwen2_5_VLForConditionalGeneration = FastModel.for_inference(text_encoder)
+        text_encoder = text_encoder.eval().requires_grad_(False)
+        
+        scheduler = self._scheduler_get()
+
+        
+        transformer_model_path = f"nunchaku-tech/nunchaku-qwen-image/svdq-int4_r{self.rank}-qwen-image-lightningv1.0-{self.num_inference_steps}steps.safetensors"
+        
+        transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)#, device_map="auto", low_cpu_mem_usage = True, )
+
+        self.base: QwenImagePipeline = QwenImagePipeline.from_pretrained(
+            self.model_path, transformer=transformer, text_encoder=text_encoder, scheduler=scheduler, torch_dtype=torch.bfloat16, low_cpu_mem_usage = True,
+        )
+        
+        self.base.enable_xformers_memory_efficient_attention()
+        self.base.vae.enable_slicing()
+
+        if self.offload:
+            self.base.enable_model_cpu_offload()
+                
+        self.basei2i: QwenImageImg2ImgPipeline = QwenImageImg2ImgPipeline.from_pipe(self.base, transformer=None, torch_dtype=torch.bfloat16)
+        self.basei2i.transformer = self.base.transformer
+        self.is_ready = True
+    
+
+    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
+        dims_opts = {
+            'tiny': [(512,512), (512,640), (640,512)], # 1.25
+            'small': [(640,640), (512,768), (768,512)], # 1.5
+            'med': [(768,768), (640,896), (896,640)], # 1.4
+            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
+        }
+        
+        # batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2} # With out vae_slicing
+        batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
+        # batch_sizes = {'tiny': 6, 'small': 6, 'med': 4, 'full': 2} # With out vae_slicing
+        #batch_sizes = {'tiny': 24, 'small': 16, 'med': 12, 'full': 4} 
+
+        return (dims_opts[imsize], batch_sizes[imsize])    
+
+    @torch.inference_mode()
+    def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
+        device = torch.device('cuda:0')
+        
+        # prompt += ", Ultra HD, 4K, cinematic composition."
+        prompt = [prompt]
+        
+        prompt_embeds, prompt_embeds_mask = self.base.encode_prompt(prompt=prompt, num_images_per_prompt=batch_size, device=device, max_sequence_length=self.max_seq_len)
+        
+        prompt_encodings = dict(prompt_embeds=prompt_embeds, prompt_embeds_mask=prompt_embeds_mask)
+             
+        if negative_prompt:
+            negative_prompt = [negative_prompt]
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.base.encode_prompt(prompt=negative_prompt, num_images_per_prompt=batch_size, device=device, max_sequence_length=self.max_seq_len)
+            prompt_encodings.update(negative_prompt_embeds=negative_prompt_embeds, negative_prompt_embeds_mask=negative_prompt_embeds_mask)
+        
+        torch.cuda.empty_cache()
+        return prompt_encodings
+    
+    @torch.inference_mode()
+    def compile_pipeline(self):
+        # # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
+        torch_compile_flags()
+        self.base.transformer.to(memory_format=torch.channels_last)
+        self.base.vae.to(memory_format=torch.channels_last)
+        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
+        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
+        
+        for _ in range(3):
+            _ = self.t2i("a photo of a cat holding a sign that says hello world")
+        self.is_compiled = True
+        torch.compiler.reset()
+
+    
+    @torch.inference_mode()
+    def decode_latents(self, latents, height, width, **kwargs):
+        # https://github.com/huggingface/diffusers/blob/6f1042e36cd588a7b66498f45c3bb7085e4fa395/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_img2img.py#L852
+        if isinstance(latents, list):
+            latents = torch.cat(latents, dim=0)
+        
+        latents = self.basei2i._unpack_latents(latents, height, width, self.basei2i.vae_scale_factor).to(self.basei2i.vae.dtype)
+        
+        latents_mean = (
+            torch.tensor(self.basei2i.vae.config.latents_mean)
+            .view(1, self.basei2i.vae.config.z_dim, 1, 1, 1)
+            .to(latents.device, latents.dtype)
+        )
+        latents_std = 1.0 / torch.tensor(self.basei2i.vae.config.latents_std).view(1, self.basei2i.vae.config.z_dim, 1, 1, 1).to(
+            latents.device, latents.dtype
+        )
+
+        latents = latents / latents_std + latents_mean
+        image = self.basei2i.vae.decode(latents, return_dict=False)[0][:, :, 0]
+        image = self.basei2i.image_processor.postprocess(image, output_type='pil')
+        
+        return image
+
+
+class QwenEditBase(QwenImageBase):
+    CONDITION_IMAGE_SIZE = 384 * 384
+    VAE_IMAGE_SIZE = 1024 * 1024
+
+    @staticmethod
+    def calculate_dimensions(target_area, ratio):
+        width = math.sqrt(target_area * ratio)
+        height = width / ratio
+
+        width = round(width / 32) * 32
+        height = round(height / 32) * 32
+
+        return width, height
+    
+    def i2i(self, *args, **kwargs):
+        kwargs.pop('strength', None)
+        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
+
+    def t2i(self, *args, **kwargs):
+        return self.base(*args, **kwargs, **self.pipe_xkwgs)
+    
+
+    @torch.inference_mode()
+    def load_pipeline(self):
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            'unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit',
+            dtype=torch.bfloat16,
+            # torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+            low_cpu_mem_usage = True,
+        )
+        text_encoder: Qwen2_5_VLForConditionalGeneration = FastModel.for_inference(text_encoder)
+        text_encoder = text_encoder.eval().requires_grad_(False)
+
+        # text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        #     "Qwen/Qwen-Image-Edit-2509",
+        #     subfolder="text_encoder",
+        #     dtype=torch.bfloat16,
+        #     # torch_dtype=torch.bfloat16,
+        #     attn_implementation="flash_attention_2",
+        #     device_map="auto",
+        #     low_cpu_mem_usage = True,
+        # )
+        
+        scheduler = self._scheduler_get()
+
+        transformer_model_path = (f"nunchaku-tech/nunchaku-qwen-image-edit-2509/lightning-251115/svdq-{get_precision()}_r{self.rank}-qwen-image-edit-2509-lightning-{self.num_inference_steps}steps-251115.safetensors")
+        transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)
+        transformer = transformer.eval().requires_grad_(False)
+
+        self.basei2i: QwenImageEditPlusPipeline = QwenImageEditPlusPipeline.from_pretrained(
+            self.model_path, transformer=transformer, text_encoder=text_encoder, scheduler=scheduler, torch_dtype=torch.bfloat16, low_cpu_mem_usage = True,
+        )
+        
+        self.basei2i.enable_xformers_memory_efficient_attention()
+        self.basei2i.vae.enable_slicing()
+        
+        if self.offload:
+            self.basei2i.enable_model_cpu_offload()
+        
+
+        self.base = QwenImagePipeline.from_pipe(self.basei2i, transformer=self.basei2i.transformer, scheduler=self.basei2i.scheduler, torch_dtype=torch.bfloat16,)
+        # self.base.transformer = self.basei2i.transformer
+
+        self.is_ready = True
+        
+        # self.max_seq_len = 512
+        self.pipe_xkwgs['true_cfg_scale'] = 1.0
+        
+    
+    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
+        dims_opts = {
+            'tiny': [(768,768), (640,896), (896,640)], # 1.4
+            'small': [(768,768), (640,896), (896,640)], # 1.4
+            'med': [(768,768), (640,896), (896,640)], # 1.4
+            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
+        }
+        
+        batch_sizes = {'tiny': 1, 'small': 1, 'med': 1, 'full': 1} # Batch > 1 is consistently slower regardless of image size
+
+        return (dims_opts[imsize], batch_sizes[imsize])  
+    
+    @torch.inference_mode()
+    def preprocess_image(self, image: Image.Image | list[Image.Image]):
+        if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.basei2i.latent_channels):
+            if not isinstance(image, list):
+                image = [image]
+            #condition_image_sizes = []
+            condition_images = []
+            #vae_image_sizes = []
+            #vae_images = []
+
+            for img in image:
+                image_width, image_height = img.size
+                condition_width, condition_height = self.calculate_dimensions(self.CONDITION_IMAGE_SIZE, image_width / image_height)
+                #vae_width, vae_height = self.calculate_dimensions(self.VAE_IMAGE_SIZE, image_width / image_height)
+                #condition_image_sizes.append((condition_width, condition_height))
+                #vae_image_sizes.append((vae_width, vae_height))
+                condition_images.append(self.basei2i.image_processor.resize(img, condition_height, condition_width))
+                #vae_images.append(self.image_processor.preprocess(img, vae_height, vae_width).unsqueeze(2))
+            return condition_images
+    
+    @torch.inference_mode()
+    def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, image: Image.Image|list[Image.Image]|None = None, **kwargs):
+        # https://github.com/huggingface/diffusers/blob/6f1042e36cd588a7b66498f45c3bb7085e4fa395/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit_plus.py#L287
+        device = torch.device('cuda:0')
+        
+        prompt = [prompt]
+
+        encode_prompt_kwargs = dict(
+            device = device, 
+            num_images_per_prompt = batch_size, 
+            max_sequence_length = self.max_seq_len
+        )
+
+        if image is not None:
+            pipeline = self.basei2i
+
+            if isinstance(image, np.ndarray): # prevents processor from incrementing Picture:{i} in image prompt when trying to true batch
+                cond_images = image
+                prompt = prompt*len(cond_images)
+            else:
+                cond_images = self.preprocess_image(image)
+                
+            encode_prompt_kwargs.update(image = cond_images)
+        else:
+            pipeline = self.base
+
+        prompt_encodings = {}
+        prompt_encodings['prompt_embeds'], prompt_encodings['prompt_embeds_mask'] = pipeline.encode_prompt(prompt=prompt, **encode_prompt_kwargs)
+            
+        if negative_prompt:
+            negative_prompt = [negative_prompt]
+            prompt_encodings['negative_prompt_embeds'], prompt_encodings['negative_prompt_embeds_mask'] = pipeline.encode_prompt(prompt=negative_prompt, **encode_prompt_kwargs)
+                
+
+        torch.cuda.empty_cache()
+        return prompt_encodings                    
+    
+
+    @torch.inference_mode()
+    def _pipe_img2img(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, strength:float, guidance_scale:float, seed=None, output_type='pil'):
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        w,h = image.size if isinstance(image, Image.Image) else image[0].size
+        #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
+        strength = np.clip(strength, 1/num_inference_steps, 1)
+        image = self.i2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed, output_type=output_type,).images[0]
+        
+        return image
+
+    @torch.inference_mode()
+    def _pipe_img2upimg(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, refine_strength:float, guidance_scale:float, seed=None, scale=1.5):
+        image = self.upsample(image, scale=scale)
+        logger.debug('upsized (w,h):', image[0].size)
+        torch.cuda.empty_cache()
+
+        return self._pipe_img2img(prompt_encodings, image, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
+    
+
+    @torch.inference_mode()
+    def _batched_img2img(self, prompt_encodings:dict[str, torch.Tensor], image:Image.Image, num_images:int, batch_size:int, num_inference_steps:int, strength:float, guidance_scale:float, seed:list[int]|None, output_type:str='pil'):
+        generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
+        if generators is None:
+            generators = [None]*num_images
+        w,h = image.size if isinstance(image, Image.Image) else image[0].size
+
+        batch_size = min(num_images, batch_size)
+        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
+        
+        for gen_batch in batched(generators, batch_size):
+            if (batch_len := len(gen_batch)) != batch_size:
+                batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
+            if gen_batch[0] is None:
+                gen_batch = None
+            #if generators is not None:
+            #    gen_batch, generators = generators[:batch_len], generators[batch_len:] # pop slice
+            
+            images = self.i2i(image=image, num_inference_steps=num_inference_steps,  guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type).images 
+            
+            if output_type != 'latent':
+                torch.cuda.empty_cache()
+
+            yield images
+    
+    @torch.inference_mode()
+    def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
+        #batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
+        batched_prompts = {k: torch.split(v, batch_size) for k,v in prompt_encodings.items()}
+        batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
+        w,h = img_wh # need wh in case `images` is a batch of latents
+        
+        
+        for i,imbatch in enumerate(batched_images):
+            #batch_len = 
+            embed_batch = {k: v[i] for k,v in batched_prompts.items()}
+            # shared common seed helps SIGNIFICANTLY with cohesion
+            # list of generators is very important. Otherwise it does not apply correctly
+            generators = generator_batch(seed, len(imbatch), device='cuda')
+
+            latents = self.i2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **embed_batch, generator=generators, output_type='latent', **kwargs).images 
+
+            yield latents
+
+    @torch.inference_mode()
+    def regenerate_image(self, prompt: str, image: Image.Image | list[Image.Image],  
+                         n_images: int = 1,
+                         steps: int = None, 
+                         strength: float = None, 
+                         negative_prompt: str = None, 
+                         guidance_scale: float = None, 
+                         aspect: typing.Literal['square','portrait','landscape'] = None, 
+                         refine_strength: float = None, 
+                         seed: int = None,
+                         **kwargs):
+        
+        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, )
+        
+        steps = fkwg['steps']
+        guidance_scale = fkwg['guidance_scale']
+        negative_prompt=fkwg['negative_prompt']
+        strength = fkwg['strength']
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        
+        if not isinstance(image, list):
+            image = [image]
+        # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
+        image = [self._resize_image(img, aspect) for img in image]
+                
+
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
+        prompt_encodings = self.embed_prompts(prompt, image=image, negative_prompt=negative_prompt, clip_skip=self.clip_skip, )
+        
+        # don't want to pass around full image, going to replace with image_url in imagegen anyway
+        call_kwargs = dict(prompt=prompt, image='PLACEHOLDER', steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
+                            aspect=aspect, refine_strength=refine_strength, seed=seed,)
+        
+        
+        if n_images > 1:
+            _,BSZ = self.batch_settings('full')
+            if n_images <= 10:
+                BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
+
+            call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
+            batchgen = self._batched_img2img(prompt_encodings, image, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seeds, output_type='pil')
+            
+            for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
+                yield (imbatch, kwbatch)
+        else:
+            image = self._pipe_img2img(prompt_encodings, image, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seed)
+            if refine_strength:
+                image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
+            
+            yield ([image], [call_kwargs])
+
+        release_memory()
+        
+    @torch.inference_mode()
+    def regenerate_frames(self, prompt: str, frame_array: np.ndarray, 
+                          steps: int = None, 
+                          astrength: float = 0.5, 
+                          imsize: typing.Literal['tiny','small','med','full'] = 'small', 
+
+                          negative_prompt: str = None, 
+                          guidance_scale: float = None, 
+                          two_stage: bool = False, 
+                          aseed: int = None, 
+                          **kwargs):   
+        
+       
+        # NOTE: special behavior since having a seed improves results substantially 
+        if aseed is None: 
+            aseed = np.random.randint(1e9, 1e10-1)
+        elif aseed < 0:
+            aseed = None
+            
+
+        fkwg = self.config.get_if_none(steps=steps, strength=astrength, negative_prompt=negative_prompt, guidance_scale=guidance_scale)
+        steps = fkwg['steps']
+        strength = fkwg['strength']
+        negative_prompt=fkwg['negative_prompt']
+        guidance_scale=fkwg['guidance_scale']
+
+        # astrength = np.clip(astrength, 1/steps, 1) # clip strength so at least 1 step occurs
+        #astrength = max(astrength*steps, 1)/steps 
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+                
+        dim_choices,_ = self.batch_settings(imsize)
+        bsz = 1
+        resized_images = self._resize_image_frames(frame_array, dim_choices, max_num_frames=30, upsample_px_thresh=256, upsample_bsz=8) # upsample first if less 256^2 pixels 
+        dim_out = resized_images[0].size
+        
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
+        
+        #condition_images = np.stack(self.preprocess_image(resized_images), 0) 
+        #prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=1, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True, image=condition_images)
+        
+        # First, yield the total number of frames since it may have changed from slice
+        yield len(resized_images)
+        #batch_iter = self._batched_imgs2imgs(prompts_encodings, resized_images, bsz, steps, strength=strength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs)
+        #image_prev = self._pipe_img2img(prompts_encodings, img_init, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=aseed, )
+        
+        t0 = time.perf_counter()
+        latents = []
+
+        
+        latents = []
+        w,h = dim_out
+        # image_frames = [image_prev]
+        # # prompt = prompt + '. Continue on from image 2 though it was the previous frame in an animated GIF.' # '. Use image 2 as the starting point for the transformation.'
+        prompt_encs = []
+
+        for image_next in resized_images:
+            # image_next = resized_images[i]
+            prompt_encs.append(self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=1,  clip_skip=self.clip_skip, partial_offload=True, image=image_next))
+        
+        for img,embeds in zip(resized_images, prompt_encs):
+            generator = torch.Generator('cpu').manual_seed(aseed)
+            #img_input = image_next # [image_next, image_prev]
+            # prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True, image=image_next)
+            lat = self.i2i(image=img, **embeds, num_inference_steps=steps, guidance_scale=guidance_scale, num_images_per_prompt=1, 
+                           generator=generator, height=h, width=w, max_sequence_length=self.max_seq_len, output_type='latent',).images
+            # lat = self._pipe_img2img(prompts_encodings, image_next, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=aseed)
+            latents.append(lat)
+            yield bsz
+         
+        # latents = torch.cat(latents, 0)
+        
+        image_frames = self.decode_latents(latents, height=h, width=w)
+        yield image_frames
+
+        te = time.perf_counter()
+        runtime = te-t0
+        logger.info(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
+        release_memory()
+    
+    @torch.inference_mode()
+    def generate_frames(self, prompt: str, 
+                            image: Image.Image|None = None, 
+                            nframes: int = 11,
+                            steps: int = None, 
+                            strength_end: float = 0.80, 
+                            strength_start: float = 0.30, 
+                            negative_prompt: str = None, 
+                            guidance_scale: float = None, 
+                            aspect: typing.Literal['square','portrait','landscape'] = None, 
+                            mid_frames:int=0,
+                            seed: int = None, 
+                            **kwargs): 
+        
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
+        
+        negative_prompt=fkwg['negative_prompt']
+        guidance_scale=fkwg['guidance_scale']
+        steps = fkwg['steps']
+        aspect = fkwg['aspect']
+
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
+        
+        image_frames = []
+
+        if image is None:
+            w,h = self.config.get_dims(aspect)
+            prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
+            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images[0]
+        else:
+            image = self._resize_image(image)#, aspect=aspect, dim_choices=SDXL_DIMS)
+            w,h = image.size
+
+        image_frames.append(image)
+
+        # subtract 1 for first image
+        nframes = nframes - 1
+        
+        yield -1
+        
+        
+        for i in range(nframes):
+            # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
+            prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
+            image = self.i2i(image=image, num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images[0]
+            image_frames.append(image)
+            yield i
+            
+        #image_frames += self.decode_latents(latents, height=h, width=w, )
+        
+        release_memory()
+        
+        if mid_frames:
+            image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
+            
+        yield image_frames
+        release_memory()

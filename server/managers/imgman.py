@@ -62,7 +62,15 @@ class BaseSD3Manager(ImageGenManager, pipelines.SD3Base):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)   
 
+class BaseQwenImageManager(ImageGenManager, pipelines.QwenImageBase):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
+                 num_inference_steps = 4, rank=128):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, num_inference_steps = num_inference_steps, rank = rank)
 
+class BaseQwenEditManager(ImageGenManager, pipelines.QwenEditBase):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
+                 num_inference_steps = 8, rank=128):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, num_inference_steps = num_inference_steps, rank = rank)
 
 class SDXLTurboManager(BaseSDXLManager):
     def __init__(self, offload=False):
@@ -167,6 +175,49 @@ class FluxTurboManager(BaseFluxManager):
             #scheduler_setup=('Euler FM', dict(shift=1.8, use_dynamic_shifting=False)),
         )
 
+class QwenImageManager(BaseQwenImageManager):
+    def __init__(self, offload=True):
+        rank = 32
+        num_inference_steps = 4
+        super().__init__(
+            model_name = 'qwen_image',
+            model_path = "Qwen/Qwen-Image",
+            config = DiffusionConfig(
+                steps = CfgItem(num_inference_steps, bounds=(1,num_inference_steps+2)),
+                # guidance_scale = CfgItem(3.5, locked=True), 
+                guidance_scale = CfgItem(None, locked=True), 
+                strength = CfgItem(0.50, bounds=(0.3, 0.95)),
+                # negative_prompt = " ",
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                #refine_strength=CfgItem(0, locked=True),
+                locked=['refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+            num_inference_steps = num_inference_steps,
+            rank = rank,
+        )
+
+class QwenEditManager(BaseQwenEditManager):
+    def __init__(self, offload=True):
+        rank = 128 # 32
+        num_inference_steps = 8
+        super().__init__(
+            model_name = 'qwen_edit',
+            model_path = "Qwen/Qwen-Image-Edit-2509",
+            config = DiffusionConfig(
+                steps = CfgItem(num_inference_steps, bounds=(1,num_inference_steps+2)),
+                guidance_scale = CfgItem(None, locked=True), 
+                strength = CfgItem(1.0, bounds=(1.0, 1.0)),
+                # negative_prompt = " ",
+                # img_dims = [(1024,1024), (832,1216), (1216,832)],
+                img_dims = [(1152, 1152), (896, 1344),(1344, 896), (960, 1280),(1280, 960), ],#(832, 1472),(1472, 832)], #1:1, 2:3,3:2, 3:4,4:3, 9:16,16:9
+                locked=['refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+            num_inference_steps = num_inference_steps,
+            rank = rank,
+        )
+
 
 
 AVAILABLE_MODELS = {
@@ -190,4 +241,12 @@ AVAILABLE_MODELS = {
         'manager': FluxTurboManager,
         'desc': 'Flux Turbo' # (XLg, avg)
     },
+    'qwen_image': {
+        'manager': QwenImageManager,
+        'desc': '⚡Qwen Image' # (XLg, avg)
+    },
+    'qwen_edit': {
+        'manager': QwenEditManager,
+        'desc': '⚡Qwen Image Edit' # (XLg, avg)
+    }
 }
