@@ -224,7 +224,10 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     def __init__(self, bot: BotUs):
         self.bot = bot
         #self.igen = imgman.ColorfulXLLightningManager(offload=False)
-        self.igen = imgman.FluxTurboManager(offload=False)
+        # self.igen = imgman.FluxTurboManager(offload=False)
+        # self.igen = imgman.JuggernautRagnarokManager(offload=False)
+        # self.igen = imgman.QwenImageManager(offload=True)
+        self.igen = imgman.QwenEditManager(offload=True)
 
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
@@ -778,6 +781,122 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
                 for kws in kwbatch:
                     kws.pop('image')
                     kws.update(imgurl=image_url)
+                await view.add_images(imbatch, call_kwargs=kwbatch)
+
+    @commands.hybrid_command(name='edit')
+    async def _edit(self, ctx: commands.Context, prompt: commands.Range[str,1,1000], imgurl:str, *, 
+                     imgurl2: str = None,
+                     imgurl3: str = None,
+                     n: int = 1,
+                     steps: int = None, 
+                     negprompt: str = None, 
+                     guidance: float = None, 
+                     aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
+                     seed:int = None,
+                    #  _view: imageui.DrawUIView = None,
+                     ):
+        """Tell the model what to do to the image.
+
+        Args:
+            prompt: A description of how
+            imgurl: Url of image1.
+            imgurl2: Url of image2. Default=None.
+            imgurl2: Url of image3. Default=None.
+            n: The number of redrawn images to produce from the image(s) and prompt.
+            
+            steps: Num of iters to run. Increase = ⬆Quality, ⬆Run Time. Default varies.
+            negprompt: What to exclude from image. Usually comma sep list of words. Default=None.
+            guidance: Guidance scale. Increase = ⬆Prompt Adherence, ⬇Quality, ⬇Creativity. Default varies.
+            aspect: Image aspect ratio (shape). If None, will pick nearest to imgfile.
+
+            seed: Random Seed. An arbitrary number to make results reproducable. Default=None.
+        """
+        return await self.edit(ctx, prompt, imgurl, 
+                               imgurl2=imgurl2,
+                               imgurl3=imgurl3,
+                               n_images = n,
+                               steps = steps,
+                               negative_prompt=negprompt,
+                               guidance_scale=guidance,
+                               aspect=aspect,
+                               seed=seed,
+                               )
+
+    
+    async def edit(self, ctx: commands.Context, prompt: commands.Range[str,1,1000], imgurl:str, *, 
+                     imgurl2: str = None,
+                     imgurl3: str = None,
+                     n_images: int = 1,
+                     steps: int = None, 
+                     negative_prompt: str = None, 
+                     guidance_scale: float = None, 
+                     aspect: typing.Literal['square', 'portrait', 'landscape'] = None,
+                     seed:int = None,
+                     _view: imageui.DrawUIView = None,
+                     **kwargs,
+                     ):
+        # imgfile: image attachment. To use, write anything in `imgurl` and drag+drop image. 
+        # strength: How much to change input image. 0 = Change Nothing. 100=Change Completely. Default varies.
+        # detail: Detail weight. Value -3.0 to 3.0, >0 = add detail, <0 = remove detail. Default=0.
+        # hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored unless > 0.
+        # fast: Trades image quality for speed - about 2-3x faster. Default=False.
+        # refine_strength: float = None,
+
+        color_logger.debug(f'Unused kwargs: {kwargs}')
+
+        SUPPORTED_MODELS = ['qwen_edit',]
+        URL_SEP = ' | '
+        if self.igen.model_name in SUPPORTED_MODELS:
+            if not self.igen.is_ready:
+                await self.imgup(ctx)
+        else:
+            return await ctx.send(f'Model does not support `/edit`, supported models: {SUPPORTED_MODELS}', silent=True, delete_after=5)
+        
+        # The URL_SEP syntax is used when called from DrawUI
+        imgurls = imgurl.split(URL_SEP) if URL_SEP in imgurl else [imgurl, imgurl2, imgurl3]
+        
+        images: list[Image.Image] = []
+        image_urls = []
+
+        for imgurl in imgurls:
+            if imgurl:
+                image_url = imgutil.clean_image_url(imgurl, check_tenor=False)
+                image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
+                image = imgutil.image_fix(image, animated=False, transparency=False)
+
+                images.append(Image.fromarray(image))
+                image_urls.append(image_url)
+        
+                
+        view = imageui.DrawUIView(timeout=GUI_TIMEOUT) if _view is None else _view
+        needs_view = await self.view_check_defer(ctx, view = view)
+        
+        # this may be passed a url string in drawUI config
+
+        try:
+            prompt = await self.validate_prompt(ctx, prompt)
+        except PromptCanceled:
+            return await ctx.send('Canceled', silent=True, delete_after=1)
+        
+
+        excluded_args = ['image'] + ['strength', 'refine_strength']
+
+        async with self.bot.busy_status(activity='draw'):
+            
+            output = await self.igen.regenerate_image(prompt=prompt, image=images, n_images=n_images, steps=steps, strength=None, 
+                                                                  negative_prompt=negative_prompt, guidance_scale=guidance_scale,
+                                                                  aspect=aspect, refine_strength=None, seed=seed)
+            if needs_view:
+                view = imageui.DrawUIView(timeout=GUI_TIMEOUT)
+                msg = await view.send(ctx, n_init_images = n_images)
+                self.msg_views[msg.id] = view
+            
+            async for imbatch,kwbatch in async_gen(output):
+                for kws in kwbatch:
+                    for skip_kw in excluded_args:
+                        kws.pop(skip_kw)
+                    
+                    kws.update(imgurl=' | '.join(image_urls))
                 await view.add_images(imbatch, call_kwargs=kwbatch)
 
     

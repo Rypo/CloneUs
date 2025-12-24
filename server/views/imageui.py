@@ -288,7 +288,14 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
 
         self.imgen = ctx.command.cog #ctx.cog
         self.cmd_name = ctx.command.name
-        self.call_fn = self.imgen.redraw if self.cmd_name=='redraw' else self.imgen.draw
+        
+        cmd_fns = {
+            'redraw': self.imgen.redraw,
+            'draw': self.imgen.draw,
+            'edit': self.imgen.edit,
+        }
+
+        self.call_fn = cmd_fns.get(self.cmd_name, self.imgen.draw) # self.imgen.redraw if self.cmd_name=='redraw' else self.imgen.draw
         self.init_flags = self.call_ctx.kwargs.get('flags', {})
         
         self.message: discord.WebhookMessage = await ctx.send(view=self)
@@ -473,7 +480,7 @@ class DrawUIView(ImagePrimaryView):#discord.ui.View):
         
         delta_kwargs = {}
         for k in new_kwargs:
-            new_val, old_val = new_kwargs[k], old_kwargs[k]
+            new_val, old_val = new_kwargs.get(k,None), old_kwargs.get(k,None)
             if (new_val or old_val) and (new_val != old_val):
                 delta_kwargs[k] = new_val
                 
@@ -927,14 +934,14 @@ class DynamicImageGridView(discord.ui.View):
 class ConfigModal(discord.ui.Modal, title='Tweaker Menu'):
     prompt = discord.ui.TextInput(label='Prompt', style=TextStyle.paragraph, required=True, min_length=1, max_length=1000)
     negative_prompt = discord.ui.TextInput(label='Negative Prompt', style=TextStyle.short, required=False, max_length=1000)
-    config = discord.ui.TextInput(label='Config', style=TextStyle.paragraph, required=False, min_length=1, max_length=200,) # style=TextStyle.short,
+    config = discord.ui.TextInput(label='Config', style=TextStyle.paragraph, required=False, min_length=1, max_length=1000)#200,) # style=TextStyle.short,
     hd_config = discord.ui.TextInput(label='⬇️ HD Config (Upsampling)', style=TextStyle.paragraph, required=False, max_length=100) # style=TextStyle.short,
     #image_url =  # style=TextStyle.short,
 
     def __init__(self, vals=None, *args, **kwargs):
         self.vals = vals
         super().__init__(*args, **kwargs)
-        self.image_url = discord.ui.TextInput(label='Image URL', style=TextStyle.short, required=False)
+        self.image_url = discord.ui.TextInput(label='Image URL', style=TextStyle.paragraph, required=False, )#max_length=1000,)
         if vals.get('image_url') is not None: 
             self.add_item(self.image_url)
         
