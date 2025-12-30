@@ -221,6 +221,8 @@ def clean_image_url(url:str, check_tenor:bool):
     return url
 
 def image_fix(image:np.ndarray, animated:bool=False, transparency:bool=False):
+    if image.ndim == 2: # grayscale
+        return image[:, :, None].repeat(3, -1) # copy 3x, HW->HWC
     if not animated and image.ndim > 3:
         image = image[0] # gifs -> take first frame
     if not transparency and image.shape[-1] > 3: # discard alpha channel
