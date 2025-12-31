@@ -1169,9 +1169,9 @@ class CloneusTag(Cloneus):
         # print(['Words: {}, ids: {}'.format(s.words, s.stop_token_ids) for s in (stop_criteria if stop_criteria is not None else [])])
         stop_criteria = None
         if stop_strings:
-            stop_criteria = transformers.StoppingCriteriaList(
+            stop_criteria = transformers.StoppingCriteriaList([
                 transformers.StopStringCriteria(tokenizer, stop_strings)
-            )
+            ])
             
         return tokenizer, gen_config, stop_criteria
     
