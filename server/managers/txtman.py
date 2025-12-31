@@ -236,18 +236,14 @@ class CloneusManager():
         return update_message
 
     @wrap_async_executor
-    def predict_author(self, message_cache:list[discord.Message],  autoreply_mode: str, author_candidates: list[str]=None) -> str:
+    def predict_author(self, message_cache:list[discord.Message], autoreply_mode: str, author_candidates: list[str]=None) -> str:
+        if author_candidates is None:
+            author_candidates = useridx.get_users('dname')
         
         llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
-        auth_cands = useridx.get_users('dname') if not author_candidates else author_candidates
-        author_probas = self.clo.author_probabilities(llm_input_messages, authors=auth_cands)
+        author_probas = self.clo.author_probabilities(llm_input_messages, authors=author_candidates)
         
         model_logger.info(f'Autobot Probablities: {author_probas}')
-        if author_candidates:
-            author_probas = [(a,p) for (a,p) in author_probas if a in author_candidates]
-            psum = sum(p for a,p in author_probas)
-            author_probas = [(a,p/psum) for a,p in author_probas]
-            print('->',author_probas)
     
         if autoreply_mode == 'top':
             author_choice,top_prob = author_probas[0]
@@ -257,15 +253,16 @@ class CloneusManager():
 
         match autoreply_mode:
             case 'rbest':
-                author_choice = random.choices(authors,probas)[0]
+                author_choice = random.choices(authors, probas)[0]
             case 'irbest':
-                author_choice = random.choices(authors,[1-p for p in probas])[0]
+                author_choice = random.choices(authors, [1-p for p in probas])[0]
             case 'urand':
                 author_choice = random.choices(authors, None)[0]
         
-        if not author_choice.isalnum():  
-            # failsafe against empty/punctuation brackets
-            author_choice = random.choice(auth_cands)
+        # I can't see why I thought this would ever be necessary
+        #if not author_choice.isalnum():  
+        #    # failsafe against empty/punctuation brackets
+        #    author_choice = random.choice(author_candidates)
 
         return author_choice
     

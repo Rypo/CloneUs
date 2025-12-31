@@ -373,6 +373,9 @@ class Cloneus(GenConfigUtilities):
         self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, quant_method=quant_method, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=None)
         
+        # NOTE: Any custom added vocab will get lumped into this as well
+        self.markup_token_ids = torch.unique(torch.as_tensor(list(self.tokenizer.get_added_vocab().values())+self.tokenizer.all_special_ids, dtype=torch.int64))
+
         self.base_tokenizer = AutoTokenizer.from_pretrained(self.model.config._name_or_path, trust_remote_code=True)
         self.base_dtype = AutoConfig.from_pretrained(self.model.config._name_or_path, trust_remote_code=True).torch_dtype
         if self.base_dtype not in [torch.float16, torch.bfloat16]: 
@@ -483,16 +486,16 @@ class Cloneus(GenConfigUtilities):
 
     def to_text_input(self, chat_history: list[tuple[str,str]], author_seedtext: str|tuple[str,str]=None) -> str:
         '''Convert author message tuples into a text string, adding seed author text if provided, and applying youtube encoding if enabled'''
-        chat_history = chat_history[:] # shallow copy to avoid mutation
+        
         if author_seedtext is not None:
             text = self.to_seeded_text(chat_history, author_seedtext)
         else:
+            chat_history = chat_history[:] # shallow copy to avoid accidental mutation
             # if there is no next author, then  we DON'T want to add a generation prompt. Just want to get the formatted chat text in it's present state 
-            text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=False) 
+            text = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=False, continue_final_message=False) 
                 
         text = self.ytm.encode(text)
         
-    
         return text
     
     def to_seeded_text(self, chat_history: list[tuple[str,str]], author_seedtext: str|tuple[str,str]):
@@ -500,26 +503,25 @@ class Cloneus(GenConfigUtilities):
         
         This is done so that the model will continue generating from seedtext rather than stopping on a <|eot|> token or postfix.
         '''
-        chat_history = chat_history[:] # shallow copy to avoid mutation
+        chat_history = chat_history[:] # shallow copy to avoid accidental mutation
         if isinstance(author_seedtext, str):
             author_seedtext = (author_seedtext, '')
         
         author, seedtext = author_seedtext
-        if seedtext is None:
-            seedtext = ''
-        
-        
-        if seedtext:
-            # If there is actually starting text, we can rely on `continue_final_message` otherwise, if it's blank, it will fail
-            seeded_convo = self.to_conversation_format(chat_history + [(author, seedtext)] ) # to hf convo dict
-            author_seeded_text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
-            return author_seeded_text
         
         seedtext_surrogate = '###_dummy_seedtext_###'
+        # seed with author and dummy text (required, otherwise `continue_final_message` logic can't find the index])
         seeded_convo = self.to_conversation_format(chat_history + [(author, seedtext_surrogate)])
-        #chat_history += [(author, seedtext_surrogate)]
-        text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
-        text = text.replace(seedtext_surrogate,'')
+        # add_special_tokens must only be True once or can dupe <bos>/<eos> tokens. Kept here, disabled for tokenizer call 
+        seeded_text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
+        # find added surrogate text start index
+        idx_text_start = seeded_text.rfind(seedtext_surrogate)
+        # cutting here guarantees no trailing EOS markup can be included. continue_final_message=True _should_ already do this, but hardcut safer
+        text = seeded_text[:idx_text_start]
+        # If there is seed text, we can safely append knowing all preformatting is already applied
+        if seedtext:
+            text += seedtext
+
         # split on dummy text to KEEP pre-content formatting but REMOVE post content formatting
         # this effectively removes the tag_sep dependency
         # which is important for models where the role has a special token before the content 
@@ -531,6 +533,48 @@ class Cloneus(GenConfigUtilities):
         #text += self.apply_content_prefix(author, seedtext, tag_sep).strip(' ') # IFF using ' ' as tag_sep, should NOT trail with it
 
         return text
+
+    def common_generation_text(self, chat_history: list[tuple[str,str]], sample_author: str = None):
+        '''Get the complete, formatted chat history with all trailing markup needed to accept author tag input.
+
+        Specifically, it has the following property:
+            The next token after this text *must* be a component of a formatted author tag.
+            No additional spacing, markup, special tokens, etc., can be required.
+            This holds for all conditions, invariant to chat_history, usernames, author tag format, tag_placement method,
+        
+        Args:
+            chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
+            sample_author: An arbitrarily chosen, unformatted author name in the user index. If None, use the first in useridx.
+        
+        Returns:
+            common_text: A fully prepared text input, suitable for concatenation with any formatted author tag.
+        '''
+        
+        # This little song and dance is required to ensure that **Everything** up to the author_tag insertion point is included as base_text.
+        # e.g.: base_input_len = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), return_tensors='pt', tokenize=True).shape[1]
+        # would NOT have the correct base length for UA-type formats since the next "user"/"assistant" tag would not be counted, throwing off the index
+        # In the ideal world, continue_final_message=True should be sufficent to accomplish this, but with all the custom formatting being done, it can fail.
+        
+        # TODO: THOROUGHLY test that concat common_text+author_tag == to_text_input(chat_history, author) for all possbile configurations
+        # If so, we can cut down the number of to_text_input calls *significantly*.
+        # e.g. in batches, 
+        # ... [to_text_input(chat_history, author)) for author in authors]
+        # would become
+        # ... [common_text + format_author_tag(author) for author in authors]
+        # Would need to do a slight refactor to accomodate seed_text, however 
+
+        if sample_author is None:
+            sample_author = useridx.get_users('dname')[0] # arbitrarily use first author
+        
+        # prepare chat history with generation prompt for sample_author 
+        text_sample = self.to_text_input(chat_history, sample_author)
+        sample_author_tag = useridx.format_author_tag(sample_author, self.cfg.author_tag)
+        # find rightmost *formatted* sample author tag. Must find rightmost or it will almost certainly cut prematurely
+        common_text_length = text_sample.rfind(sample_author_tag)
+        # deliniate base input termination point
+        common_text = text_sample[:common_text_length]
+
+        return common_text
 
     def cleanup_out_text(self, out_text: str):
         '''Trim off added stop_criteria words, if any, from model output'''
@@ -564,13 +608,9 @@ class Cloneus(GenConfigUtilities):
     
     @torch.inference_mode()
     def _proba_next_token(self, chat_history, top_k=5):
-        #author_surrogate = '###_dummy_author_###'
-        #formatted_author_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag, insert_raw=True)
-        #base_input = self.to_text_input(chat_history)#+[(author_surrogate, 'ignored')]).split(formatted_author_surrogate)[0]
-        base_input = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), tokenize=False, add_generation_prompt=True)
+        base_input_text = self.common_generation_text(chat_history)
         
-        
-        inputs = self.tokenizer(base_input, return_tensors="pt", add_special_tokens=False) # add_special_tokens=False
+        inputs = self.tokenizer(base_input_text, return_tensors="pt", add_special_tokens=False) # add_special_tokens=False
         outputs = self.model(**inputs.to(0))
         
         logprobs = torch.log_softmax(outputs.logits, dim=-1).detach_()
@@ -579,20 +619,29 @@ class Cloneus(GenConfigUtilities):
         return topkn.values.exp().detach(), self.tokenizer.convert_ids_to_tokens(topkn.indices.squeeze(0))
     
     @torch.inference_mode()
-    def _proba_subsequence(self, inputs: transformers.BatchEncoding, offset:int):
-        '''Get the probability of a (sub)sequence of tokens starting from offset'''
+    def _logprob_subsequence(self, inputs: transformers.BatchEncoding, offset:int, length_norm: bool = False):
+        '''Get the log probability of a (sub)sequence of tokens starting from offset. If length_norm, return token average.'''
         outputs = self.model(**inputs.to(0))
-        # logits to log probs, trim last to ignore future token prediction
-        out_logprobs = torch.log_softmax(outputs.logits, dim=-1, dtype=self.model.dtype)[:, :-1, :] # (b, seq-1, V)
-        # trim first BOS to align with logprobs, unsqueeze for gather
-        sequence_token_ids = inputs.input_ids[:, 1:, None] 
-        # take seq tokens from out_emb, flatten 1d
-        sequence_logprobs = out_logprobs.gather(-1, sequence_token_ids).squeeze() 
-        # trim off leading n tokens (i.e. len of previous chat history)
-        subseq_logprobs = sequence_logprobs[offset:] 
-        # sum over the subseq logs and exp for probs
-        subseq_proba = subseq_logprobs.sum().exp()
-        return subseq_proba
+        # trim off context tokens (i.e. len of previous chat history + any generation prefix)
+        target_tokens = inputs.input_ids[:, offset:]
+        
+        # logits at idx `i` predict token at index `i+1`, backshift by 1 to get probas for given tokens
+        out_logits = outputs.logits[:, (offset-1):-1, :] # (b, seq, V) -> (b, seq-ctxlen, V)
+        # logits to log probs,
+        out_logprobs: torch.Tensor = torch.log_softmax(out_logits, dim=-1, dtype=self.model.dtype) # (b, seq-ctxlen, V)
+
+        # gather logprobs for tokens of interest from out_emb
+        target_tokens_logprobs = out_logprobs.gather(-1, target_tokens[:, :, None]).squeeze()#.to('cpu')
+
+        # exclude any special markup tokens that tagged along e.g. <|im_start|>, <|start_of_role|>, <|im_end|>, etc.,
+        spec_tok_mask = torch.logical_not(torch.isin(target_tokens, self.markup_token_ids.to(target_tokens))).to(target_tokens_logprobs).squeeze()
+        log_sum = target_tokens_logprobs.mul(spec_tok_mask).sum(-1) # '...j,...j'
+
+        if length_norm:
+            return log_sum / spec_tok_mask.sum(-1) # avg token loglikelihood / geom mean/log avg,
+        
+        return log_sum # total seq loglikelihood
+        
     
     @torch.inference_mode()
     def author_probabilities(self, chat_history: list[tuple[str,str]], authors:list[str]=None)-> list[tuple[str,float]]:
@@ -605,224 +654,137 @@ class Cloneus(GenConfigUtilities):
         Returns:
             A list of tuples containing an author and their probability to be the next to respond, sorted desc by proba.
         '''
-        # TODO: see if helps:
-        # https://github.com/huggingface/transformers/releases/tag/v4.44.0#:~:text=%F0%9F%93%A6-,Torch%20export%20for%20static%20cache,-pytorch%20team%20gave
+        
         if authors is None:
             authors = useridx.get_users('dname')
         
-        base_input = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), return_tensors='pt', tokenize=True)
-        base_input_len = base_input[:, 1:].numel() # skip first bos token as we do in proba_subseq (for clarity sake, could also just -1)
+        # arbitrarily use first author to deliniate base input termination point
+        base_input_text = self.common_generation_text(chat_history, authors[0]) 
+        base_input_ntokens = self.tokenizer(base_input_text, return_tensors='pt', add_special_tokens=False, return_length=True)['length']
         
-        seedtext_surrogate = '###_dummy_seedtext_###'
-        
-        author_sequenced_probas = {}
+        author_seq_logprobs = []
         for author in authors:
-            # seed with author and dummy text (required, otherwise `continue_final_message` logic can't find the index])
-            seeded_convo = self.to_conversation_format(chat_history + [(author, seedtext_surrogate)] ) # to hf convo dict
-            author_seeded_text = self.tokenizer.apply_chat_template(seeded_convo, tokenize=False, add_generation_prompt=False, continue_final_message=True)
-            # remove added surrogate, tokenize
-            inputs = self.tokenizer(author_seeded_text.replace(seedtext_surrogate,''), return_tensors='pt', add_special_tokens=False)
-            author_sequenced_probas[author] = self._proba_subsequence(inputs, offset=base_input_len).item()
+            # NOTE: to_text_input can skew the offset if youtube encoding returns a different random video. 
+            # Using base_input_text+author_tag would prevent this (and be more efficent), but the token boundry is just too error prone
+            author_primed_text = self.to_text_input(chat_history, author)
+            inputs = self.tokenizer(author_primed_text, return_tensors='pt', add_special_tokens=False, ) 
+            # store loglk for each seq of author token
+            author_seq_logprobs.append(self._logprob_subsequence(inputs, offset=base_input_ntokens, length_norm=False).item())
         
-        author_probs = sorted(author_sequenced_probas.items(), key=lambda x: x[1], reverse=True)
+        # Why not length norm?
+        # > For multi-token author names, the entire interesting prob mass is on the first token. Once it is chosen, 
+        # > the remaining tokens have a log prob of ~0 (p=~1.0). The mean of 1 meaningful value and a bunch of
+        # > near 0 values is going to be near 0.. if everyone is highly probable, no one highly probable. (all ±5% off uniform)
+        # > The only use case I can see is for an untrained/poorly trained model.
+        # Issue with current approach:
+        # - What happens if multiple author names share the same first tokens?  
+        # Alternatives:
+        # - use cut off proba threshold (ll < -1e-3) and then take masked avg of only those, but threshold tuning may get complicated
+
+        proba_dist = torch.softmax(torch.as_tensor(author_seq_logprobs), 0)
+        author_probs = sorted(zip(authors, proba_dist.tolist()), key=lambda x: x[1], reverse=True)
+    
         torch.cuda.empty_cache()
         return author_probs
-
-    @torch.inference_mode()
-    def _atag_shared_ntokens(self, formatted_atags:list[str]):
-        '''Count the number of shared common author tag prefix tokens tokenized.
-        e.g. for author tags ([USER:abc], USER:xyz]) might be 3 - { "[", "USER", ":" }
-        '''
-        tokd_fatags = [self.tokenizer.tokenize(fatag) for fatag in formatted_atags]
-        #atag_lc_tokens = 0
-        
-        min_taglen = min(len(t) for t in tokd_fatags)  # longest possible common subtokens would be shortest tag
-        lead_ntokens=0
-        for i in range(min_taglen):
-            # if all tokens at index i are the same, +1 and continue else done
-            n_unique = len(set([t[i] for t in tokd_fatags]))
-            if n_unique != 1:
-                break
-            
-            lead_ntokens += 1
-        # check trailing tokens
-        trail_ntokens=0
-        for i in range(1,min_taglen+1):
-            # if all tokens at index i are the same, +1 and continue else done
-            n_unique = len(set([t[-i] for t in tokd_fatags]))
-            if n_unique != 1:
-                break
-            
-            trail_ntokens += 1
-        return lead_ntokens,trail_ntokens
     
-    def _author_primed_batch(self, chat_history: list[tuple[str,str]], formatted_author_tags: list[str], seed_text: str = None, return_tuple: bool = False):
-        author_surrogate = '###_dummy_author_###'
-        seedtext_surrogate = '###_dummy_seedtext_###' # do NOT want to match surrounding markup, just the seed_text itself to be replaced
-        base_surrogate = self.to_text_input(chat_history, author_seedtext=(author_surrogate, seedtext_surrogate))
-        
-        fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag) # want to make sure we replace the whole, formatted tag
+    
+    def _author_primed_batch(self, chat_history: list[tuple[str,str]], authors: list[str], seed_text: str = None):
         if seed_text is None:
             seed_text = ''
+
+        # get base_text + author + optional_seedtext for each author
+        author_primed_texts = [self.to_text_input(chat_history, (author, seed_text)) for author in authors]
+           
+        # arbitrarily use first text/author_tag pair to find the end of the base text
+        sample_author_tag = useridx.format_author_tag(authors[0], self.cfg.author_tag)
+        # find rightmost *formatted* sample author tag. Must find rightmost or it will almost certainly cut prematurely
+        base_text_length = author_primed_texts[0].rfind(sample_author_tag)
         
-        if not return_tuple:
-            return [base_surrogate
-                    .replace(fmt_auth_surrogate, ftag)
-                    .replace(seedtext_surrogate, seed_text)
-                    .rstrip(' ') for ftag in formatted_author_tags]
-        
-        input_context, fmt_dummy_seedtext = base_surrogate.split(fmt_auth_surrogate)
-        authseed_template = fmt_auth_surrogate+fmt_dummy_seedtext
-                
-        author_prompts = [authseed_template
-                          .replace(fmt_auth_surrogate, ftag)
-                          # trimming off post seed_text content is handled by (to_text_input -> to_seeded_text), it's safe to replace rather than split[0].append
-                          .replace(seedtext_surrogate, seed_text) 
-                          # IFF the formatted author_tag/seedtext ends with a space ' ' should NOT trail with it
-                          .rstrip(' ')  
-                          for ftag in formatted_author_tags]
-        
-        return input_context, author_prompts
+        return author_primed_texts, base_text_length
     
-    #@iload.cleanup # this prevents vram blow up on repeat calls, but adds ~0.25s per call
+
     @torch.inference_mode()
-    def _batched_author_probabilities(self, chat_history: list[tuple[str,str]], authors: list[str]=None) -> list[tuple[str,float]]:
-        '''[DEPRECATED]
-        For each author, return the probability they will be the next to respond given the chat context.
+    def batched_author_probabilities(self, chat_history: list[tuple[str,str]], authors:list[str]=None)-> list[tuple[str,float]]:
+        '''For a batch of authors, return the probability they will be the next to respond given the chat context.
 
         Args:
             chat_history: An ordered list of unformatted (author name, message) tuples representing the current chat conversation.
             authors: A list of author names to calculate probabilities for. Defaults to all authors in user index if None.
 
         Returns:
-            A list of tuples containing an author and their probability to be the next to respond.
+            A list of tuples containing an author and their probability to be the next to respond, sorted desc by proba.
         '''
-        # NOTE: Batching makes this problem *much* more difficult than it needs to be.
-        # this function is deprecated until further notice.
-
-
-        # Pros over old method:
-        # - It's actually correct (?)
-        # - If 2 authors have same first token, it can differentiate between them
-        # - Don't need to worry about splitting name+author_tag in unexpected ways since whole tag is predicted
-        # - It will always match one of the authors
-        # - Doesn't depend on generation config settings
-
-        # Cons:
-        # - It will always match one of the authors. So unless a name is passed, it can't be predicted.
-        # - Its batched, so padding weirdness affects probabilties (this could be changed, but it _needs_ to be as fast as possible)
-        # - There is still potential for weird interaction between tag and chat template if preceding token isn't special (looking at you mistral..)
-        # - Doesn't depend on generation config settings. Can't make the result more interesting by tweaking.
-
-        # ref: https://discuss.huggingface.co/t/announcement-generation-get-probabilities-for-generated-output/30075/17
+        # NOTE: Deterministic probabilties consistently differ from unbatched by 2-3%.
+        # While this approachs FAR simpiler and closer to correct than past attempts, there is still some factor throwing off the logits
+        # I suspect it comes down to padding tokens, possibly their interaction with flash attention
+        # TODO: Try masking with -inf prior to softmax
         if authors is None:
             authors = useridx.get_users('dname')
-
-        n_author = len(authors)
-        #author_surrogate = '###_dummy_author_###'
-        #text_surrogate = '###_dummy_text_###'
-        #base_surrogate = self.to_text_input(chat_history, (author_surrogate, text_surrogate)) 
-
-        # we DO want to split out the whole tag, since we are now getting whole tag probablities
-        #fmt_auth_surrogate = useridx.format_author_tag(author_surrogate, self.cfg.author_tag)
-        #base_input = base_surrogate.split(fmt_auth_surrogate)[0] 
-
-        fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in authors]
-        tag_lens = torch.as_tensor(self.tokenizer(fmt_atags, add_special_tokens=False, return_length=True).length)
-        # print(tag_lens)
-        #candidate_batch = [base_input + a for a in fmt_atags]
-        # NOTE: We need EVERYTHING around the author tag, if there is a newline after the tag, it may change the token
-        # ex: Llama-3 -- If author tag is "Username (FName)" and tag sep = \n. Then "Username (FName)\n" will change rparen:  
-        # [ ")", id: 8 ] becomes [ ")Ċ", id: 320 ]
-        # probabilities will be off by ORDERS OF MAGNITITUDE if you use ")" instead of ")Ċ"
-        candidate_batch = self._author_primed_batch(chat_history, fmt_atags, return_tuple=False)
-        #candidate_batch = [base_surrogate.replace(fmt_auth_surrogate, ftag).split(text_surrogate)[0] for ftag in fmt_atags] # do **not** strip.
-        b_inputs = self.tokenizer(candidate_batch, return_tensors="pt", padding=True, add_special_tokens=False)
-        # b_out_logits = self.model(**b_inputs.to(0)).logits.to(dtype=self.model.dtype).detach_()
         
-        # Remember - always proba of the *next* token, not current. So need to back step index by 1.
-        b_logprobs = torch.log_softmax(self.model(**b_inputs.to(0)).logits, 
-                                       dim=-1, dtype=self.model.dtype)[:, :-1, :]#.detach()#.cpu() # (b, seq-1, V)
-        b_input_ids = b_inputs.input_ids[:, 1:]#.to('cpu')# (b, seq-1)
+        #author_primed_texts, base_text_length = self._author_primed_batch(chat_history, authors)
+        #author_primed_texts[0][:base_text_length]
+        author_primed_texts = [self.to_text_input(chat_history, author) for author in authors]
+        base_input_text = self.common_generation_text(chat_history, authors[0])
+        base_input_ntokens = self.tokenizer(base_input_text, return_tensors='pt', add_special_tokens=False, return_length=True)['length']
+        # base_input = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), return_tensors='pt', tokenize=True)
+        # base_input_len = base_input.shape[1]
         
-        #return b_out_logits, b_logprobs, b_input_ids
-        # skipping pre/post tag formatting tokens both gives a better estimate and fixes mistral spacing issues
-        n_skip, n_trim = self._atag_shared_ntokens(fmt_atags)
-        # -1 is needed or will be off by 1. Think it has to do with shifting indexing
-        h_offset = max(n_skip-1, 0)
-        max_taglen = tag_lens.max().item()
-        # p_author = torch.zeros((n_author, max_taglen))
-        # leave output p matrix full precision, 3-5 decimal match with all fp32 calcs
-        p_author = torch.full((n_author, max_taglen), torch.nan) # torch.empty will throw off probas, zero might be okay 
-        #nindices = []
-
-        seq_len = b_input_ids.size(1)
-        ustart_inds = (seq_len-tag_lens) + h_offset # idx of 1st non-shared author_tag token
-        ustop_idx = seq_len-n_trim # idx of last non-shared author_tag token
-        for i in range(n_author):
-            ustart_idx = ustart_inds[i] 
-            cur_name_logprobs = b_logprobs[i, ustart_idx:ustop_idx, :]
-            cur_name_indices = b_input_ids[i, ustart_idx:ustop_idx, None]
-            
-            namelen = cur_name_logprobs.size(0)
-            p_author[i, :namelen] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
-
-            #nindices.append(cur_name_indices.squeeze())
+        # NOTE: the offset will be wrong if left padded, need to force padding_side='right' at the detriment of final output scores
+        inputs = self.tokenizer(author_primed_texts, return_tensors='pt', add_special_tokens=False, padding=True, padding_side='right')
         
-        # for i in range(n_author):
-        #     #cur_name_logprobs = b_logprobs[i, -tag_lens[i]-1:-1]
-        #     cur_name_logprobs = b_logprobs[i, -tag_lens[i]:]
-        #     cur_name_indices = b_input_ids[i, -tag_lens[i]:, None]
-        #     p_author[i, :tag_lens[i]] = torch.gather(cur_name_logprobs, -1, cur_name_indices).squeeze()
+        # define duplicate to be equal to be equal to batch idx 0, always >=1 since (b[0]==b[0])
+        # n_duplicate_tokens = (inputs.input_ids[:, :] == inputs.input_ids[0, :]).to(int).sum(0)
+        # first_idx_differ_atleast_1 = torch.argwhere(n_duplicate_tokens < inputs.input_ids.shape[0])[0]
+        # first_idx_differ_all = torch.argwhere(n_duplicate_tokens == 1)[0]
+        # -Then take log sum from [:, first_idx_differ_atleast_1:first_idx_differ_all+1]
         
-        #return p_author,nindices,candidate_batch
-        #return sorted(zip(authors, p_author.nansum(-1).exp().tolist()), key=lambda x: x[1], reverse=True)
+        author_seq_logprobs = self._logprob_subsequence(inputs, offset=base_input_ntokens, length_norm=False).squeeze()
         
-        
-        #a_tag_probas = p_author[:,n_skip:].nansum(-1).exp().tolist()
-        a_tag_probas = p_author.nansum(-1).exp().tolist()
-        author_probas = zip(authors, a_tag_probas)
-        # using del+empty_cache instead of the cleanup wrapper reduces added time/call to 19ms from 250ms
-        del b_logprobs, b_input_ids, p_author
+        proba_dist = torch.softmax(author_seq_logprobs, 0).to('cpu')
+        author_probs = sorted(zip(authors, proba_dist.tolist()), key=lambda x: x[1], reverse=True)
         torch.cuda.empty_cache()
-        return sorted(author_probas, key=lambda x: x[1], reverse=True)
+        return author_probs
     
 
     @torch.inference_mode()
-    def _batched_helper(self, msg_batch, true_batch_generate=False):
+    def _batched_helper(self, msg_batch: list[str], iterate_batch:bool=False):
         t0 = time.perf_counter()
 
-        if true_batch_generate:
-            # BUG IMPORTANT: There is an issue with padding token. Whenever it is inserted, it makes those responses bad
-            # I verified that ONLY when pad token is used, then it goes wrong.
-            #with batchsafe_tokenizer(self.tokenizer) as tokenizer:
-            inputs = self.tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True, add_special_tokens=False)
-            
-            input_len = inputs.pop('length')[0].item()
-            outputs = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach_()
-            
-            output_texts = self.tokenizer.batch_decode(outputs[:,input_len:], skip_special_tokens=True)
-        else:
+        if iterate_batch:
             # if not doing the whole batch, no point in incuring the 'penalty' for adding pad tokens to begining
             # better to just do tokenization on the fly
+            # TODO: see if helps:
+            # https://github.com/huggingface/transformers/releases/tag/v4.44.0#:~:text=%F0%9F%93%A6-,Torch%20export%20for%20static%20cache,-pytorch%20team%20gave
+            # https://huggingface.co/docs/transformers/v4.57.3/en/kv_cache#prefill-a-cache-prefix-caching
             output_texts  = []
 
             for inptext in msg_batch:
                 inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True, add_special_tokens=False)
                 input_len = inputs.pop('length')[0].item()
                 output = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_()
-                output_texts.append(self.tokenizer.decode(output[0,input_len:], skip_special_tokens=True))
+                output_texts.append(self.tokenizer.decode(output[0, input_len:], skip_special_tokens=True))
 
-        logger.debug(('TRUE' if true_batch_generate else 'MOCK' ) + f' BATCH RUN TIME: {time.perf_counter()-t0:0.2f}s')
+            # last input_len will be used for for all. Shouldn't differ by more than a few tokens as long as author_tags are reasonable
+        else:
+            # BUG IMPORTANT: There is an issue with padding token. Whenever it is inserted, it makes those responses bad
+            # I verified that ONLY when pad token is used, then it goes wrong.
+            #with batchsafe_tokenizer(self.tokenizer) as tokenizer:
+            inputs = self.tokenizer(msg_batch, return_length=True, return_tensors='pt', padding=True, add_special_tokens=False)
+            
+            input_len = inputs.pop('length')[0].item() # padded input ntokens, take first since all must be equal
+            outputs = self.model.generate(**inputs.to(0), generation_config=self.gen_config, stopping_criteria=self.stop_criteria).detach_()
+            
+            output_texts = self.tokenizer.batch_decode(outputs[:, input_len:], skip_special_tokens=True)
+        
+        # logger.debug(('TRUE' if true_batch_generate else 'MOCK' ) + f' BATCH RUN TIME: {time.perf_counter()-t0:0.2f}s')
         #print('Raw Batch Outputs:\n', self.tokenizer.batch_decode(outputs, skip_special_tokens=False))
         
-        # use last input_len for all. Shouldn't differ by more than a few tokens as long as author_tags are reasonable
         return output_texts,input_len
     
 
     
     @torch.inference_mode()
-    def batch_generate(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None, return_tuple: bool = False) -> list[str] | BatchGenerationOutput:
+    def batch_generate(self, chat_history: list[tuple[str,str]], seed_authors: list[str], seed_text: str = None, return_tuple: bool = False, iterate_batch: bool = False) -> list[str] | BatchGenerationOutput:
         """Generate responses for a batch of authors, each optionally starting with `seed_text` given the message context history.
 
         Args:
@@ -830,22 +792,27 @@ class Cloneus(GenConfigUtilities):
             seed_authors: The list of authors to generate responses for.
             seed_text: The seed text to start off all author's reponses with.
             return_tuple: If True, return BatchGenerationOutput tuple (input text, list formatted author+seed text, list of output texts, num input tokens, num output tokens for each output)
+            iterate_batch: If True, perform generation sequentially rather than all at once. This can give more consistent outputs but is much slower.
 
         Returns:
             BatchGenerationOutput if `return_tuple`, output text completions for `seed_authors` otherwise.
         """
-        fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in seed_authors]
-        input_context,author_prompts = self._author_primed_batch(chat_history, fmt_atags, seed_text=seed_text, return_tuple=True)
-        #input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
-
-        true_batched = (self.gen_mode == 'contrastive_search')  # Cuts time almost in half for CS. Worth the quality degradation.
-        out_texts,input_len = self._batched_helper([input_context+ap for ap in author_prompts], true_batch_generate=true_batched)
+        #author_primed_texts, base_text_length = self._author_primed_batch(chat_history, seed_authors, seed_text=seed_text)
+        author_primed_texts = [self.to_text_input(chat_history, (author, seed_text)) for author in seed_authors]
+        
+        out_texts,input_len = self._batched_helper(author_primed_texts, iterate_batch=iterate_batch)
 
         out_texts = [self.cleanup_out_text(text) for text in out_texts]
 
-        output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
         
         if return_tuple:
+            output_lens = self.tokenizer(out_texts, return_length=True, add_special_tokens=False,)['length']
+
+            input_context = self.common_generation_text(chat_history, seed_authors[0])
+            base_text_length = len(input_context)
+            
+            author_prompts = [primed_text[base_text_length:] for primed_text in author_primed_texts]
+            
             return BatchGenerationOutput(input_context, author_prompts, out_texts, input_len, output_lens)
         return out_texts
    
@@ -911,7 +878,7 @@ class Cloneus(GenConfigUtilities):
             yield new_text
         
         generated_text = self.cleanup_out_text(generated_text)
-        output_len =  self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
+        output_len = self.tokenizer(generated_text, return_length=True, add_special_tokens=False)['length']
 
         self._last_streamed_values.update({'input_text':input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
 
@@ -934,13 +901,10 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_batch_values = {'input_text':'','author_prompts':[], 'output_texts':[], 'input_len': -1, 'output_lens': []}
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
-        fmt_atags = [useridx.format_author_tag(a, self.cfg.author_tag) for a in seed_authors]
-        input_context,author_prompts = self._author_primed_batch(chat_history, fmt_atags, seed_text=seed_text, return_tuple=True)
-        #input_context,author_prompts = self._get_batched_inputs(chat_history, seed_authors, seed_text=seed_text)
-        
-        msg_batch = [input_context+ap for ap in author_prompts]
+        #author_primed_texts, base_text_length = self._author_primed_batch(chat_history, seed_authors, seed_text=seed_text)
+        author_primed_texts = [self.to_text_input(chat_history, (author, seed_text)) for author in seed_authors]
 
-        for i, inptext in enumerate(msg_batch):
+        for i, inptext in enumerate(author_primed_texts):
             inputs = self.tokenizer(inptext, return_tensors="pt", return_length=True, add_special_tokens=False)
             input_len = inputs.pop('length')[0].item()
             #genkwargs = dict(input_ids=inps.input_ids[[i]], attention_mask=inps.attention_mask[[i]], 
@@ -954,12 +918,16 @@ class Cloneus(GenConfigUtilities):
                 yield i,new_text
             
             generated_text = self.cleanup_out_text(generated_text)
-            output_len = self.tokenizer(generated_text, return_length=True, add_special_tokens=False).length
+            output_len = self.tokenizer(generated_text, return_length=True, add_special_tokens=False)['length']
             
             self._last_streamed_batch_values['output_texts'].append(generated_text)
             self._last_streamed_batch_values['output_lens'] += output_len
-            
-            
+
+        input_context = self.common_generation_text(chat_history, seed_authors[0])
+        base_text_length = len(input_context)
+
+        author_prompts = [primed_text[base_text_length:] for primed_text in author_primed_texts]
+        
         self._last_streamed_batch_values.update(input_text=input_context, author_prompts=author_prompts, input_len=input_len)
 
 
@@ -1086,7 +1054,7 @@ class Cloneus(GenConfigUtilities):
                 generated_text += new_text
                 yield new_text
         
-        output_len = self.base_tokenizer(generated_text, return_length=True).length
+        output_len = self.base_tokenizer(generated_text, return_length=True)['length']
 
         self._last_streamed_values.update({'input_text':input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
         #self.model.set_adapter(adapters)
