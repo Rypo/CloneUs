@@ -256,7 +256,7 @@ def parse_template_string(template_string: str) -> dict[str,str]:
             k,v = kvs.replace('"','').split('=')
             matched_params[k.strip()] = v.strip()
         except Exception as e:
-            logger.error(f"Couldn't parse: {kvs}", exc_info=e)
+            logger.error(f"Couldn't parse: {kvs!r}", exc_info=e)
 
     return matched_params
     
@@ -350,14 +350,18 @@ class YouTubeManager:
             title = matched_params.get('title','')
             channel = matched_params.get('channel','')
             
-            if len(title) >= 3:
-                return self.get_search_results(title, allow_fetch=allow_fetch)[0].to_url() # return top/first search result
-            elif video_id and (video := self.video_index.get(video_id)): 
-                return video.to_url() # unless in collection, assume video_id is a hallucinated. Not worth querying. NOTE: could quick_check
-            elif len(channel) >= 3:
-                return self.get_search_results(channel, allow_fetch=allow_fetch)[0].to_url() # return top/first search result
-            else:
-                logger.warning('Failed to extract useable metadata. Using random video.')
+            try:
+                if len(title) >= 3:
+                    return self.get_search_results(title, allow_fetch=allow_fetch)[0].to_url() # return top/first search result
+                elif video_id and (video := self.video_index.get(video_id)): 
+                    return video.to_url() # unless in collection, assume video_id is a hallucinated. Not worth querying. NOTE: could quick_check
+                elif len(channel) >= 3:
+                    return self.get_search_results(channel, allow_fetch=allow_fetch)[0].to_url() # return top/first search result
+                else:
+                    raise RuntimeError("YouTube parser failure")
+            except Exception as e:
+                logger.error(f'Metadata extraction failed. Using random video. Matched: {template_str!r}', exc_info=e)
+                random.seed(template_str) # seed repeated parse consistency (Specific concern with Clonues.author_probabilties->Cloneus.to_seeded_text)
                 return random.choice(list(self.video_index.values())).to_url()
                 
     
