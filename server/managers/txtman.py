@@ -411,13 +411,13 @@ class CloneusManager():
         
         return llm_input_messages, seed_text
 
-    def to_discord_output(self, model_output, author, seed_text):
+    def to_discord_output(self, model_output:str, author:str, seed_text:str|None):
         model_output = text_utils.splitout_tag(model_output, self.RE_ANY_USERTAG)
         if self.clo.cfg.postfix and self.clo.cfg.postfix in model_output:
             print('WARNING: postfix detected in model_output, removing')
             model_output = model_output.replace(self.clo.cfg.postfix, '')
         # space at the end of a sentence encodes a special token (28705). Shouldn't pass space in seed text or results are sub optimal  
-        text_out = (seed_text + ' ' + model_output) if seed_text else model_output
+        text_out = (seed_text.rstrip(' ') + ' ' + model_output.lstrip(' ')) if seed_text else model_output
         text_out = self.ytm.decode(text_out)
         
         llm_output = text_utils.llm_output_transform(text_out, self.emojis)
