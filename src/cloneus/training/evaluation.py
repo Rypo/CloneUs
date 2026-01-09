@@ -1,5 +1,6 @@
 import os
 import json
+import orjson
 import random
 import typing
 import itertools
@@ -90,6 +91,9 @@ def eval_ckpt(clo:Cloneus, checkpoint_path:Path, genconfig_modes:list[str], prom
             ckpt_output = f'CHECKPOINT: {checkpoint_name}\n{outputs}\n'
             
             inps_outs.setdefault(input_line, []).append(ckpt_output)
+    
+    (checkpoint_path/'_eval_outputs.json').write_bytes(orjson.dumps(gc_inps_outs))
+
     return gc_inps_outs
 
 def eval_run(checkpoint_paths:list[Path], prompts: list[str], genconfig_modes:list[str], question_author:str, author_list:list[str]):
