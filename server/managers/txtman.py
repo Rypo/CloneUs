@@ -7,7 +7,6 @@ import datetime
 from pathlib import Path
 from functools import cached_property
 
-
 import torch
 import discord
 from discord import app_commands
@@ -23,11 +22,7 @@ from cloneus import Cloneus
 from cloneus.data import useridx
 from cloneus.plugins import youtube
 
-
-
-
 model_logger = logging.getLogger('server.model')
-
 
 class CloneusManager():
     def __init__(self, bot):
@@ -48,6 +43,7 @@ class CloneusManager():
         self.banned_words: list[str] = []
         self.weighted_words: list[tuple[str,float]] = []
         self.user_aliases: dict[str,str] = None
+        self.tokens_per_stream = 4 # will hit discord ratelimit if edit messages too frequently, update in groups 
 
     @property
     def yt_session_quota(self):
@@ -304,7 +300,7 @@ class CloneusManager():
                 generated_text += new_word
                 chunk_len+=wordlen
 
-                if tick % 3 == 0:
+                if tick % self.tokens_per_stream == 0:
                     yield chunk_idx, generated_text 
                 tick+=1
         print() # force a nl because of end=''
@@ -365,7 +361,7 @@ class CloneusManager():
                 
                 generated_text+=new_word
                 tick+=1
-                if tick % 3 == 0:
+                if tick % self.tokens_per_stream == 0:
                     yield generated_text
         print() # force a nl because of end=''
         yield generated_text
@@ -391,7 +387,7 @@ class CloneusManager():
                 
                 generated_text+=new_word
                 tick+=1
-                if tick % 3 == 0:
+                if tick % self.tokens_per_stream == 0:
                     yield i,generated_text
         
         #for i,updated_content in self._stream_batch_helper(self.rai.stream_batch_generate(llm_input_messages, authors, seed_text)):
