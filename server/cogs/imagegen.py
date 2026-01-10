@@ -130,7 +130,7 @@ class SetImageConfig:
     
     @isetarg.command(name='model', aliases=['artist',])
     @app_commands.choices(version=cmd_choices.IMAGE_MODELS)
-    async def iset_model(self, ctx: commands.Context, version: str, offload: bool=False):
+    async def iset_model(self, ctx: commands.Context, version: str, offload: bool = None):
         '''Loads in the image generation model
         
         Args:
@@ -140,11 +140,13 @@ class SetImageConfig:
         # NOTE: this will make precheck error messages non-ephemeral.  
         await self.view_check_defer(ctx)
         disp_name = imgman.AVAILABLE_MODELS[version]['desc']
-        if self.igen.model_name != version or self.igen.offload != offload:
+        if self.igen.model_name != version or (offload is not None and self.igen.offload != offload):
             if self.igen.is_ready:
                 await self.igen.unload_pipeline()
             
-            self.igen = imgman.AVAILABLE_MODELS[version]['manager'](offload=offload)
+            self.igen = imgman.AVAILABLE_MODELS[version]['manager']
+            self.igen = self.igen(offload=offload) if offload is not None else self.igen()
+
             return await self.imgup(ctx)
         elif not self.igen.is_ready:
             return await self.imgup(ctx)
