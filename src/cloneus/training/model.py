@@ -51,7 +51,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
         # use_gradient_checkpointing = True,
         use_gradient_checkpointing = "unsloth",
     )
-    if Path(model_id).exists():
+    if Path(model_id).joinpath('optimizer.pt').exists():
         return model,tokenizer
     # https://old.reddit.com/r/LocalLLaMA/comments/1cc7gtr/llama3_8b_finetuning_2x_faster_fixed_endless/
     model, tokenizer = adjust_chat_format(model, tokenizer, padding_side, custom_chat_template)
@@ -144,7 +144,7 @@ def get_model(model_id,
     
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     
-    if Path(model_id).exists():
+    if Path(model_id).joinpath('optimizer.pt').exists():
         # TODO: determine if vRAM spike is because of eval step
         print('Resuming ... Skipping tokenizer configuration, loading via AutoPeftModelForCausalLM')
         model : PeftModel = AutoPeftModelForCausalLM.from_pretrained(model_id, is_trainable=True, config=peft_config, **pretrain_kwargs,)
