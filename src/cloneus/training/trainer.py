@@ -1,5 +1,7 @@
 import gc
 import os
+import re
+import logging
 import datetime
 import functools
 import math
@@ -15,6 +17,8 @@ from safetensors.torch import load_model as load_model_safetensors, save_model a
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
 
 from trl import SFTTrainer, SFTConfig
+
+logger = logging.getLogger(__name__)
 
 def _get_cosine_const_schedule_with_warmup_lr_lambda(current_step: int, *, num_warmup_steps: int, num_const_steps:int, num_training_steps: int, num_cycles: float):
     
@@ -62,6 +66,11 @@ def get_const_cosine_schedule_with_warmup(
     )
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
+
+# TODO: The entire custom scheduler can be implemented via wsd_schedule now: https://huggingface.co/docs/transformers/v4.57.3/en/main_classes/optimizer_schedules#transformers.get_wsd_schedule
+# Wild that Deepseek-V3 used almost an identical schedule ~1 year after I implemented this https://arxiv.org/html/2412.19437v2#S4:~:text=Training%20Hyper%2DParameters
+# I even beat the WSD paper by ~2 months: https://arxiv.org/abs/2404.06395 
+
 class CTrainer(Trainer):
     def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
         """
@@ -85,45 +94,38 @@ class CTrainer(Trainer):
         return self.lr_scheduler
         
 
-    
-def formatfunc(sample):
-    return sample['text']
-
-def get_trainer(model, data, tokenizer, args, callbacks=None, collator_pad_multiple=None):
-    trainer = CTrainer(
-        model=model,
-        train_dataset=data["train"],
-        eval_dataset=data['validation'],
-        processing_class=tokenizer,
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=collator_pad_multiple),
-        args=args,
-        callbacks=callbacks,
-    )
+def get_trainer(model, data, tokenizer, args, peft_config=None, callbacks=None, collator_pad_multiple=None):
+    if issubclass(args.__class__, SFTConfig):
+        # https://huggingface.co/docs/trl/main/en/sft_trainer#packing-dataset-constantlengthdataset
+        trainer = SFTTrainer(
+            model=model,
+            args=args,
+            # data_collator=UnslothVisionDataCollator(model, tokenizer),
+            # data_collator = DataCollatorForSeq2Seq(tokenizer = tokenizer),
+            #data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+            train_dataset=data['train'],
+            eval_dataset=data['validation'],
+            processing_class=tokenizer,
+            # peft_config=peft_config, # passing this when model is already PeftModel makes unsloth model.merge_and_unload() and SFTTrainer throws an error thinking it's not Peft 
+            callbacks=callbacks,
+            # neftune_noise_alpha=neftune_noise_alpha
+        )
+    elif issubclass(args.__class__, TrainingArguments):
+        trainer = Trainer(
+            model=model,
+            train_dataset=data["train"],
+            eval_dataset=data['validation'],
+            processing_class=tokenizer,
+            data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=collator_pad_multiple),
+            # data_collator=UnslothVisionDataCollator(model, tokenizer),
+            args=args,
+            callbacks=callbacks,
+        )
+    else:
+        raise NotImplementedError(f'Unhandled args class {args.__class__}')
 
     return trainer
 
-def get_sft_trainer(model, data, tokenizer, args, peft_config, callbacks=None, max_packed_seqlength=2048, neftune_noise_alpha: (int | None) = None):
-    # https://huggingface.co/docs/trl/main/en/sft_trainer#packing-dataset-constantlengthdataset
-    if args.group_by_length:
-        print('WARNING: group_by_length cannot be used with packing, disabling')
-        args.group_by_length = False
-    trainer = SFTTrainer(
-        model=model,
-        args=args,
-        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
-        train_dataset=data['train'],
-        eval_dataset=data['validation'],
-        processing_class=tokenizer,
-        peft_config=peft_config,
-        dataset_text_field="text",
-        packing=True,
-        eval_packing=False,
-        #formatting_func=formatfunc,
-        max_seq_length=max_packed_seqlength,
-        callbacks=callbacks,
-        neftune_noise_alpha=neftune_noise_alpha
-    )
-    return trainer
 
 
 def save_last_step(trainer:Trainer|SFTTrainer):
@@ -187,7 +189,7 @@ def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens
     model_shortname = dirparts[2]
     dirargs = dirparts[-1]
 
-    optalias = {'paged_adamw_32bit':'padam32', 'paged_adamw_8bit':'padam8', 'adamw_hf':'adamw', 'adamw_bnb_8bit':'adamw8b'}
+    optalias = {'paged_adamw_32bit':'padam32', 'paged_adamw_8bit':'padam8', 'adamw_hf':'adamw', 'adamw_bnb_8bit':'adamw8b','adamw_8bit':'adamw8b'}
     
     args.run_name = args.run_name.format(
         modelname=model_shortname,
@@ -195,7 +197,7 @@ def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens
         optim=optalias.get(args.optim, args.optim), 
         batchsize=args.per_device_train_batch_size, 
         max_gradnorm=args.max_grad_norm
-    )+('-flashattn' if attn_implementation else '')
+    )+('-FA2' if attn_implementation else '')
 
     return args
 
@@ -215,8 +217,38 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
     chunk_size = cfg.chunk_size
     attn_implementation=cfg.attn_implementation
     custom_scheduler=cfg.custom_scheduler
+    save_strategy = kwargs.pop('save_strategy','steps') # epoch
     
-    args = TrainingArguments(
+    sft_kwargs = dict(
+        dataset_text_field="text",
+        packing=False, # True
+        eval_packing=False,
+        packing_strategy = "bfd",
+        padding_free = False, # True
+        #formatting_func=formatfunc,
+        max_seq_length=chunk_size,
+        max_length=chunk_size,
+    )
+    if cfg.use_sft_trainer:
+        TrainingConfig = SFTConfig
+        kwargs.update(sft_kwargs)
+        
+        if cfg.group_by_length:
+            logger.info('SFTTrain with packing: setting group_by_length=False')
+            cfg.group_by_length = False
+        
+        if cfg.logging_steps == 0.01:
+            logger.warning('Small logging steps will slow Packed training. Setting to 0.05.')
+            cfg.logging_steps = 0.05
+
+            
+        #save_strategy=('epoch' if cfg.num_epochs > 1 and (isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer) else 'steps'), #-- TODO Think about better solution
+        
+    else:
+        TrainingConfig = TrainingArguments
+    #TrainingConfig = (SFTConfig if cfg.use_sft_trainer else TrainingArguments)
+    
+    args = TrainingConfig(#TrainingArguments(
         num_train_epochs=cfg.num_epochs,#kwargs.pop('num_train_epochs', 3),
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
@@ -225,7 +257,7 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
         #gradient_checkpointing_kwargs = dict(use_reentrant=True), # when = False, vRAM usage sky rockets. Not sure if bug or bad.
         eval_strategy='steps',
         eval_steps=kwargs.pop('eval_steps', None), # Will default to the same value as logging_steps
-        save_strategy=kwargs.pop('save_strategy','epoch'),
+        save_strategy=save_strategy,
         save_steps=cfg.save_steps,#kwargs.pop('save_steps',500),
         learning_rate=cfg.learning_rate,#kwargs.pop('learning_rate', 2e-4),
         bf16=cfg.bf16,#kwargs.pop('bf16', True),
@@ -264,7 +296,7 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
 def get_batch(trainer:Trainer, train=False):
     dl = trainer.get_train_dataloader() if train else trainer.get_eval_dataloader()
     b0=next(iter(dl))
-    return trainer.processing_class.batch_decode(b0.input_ids, skip_special_tokens=False)
+    return trainer.processing_class.batch_decode(b0['input_ids'], skip_special_tokens=False)
     #return trainer.tokenizer.batch_decode(b0.input_ids, skip_special_tokens=False)
 
 class FullSaveCallback(TrainerCallback):

@@ -160,8 +160,6 @@ def main(args):
         cfg,
         n_custom_tokens=num_custom_tokens,
         #bf16_full_eval=cfg.bf16, #  faster and save memory but can harm metric values (default: False)
-        save_strategy=('epoch' if cfg.num_epochs > 1 and (isinstance(cfg.dataset.hours_between_sessions, int) or cfg.use_sft_trainer) else 'steps'), #-- TODO Think about better solution
-        group_by_length=(cfg.group_by_length and not cfg.use_sft_trainer),
         #torch_compile=True,
         report_to="wandb",
         save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
@@ -170,9 +168,9 @@ def main(args):
 
     model, tokenizer = mllm.model_tokenizer_from_config(peft_config, cfg)
     
-    if (special_token_overrides := dict(filter(lambda kv: kv[1], cfg.special_tokens.items()))):
-        num_new_vocab = tokenizer.add_special_tokens(special_token_overrides)
-        assert num_new_vocab==0, 'Using non-vocab special tokens is not currently supported.'
+    # if (special_token_overrides := dict(filter(lambda kv: kv[1], cfg.special_tokens.items()))):
+    #     num_new_vocab = tokenizer.add_special_tokens(special_token_overrides)
+    #     assert num_new_vocab==0, 'Using non-vocab special tokens is not currently supported.'
     
     data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
     
@@ -199,10 +197,8 @@ def main(args):
     
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]
-    if cfg.use_sft_trainer:
-        trainer = mtrain.get_sft_trainer(model, dset, tokenizer, train_args, peft_config, callbacks=callbacks, max_packed_seqlength=cfg.chunk_size)
-    else:
-        trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, callbacks=callbacks)
+    trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, peft_config=peft_config, callbacks=callbacks)
+
 
     write_first_batches(trainer, batchsample_dir='_tmp/sample_batches')
 
