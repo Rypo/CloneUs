@@ -31,12 +31,26 @@ def safe_train(trainer:mtrain.Trainer, checkpoint_path=None):
         if trainer.state.global_step:
             mtrain.create_resumable_save(trainer)
 
-def write_first_batches(trainer, batchsample_dir='_tmp/sample_batches'):
-    (cpaths.ROOT_DIR/batchsample_dir).mkdir(parents=True, exist_ok=True)
-    with open(cpaths.ROOT_DIR/batchsample_dir/'eval.txt', 'w') as f:
-        f.writelines(mtrain.get_batch(trainer, train=False))
-    with open(cpaths.ROOT_DIR/batchsample_dir/'train.txt', 'w') as f:
-        f.writelines(mtrain.get_batch(trainer, train=True))
+def write_first_batches(trainer:mtrain.Trainer, batchsample_dir='_tmp/sample_batches'):
+    sample_path = (cpaths.ROOT_DIR/batchsample_dir)
+    sample_path.mkdir(parents=True, exist_ok=True)
+    
+    with open(sample_path/'eval.txt', 'w') as f:
+        try:
+            f.writelines(mtrain.get_batch(trainer, train=False))
+        except Exception as e:
+            f.write(str(e))
+    
+    with open(sample_path/'train.txt', 'w') as f:
+        try:
+            f.writelines(mtrain.get_batch(trainer, train=True))
+        except Exception as e:
+            f.write(str(e))
+    
+    if 'labels' in trainer.train_dataset.column_names:
+        tokenizer = trainer.processing_class
+        masked_sample = tokenizer.decode([tokenizer.pad_token_id if x == -100 else x for x in trainer.train_dataset[0]["labels"]]).replace(tokenizer.pad_token, " ")
+        (sample_path/'train_masked.txt').write_text(masked_sample)
 
 def model_id_alias(model_id:str, alias_filepath:str=None):
     '''If `alias_filepath` exists, read and map `model_id` to user defined alias, otherwise return portion of model_id after `/`
@@ -212,6 +226,30 @@ def main(args):
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]
     trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, peft_config=peft_config, callbacks=callbacks)
+    if cfg.use_sft_trainer:
+        
+        # if train_args.completion_only_loss:
+        #     trainer = unsloth.chat_templates.train_on_responses_only(
+        #         trainer,
+        #         instruction_part = "<|im_start|>system\n",
+        #         response_part = "<|im_start|>assistant\n",
+        #     )
+
+        # Here is where we could set masked_role_tags to ['system','user'] 
+        # or even ['system', 'BOT (BotName)'] if we don't drop bot messages TODO: try
+        # or for max inefficency, ['system', 'User1 (firstName1)', 'User3 (firstName3)', ...]
+        
+        if (role_tag_template := cfg.get('mask_roletag_template')):
+            if cfg.tag_placement in ['content_prefix', 'replace_role']:
+                masked_role_tags = 'system'
+            elif cfg.tag_placement == 'content_prefix_ot':
+                masked_role_tags = ['system', 'user']
+            else:
+                raise NotImplementedError(f'Role tag masking cannot be applied for tag_placement={cfg.tag_placement!r}')
+
+            mask_start, mask_end = mtrain.get_roletag_regex_masks(masked_role_tags=masked_role_tags, role_tag_template=role_tag_template)
+            
+            trainer = mtrain.mask_message_roles(trainer, mask_start, mask_end, num_proc = 32)
 
 
     write_first_batches(trainer, batchsample_dir='_tmp/sample_batches')

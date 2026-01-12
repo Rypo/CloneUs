@@ -6,8 +6,10 @@ import datetime
 import functools
 import math
 import torch
+from unsloth import UnslothVisionDataCollator
 from transformers import (
     DataCollatorForLanguageModeling,
+    DataCollatorForSeq2Seq,
     Trainer,
     TrainingArguments,
     TrainerCallback,
@@ -126,7 +128,101 @@ def get_trainer(model, data, tokenizer, args, peft_config=None, callbacks=None, 
 
     return trainer
 
+def get_peft_config(cfg):
+    target_modules = (cfg.lora_target_modules if isinstance(cfg.lora_target_modules, str) else list(cfg.lora_target_modules)) # all-linear
+    peft_config = LoraConfig(
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        target_modules=target_modules, 
+        lora_dropout=cfg.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        inference_mode = False,
+        use_rslora=cfg.lora_use_rslora,
+        init_lora_weights=('loftq' if cfg.lora_use_loftq else True),
+        #loftq_config=
+        use_dora=cfg.lora_use_dora
+    )
+    return peft_config
 
+def get_roletag_regex_masks(masked_role_tags: str | list[str] = 'system', role_tag_template: str = r'<|im_start|>{role_tag}'):
+    '''Helper function to build properly escaped regex mask bounds for use in mask_message_roles'''
+    if isinstance(masked_role_tags, list):
+        re_esc_roles = [re.escape(role_tag_template.format(role_tag = tag)) for tag in masked_role_tags]
+        re_mask_start = '(?:{exclude})'.format(exclude = "|".join(re_esc_roles))
+    else:
+        re_mask_start = re.escape(role_tag_template.format(role_tag = masked_role_tags))
+    
+    re_mask_end = re.escape(role_tag_template.format(role_tag = ''))
+    return re_mask_start, re_mask_end
+
+
+def mask_message_roles(trainer: SFTTrainer, re_mask_start:str = r'<\|im_start\|>system', re_mask_end:str = r'<\|im_start\|>', num_proc=16):
+    '''This function is only necessary because Unsloth requires raw text inputs. 
+    
+    🤗 SFTTrainer could do this better/simpler by adding {% generation %} fences in chat_template and feeding message logs `with assistant_only_loss=True`'''
+    # Match mask_start + anything as long as it is followed by mask_end or endline (`|\Z`). 
+    # match endline in case last role in sequence.
+    re_mask = re.compile(rf'{re_mask_start}.+?(?={re_mask_end}|\Z)', flags = re.DOTALL + re.MULTILINE) # re.IGNORECASE
+    
+    tokenizer = trainer.processing_class
+    
+    def _mask_message_roles(example:dict[str, list[int]]):
+        # orig_length = len(example['input_ids'])
+        seq_lengths = example.get('seq_lengths', [len(example['input_ids'])])
+
+        offset = 0
+        all_labels = []
+        corrected_input_ids = []
+        corrected_attention_mask = []
+        corrected_seq_lengths = []
+
+        for seqlen in seq_lengths:
+            inp_seq = example['input_ids'][offset:(offset+seqlen)]
+            text_sample = tokenizer.decode(inp_seq, skip_special_tokens=False)
+            offset += seqlen
+            # this is more consistent in tokenization than just using `len(example['input_ids'])`
+            # e.g. LLama3.1 failed because tokenization != forward(backward())
+            # ['rel', '????????', '??', '?\n', 'AND'] 
+            # ['rel', '?????', '????', '?', '?\n']
+            orig_length = tokenizer(text=text_sample, add_special_tokens=False, return_length=True)['length'][0] # this is more consistent in tokenization than just using `len(example['input_ids'])`
+            corrected_seq_lengths.append(orig_length)
+            
+            inds = []
+            for m in re_mask.finditer(text_sample):
+                inds.extend(m.span())
+        
+            # pairwise index with alternative 0,1 labels. Add len for last segment.
+            char_idx_labels = [(s, e, i%2) for i,(s,e) in enumerate(zip(inds, inds[1:]+[len(text_sample)]))]
+            
+            start_idx = char_idx_labels[0][0]
+            char_idx_labels = [(0, start_idx, 1)] + char_idx_labels # add back anything that comes before first match
+            
+            labels = []
+            for s,e,label in char_idx_labels:
+                if s!=e:
+                    inps = tokenizer(text=text_sample[s:e], add_special_tokens=False, return_length=True, return_attention_mask=True)
+                    token_len = inps['length'][0]
+                    
+                    input_ids = torch.as_tensor(inps['input_ids']).squeeze().tolist() # an expensive flatten
+                    attention_mask = torch.as_tensor(inps['attention_mask']).squeeze().tolist()
+
+                    labels.extend([-100]*token_len if label==0 else input_ids)
+                    corrected_input_ids.extend(input_ids)
+                    corrected_attention_mask.extend(attention_mask)
+
+            if len(labels) != orig_length:
+                assert len(labels) == orig_length, f'Parser failure. Length mismatch: {len(labels)} != {orig_length}'
+            all_labels.extend(labels)
+        
+        return {'labels': all_labels, 'seq_lengths': corrected_seq_lengths, 'input_ids': corrected_input_ids, 'attention_mask':corrected_attention_mask}
+
+    trainer.train_dataset = trainer.train_dataset.map(_mask_message_roles, num_proc=num_proc)
+    
+    if trainer.eval_dataset:
+        trainer.eval_dataset = trainer.eval_dataset.map(_mask_message_roles, num_proc=num_proc)
+    
+    return trainer
 
 def save_last_step(trainer:Trainer|SFTTrainer):
     try:
