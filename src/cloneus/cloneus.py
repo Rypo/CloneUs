@@ -1235,7 +1235,48 @@ class CloneusUA(Cloneus):
         return chat_content
     
 
+class CloneusUAOneTurn(Cloneus):
+    r'''For single turn QA/Instruct models trained without a custom chat template, i.e. there will only 1 user and 1 assistant message, 
+    and possibly an initial system message. All chat history is placed in user message and the assistant will respond with 
+    a single new user message that continues the conversation.
+        
+    e.g.::
+        <|im_start|>user
+         [USER:Alpha, NAME:Alice] How's everyone?<|im_end|>
+         [USER:Beta, NAME:Bob] Better than not<|im_end|>
+        
+        <|im_start|>assistant
+         [USER:Gamma, NAME:Greg] I am Greg, thanks<|im_end|>
+    '''
+    def apply_content_prefix(self, author:str, text_content:str, tag_sep:str):
+        atag=useridx.format_author_tag(author, self.cfg.author_tag)
+        return f'{atag}{tag_sep}{text_content}' # postfix was never used in this function call, always was set to '' 
 
+
+    def to_conversation_format(self, chat_history: list[tuple[str,str]]) -> list[dict[str,str]]:        
+        chat_content = []
+        user_message = ''
+
+        if self.cfg.fprompt:
+            if self.base_has_system:
+                chat_content.append({'role':'system', 'content': self.cfg.fprompt})
+            else:
+                user_message += self.cfg.fprompt + '\n\n' # Hard code system join method until decide if need to support
+                logger.error('System not supported. System message prepended to user message, expect inconsistent results.') 
+
+            
+        msg_sep = '\n' # hard coded content message sep until configurable in dataset creation
+
+        user_message += msg_sep.join(self.apply_content_prefix(auth, msg, tag_sep=self.cfg.tag_sep) for auth,msg in chat_history[:-1])
+        
+        chat_content.append({"role": 'user', "content": user_message})
+
+        assist_user, assist_msg = chat_history[-1]
+        assistant_message = self.apply_content_prefix(assist_user, assist_msg, tag_sep=self.cfg.tag_sep)
+
+        chat_content.append({"role": 'assistant', "content": assistant_message})
+        
+        return chat_content
 
 
 class CloneusUntuned(CloneusUA):

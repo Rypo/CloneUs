@@ -184,16 +184,30 @@ def main(args):
     cfg.fprompt = None # filled during dataset creation
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    text_only_dataset = cfg.use_sft_trainer
+    
+    df_chat = dataset.prepare_dataset_dataframe(data_file_path, cfg)
+    cfg = dataset.fill_cfg_from_data(df_chat['formatted_author_tag'], cfg) # fill fprompt, name_mappings, name_mappings_json
+
+    dataset_format  = ('text' if cfg.use_sft_trainer else 'tokens') 
 
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:
-        dset = dataset.jsonl_dataset(cfg.train_jsonl, cfg.eval_jsonl, tokenizer, cfg, text_only=text_only_dataset) 
+        dset = dataset.jsonl_dataset(cfg.train_jsonl, cfg.eval_jsonl, tokenizer, cfg, dataset_format=dataset_format) 
     elif cfg.dataset.name == 'max_tokens':
-        dset = dataset.max_tokens_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+        dset = dataset.max_tokens_dataset(df_chat, tokenizer, cfg, dataset_format=dataset_format)
     elif cfg.dataset.name == 'ungrouped':
-        dset = dataset.ungrouped_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+        dset = dataset.ungrouped_dataset(df_chat, tokenizer, cfg, dataset_format=dataset_format)
+    elif 'chunkh' in cfg.dataset.name:
+        if cfg.tag_placement == 'content_prefix_ot':
+            logger.info('Using Data Format: subsession_completions_dataset')
+
+            csd_dataset = dataset.chat_sessions_dataset(df_chat, tokenizer, cfg, dataset_format='raw')
+            # convert dataset to UA One Turn format 
+            dset = dataset.subsession_completions_dataset(csd_dataset, tokenizer, cfg.fprompt, tag_sep=cfg.tag_sep, ctx_template = '{role}{tag_sep}{content}', ctx_sep = '\n', dataset_format='text')
+            
+        else:
+            dset = dataset.chat_sessions_dataset(df_chat, tokenizer, cfg, dataset_format=dataset_format)
     else:
-        dset = dataset.chat_sessions_dataset(data_file_path, tokenizer, cfg, text_only=text_only_dataset)
+        raise NotImplementedError(f'Unknown dataset format: {cfg.dataset.name!r}')
     
     
     callbacks = [] # [GenerationCallback(20), FullSaveCallback]

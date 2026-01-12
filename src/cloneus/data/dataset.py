@@ -1,43 +1,33 @@
 import copy
 import typing
+import dateutil
 import itertools
 import functools
 from dataclasses import dataclass
-
+import json
 
 import more_itertools
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm, trange
+from tqdm.auto import tqdm
+from omegaconf import OmegaConf,DictConfig
 import datasets
-from transformers import PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast, PreTrainedTokenizerBase
 
-from ..plugins import youtube as youtube
-#from ..core import paths as rpaths
-from . import etl
+from ..plugins import youtube
+
+from . import etl, useridx
 from .tokenization import check_if_system, to_jinja_template
 
 def map_to_inputs(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerFast, max_length:int, truncation:bool, text_field='text'):
     '''Maps Dataset text field to those for model input (input_ids, special_tokens_mask, length)
     
-    Importantly, it does NOT add special tokens. This is primarily a concern after calling apply_chat_template(tokenize=False) which,
-    depending on the template, may or may not insert a bos_token. This will cause double bos_token on all entries. 
+    Importantly, it DOES add special tokens. This is primarily a concern after calling apply_chat_template(tokenize=False) which,
+    depending on the template, may or may not insert a bos_token. This will cause double bos_token on all entries unless 
+    apply_chat_template(tokenize=False, tokenizer_kwargs={'add_special_tokens': False}) is used. 
     '''
-    dset = dset.map(lambda s: tokenizer(s[text_field], add_special_tokens=False, return_special_tokens_mask=True, max_length=max_length, return_length=True, truncation=truncation), batched=True)
+    dset = dset.map(lambda s: tokenizer(text = s[text_field], add_special_tokens=True, return_special_tokens_mask=True, max_length=max_length, return_length=True, truncation=truncation), batched=True)
     return dset
-
-def convo_token_count(convo:list[dict], tokenizer: PreTrainedTokenizerFast):
-    if isinstance(convo, dict):
-        convo = [convo]
-    # This method adds BOS (e.g '<s>' (1)) to beginning
-    #n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), return_length=True)['length']
-    n_tokens =  tokenizer(tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True)['length']
-
-    # This method does not
-    #n_tokens = tokenizer.apply_chat_template(convo, tokenize=True, add_generation_prompt=False, return_dict=True, tokenizer_kwargs={'return_length':True})['length']
-    if not isinstance(n_tokens, int):
-        n_tokens=n_tokens[0]
-    return n_tokens
 
 
 def batched_token_count(convo:list[list[dict]]|list[dict[str,str]], tokenizer:PreTrainedTokenizerFast) -> np.ndarray[int]:
@@ -56,16 +46,16 @@ def batched_token_count(convo:list[list[dict]]|list[dict[str,str]], tokenizer:Pr
         batched_convo = [[c] for c in convo]
         bos_discount = 1
         #print('treating each item as own convo')
-    return tokenizer(tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length'] - bos_discount
+    return tokenizer(text = tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length']- bos_discount
 
 
-def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],):
+def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role', 'content_prefix_ot',],):
     if isinstance(system_msg, str):
         raise TypeError('No more loosey goosey. dict or list[dict, dict] only')
         #system_msg = {'role':'system', 'content':system_msg}
 
     # TODO: Should tag_only accept a system message? Foundation models don't really do that, but I guess it's not gonna break anything
-    if tag_placement in [ 'replace_role', 'tag_only',]:
+    if tag_placement != 'content_prefix':
         assert len(system_msg) == 1 and system_msg[0]['role'] == 'system', 'Only tag_placement="content_prefix" can have system message with role != system'
         chat_convo = system_msg+chat_convo
         return chat_convo
@@ -106,7 +96,7 @@ def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_place
     return chat_convo
 
 
-def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'],  system_msg:dict[str,str]|list[dict[str,str]]|None=None) -> list[dict[str,str]]:
+def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role' 'content_prefix_ot'], system_msg:dict[str,str]|list[dict[str,str]]|None=None) -> list[dict[str,str]]:
     # NOTE: formatted_author_tags INCLUDE TAG SEP (if not None)
     # https://github.com/benfred/py-spy
     atag_tcontent = zip(formatted_author_tags, raw_texts)
@@ -127,17 +117,7 @@ def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str],
         return chat_content
     
     
-    if tag_placement in ['replace_role','tag_only']:
-        # '''For tag only, markup free, format''' # '''For chatml with custom roles as usernames'''
-        #if tag_placement == 'replace_role':
-        #chat_content.append({"role": "system", "content": system_msg})
-        
-        for role_tag,content in atag_tcontent:
-            chat_content.append({"role": role_tag, "content": content})
-        
-        return add_sys_msg(chat_content, system_msg=system_msg, tag_placement=tag_placement)
-    
-    elif tag_placement == 'content_prefix':
+    if tag_placement == 'content_prefix':
         rolecycle = itertools.cycle(['user','assistant'])
                         
         for fauth_tag,text in atag_tcontent:
@@ -145,22 +125,25 @@ def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str],
             chat_content.append({"role": next(rolecycle), "content": content})
 
         return add_sys_msg(chat_content, system_msg=system_msg, tag_placement=tag_placement)
-    
     else:
-        raise ValueError('unknown tag_placement value: '+tag_placement)
+        # '''For tag only, markup free, format''' # '''For chatml with custom roles as usernames'''
+        for role_tag,content in atag_tcontent:
+            chat_content.append({"role": role_tag, "content": content})
+        
+        return add_sys_msg(chat_content, system_msg=system_msg, tag_placement=tag_placement)
 
 
 
-def fill_cfg_from_data(formatted_author_tag_col:pd.Series, cfg):
+def fill_cfg_from_data(formatted_author_tag_col:pd.Series, cfg:DictConfig):
     fprompt = cfg.fprompt
     name_mapping = cfg.prompt.name_mapping
-    
+    name_map_json = [{'username': k, 'firstName': v} for k,v in useridx.get_users('fname',by='dname').items()]
     if name_mapping is None:
         name_mapping = ', '.join(formatted_author_tag_col.str.strip().unique())
         cfg.prompt.name_mapping = name_mapping
     
     if fprompt is None:
-        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, append_msg=cfg.prompt.append_msg)
+        fprompt = cfg.prompt.template.format(name_mapping=name_mapping, append_msg=cfg.prompt.append_msg, name_mapping_json=json.dumps(name_map_json, indent=1))
         cfg.fprompt = fprompt
     
     return cfg
@@ -181,9 +164,6 @@ def prepare_system_msg(cfg, tokenizer):
                 'This dataset type only recommended for foundation model tuning.')
         tokenizer.chat_template = tag_chat_template
     
-    elif cfg.tag_placement == 'replace_role':
-        system_message = [{'role':'system', 'content': cfg.fprompt}]
-    
     elif cfg.tag_placement == 'content_prefix':
         has_system = check_if_system(tokenizer)
         append_msg = cfg.prompt.append_msg
@@ -200,6 +180,8 @@ def prepare_system_msg(cfg, tokenizer):
                 {'role':'assistant', 'content': append_msg}
             ]
 
+    else:
+        system_message = [{'role':'system', 'content': cfg.fprompt}]
 
     return system_message, has_system, append_msg
 
@@ -288,7 +270,7 @@ def top_time_split_indices(cuml_tokens:np.ndarray[int], time_gaps:list[float], e
 
     return cand_splits
 
-def time_split_overlength(prepared_conversations:list[list[dict]], convo_time_gaps:list[list[float]], tokenizer, system_msg, tag_placement, max_length):
+def time_split_overlength(prepared_conversations:list[list[dict]], convo_time_gaps:list[list[float]], tokenizer:PreTrainedTokenizerBase, system_msg:str, tag_placement:str, max_length:int):
     '''Split on the longest time gap that successfully partitions both sides to be under max_length. 
     
     Each over length batch is split into exactly 2 sub batches if possible, 
@@ -369,33 +351,46 @@ def time_split_overlength(prepared_conversations:list[list[dict]], convo_time_ga
     
     return new_conversations
 
-def dedupe_conversations(conversations:list[list[dict]]):
+def dedupe_conversations(conversations:list[list[dict]]) -> list[list[dict]]:
     unique_convos = []
     for convo in conversations:
         if convo not in unique_convos:
             unique_convos.append(convo)
     return unique_convos
 
-def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
-    df_proc= etl.process_csv(chat_csv, youtube_encode_fetch=True, filter_prefixes=('!', '/'), merge_window=7.0)
-    df_all = etl.format_text_tags(df_proc, author_tag=cfg.author_tag, tag_sep=cfg.tag_sep, postfix=cfg.postfix, eval_frac=cfg.dataset.get('eval_frac',0.01))
-    df_all = etl.label_chat_sessions(df_all, hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length)
-    
-    cfg = fill_cfg_from_data(df_all['formatted_author_tag'], cfg) # fill fprompt, name_mappings
-    system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer)
-    # intrasession_time_gap
-    df_all['intrn_time_gap'] = df_all.groupby(['split','chat_session'])['Date'].diff().dt.total_seconds().fillna(0) 
-    
-    df_rolechat = df_all[['formatted_author_tag','text','split','chat_session', 'intrn_time_gap']].copy()
-    df_convo = df_rolechat.groupby(['split','chat_session'])[['formatted_author_tag','text','intrn_time_gap']].agg(list).drop_duplicates('text')
 
+def prepare_dataset_dataframe(chat_csv: str, cfg: DictConfig, **cfg_dot_kwargs):
+    cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist([f"{k}={v}" for k,v in cfg_dot_kwargs.items()]))
+
+    df_chat, user_index = etl.process_csv(chat_csv, youtube_encode_fetch=True, filter_prefixes=('!', '/'), merge_window=7.0, drop_cloneus_bot=True)
+    df_chat = etl.merge_user_sequences(df_chat)
+    
+    df_chat['formatted_author_tag'] = df_chat['user'].apply(useridx.format_author_tag, author_tag=cfg.author_tag, user_index=user_index) 
+    
+    if cfg.tag_sep and cfg.tag_placement != 'content_prefix_ot':
+        df_chat['formatted_author_tag'] += cfg.tag_sep # append sep to end of tag
+    
+    df_chat = etl.assign_split(df_chat, cfg.dataset.get('eval_frac', 0.005))
+    
+    if 'chunkh' in cfg.dataset.name:
+        df_chat = etl.label_chat_sessions(df_chat, hours_between_sessions=cfg.dataset.hours_between_sessions, min_session_length=cfg.dataset.min_session_length)
+        # intrasession_time_gap
+        df_chat['intrn_time_gap'] = df_chat.groupby(['split','chat_session'])['Date'].diff().dt.total_seconds().fillna(0) 
+    
+    df_chat['local_date'] = df_chat['Date'].dt.tz_convert(dateutil.tz.gettz())
+    df_chat['date_string'] = df_chat['local_date'].dt.strftime("%d %b %Y") # Llama3.1
+    
+    return df_chat
+
+
+def chat_sessions_dataset(df_chat: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','raw'] = 'tokens'):
+    system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer)
+    
+    df_convo = df_chat.groupby(['split','chat_session'])[['formatted_author_tag','text','intrn_time_gap']].agg(list).drop_duplicates('text')
 
     df_convo['conversation'] = df_convo.apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement, system_message), axis=1)
-    # prepend from 0 to 2 0.0 for inserted system message(s)
+    # prepend either 0,1,or 2 "0.0" values to ensure alignment with inserted system message(s)
     df_convo['intrn_time_gap'] = (df_convo['conversation'].str.len() - df_convo['intrn_time_gap'].str.len()).apply(lambda zpad: [0.0]*zpad) + df_convo['intrn_time_gap']
-
-    # eval_convo = df_convo.loc['eval']
-    # train_convo = df_convo.loc['train']
 
     eval_convos = time_split_overlength(df_convo.loc['eval','conversation'].tolist(), df_convo.loc['eval','intrn_time_gap'].tolist(), 
                                         tokenizer, system_msg=system_message, tag_placement=cfg.tag_placement, max_length=cfg.chunk_size)
@@ -407,11 +402,51 @@ def chat_sessions_dataset(chat_csv, tokenizer, cfg, text_only=False):
         'train': datasets.Dataset.from_dict({'text': dedupe_conversations(train_convos)}, split='train'),
         'validation': datasets.Dataset.from_dict({'text': dedupe_conversations(eval_convos)}, split='validation'),
     })
-    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
     
-    if not text_only:
+    if dataset_format=='raw':
+        return dset
+    
+    # TODO: pass date_string in as kwarg to apply_chat_template. Use the earliest date in chat sequence if multiple
+    tokenizer_kwargs={'add_special_tokens': False} # If returning as text, do NOT add spec tokens. When the Trainer tokenizes, it WILL add special tokens,
+    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)})
+    
+    if dataset_format == 'tokens':
         dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
 
+    return dset
+
+def to_chat_triplets(conversation:list[dict[str,str]], system_message:str, ctx_template:str='{role} {content}', ctx_sep:str = '\n') -> list[list[dict[str,str]]]:
+    '''Converts conversation format messages into expanding (sys, ctx, resp) triplets where ctx grows by 1 message until exhausted'''
+    chat_sequence = [c for c in conversation if c['role'] != 'system']
+
+    messages = []
+    for i in range(len(chat_sequence)-1, 0, -1):
+        messages.append([
+            {'role':'system', 'content': system_message},
+            {'role':'user', 'content': ctx_sep.join(ctx_template.format_map(c) for c in chat_sequence[:i])},
+            {'role':'assistant','content': ctx_template.format_map(chat_sequence[i])},
+        ])
+    return messages[::-1]
+
+
+def subsession_completions_dataset(chat_session_dset: datasets.Dataset, tokenizer:PreTrainedTokenizerBase, system_message:str, tag_sep:str = '\n', ctx_template:str='{role}{tag_sep}{content}', ctx_sep:str = '\n', dataset_format: typing.Literal['text','tokens','raw'] = 'text'):
+    ctx_template = ctx_template.format(role='{role}', tag_sep=tag_sep, content='{content}')
+    dset = chat_session_dset.map(lambda ex: {'conversations': to_chat_triplets(ex['text'], system_message, ctx_template, ctx_sep)},)
+    
+    dset = datasets.DatasetDict({
+        'train': datasets.Dataset.from_dict({'messages': [y for x in dset['train']['conversations'] for y in x]}, split='train'),
+        'validation': datasets.Dataset.from_dict({'messages': [y for x in dset['validation']['conversations'] for y in x]}, split='validation'),
+    })
+    
+    if dataset_format == 'raw':
+        return dset
+
+    tokenizer_kwargs={'add_special_tokens': False} # If returning as text, do NOT add spec tokens. When the Trainer tokenizes, it WILL add special tokens,
+    dset = dset.map(lambda ex: {'text': tokenizer.apply_chat_template(ex['messages'], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)}, remove_columns='messages', batched=True)
+    
+    if dataset_format=='tokens':
+        dset = map_to_inputs(dset, tokenizer, max_length=tokenizer.model_max_length, truncation=False)
+    
     return dset
 
 
@@ -491,7 +526,7 @@ def consecutive_max_tokens(unified_conversation:list[dict[str,str]], all_msg_len
     
     return conversations
 
-def convo_batch_max_tokens(unified_conversation:list[dict[str,str]], tokenizer:PreTrainedTokenizerFast, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role'], max_length:int):
+def convo_batch_max_tokens(unified_conversation:list[dict[str,str]], tokenizer:PreTrainedTokenizerBase, system_msg: dict[str, str] | list[dict[str, str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role','content_prefix_ot',], max_length:int):
     
     # TODO: this will break for append_msg content_prefix
     syslen = batched_token_count([system_msg], tokenizer).sum() # sum in case is SYN ACK
@@ -515,20 +550,16 @@ def convo_batch_max_tokens(unified_conversation:list[dict[str,str]], tokenizer:P
     return prepared_conversations
 
 
-def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
+def max_tokens_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','raw'] = 'tokens'):
     '''Dataset groupings of sequential texts concatenated up to a maximum of `cfg.chunk_size` total tokens
     
     Chat sessions are not assigned, and the only use of Date or timestamp if present is consecutive message merge.
     '''
-    df_proc = etl.process_csv(chat_csv, youtube_encode_fetch=True, filter_prefixes=('!', '/'), merge_window=7.0)
-    df_all = etl.format_text_tags(df_proc, author_tag=cfg.author_tag,  tag_sep=cfg.tag_sep, postfix=cfg.postfix,  eval_frac=cfg.dataset.get('eval_frac',0.01))
-    
-    cfg = fill_cfg_from_data(df_all['formatted_author_tag'], cfg) # fill fprompt, name_mappings
     system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer) # may update tokenizer
 
     # get base tokens before any system is added
     # Do not add system message since it is a flat list of messages as a single mega conversation
-    sr_flat_convo = df_all.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement), axis=1)
+    sr_flat_convo = df_chat.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement), axis=1)
     print('Grouping messages into conversations of maximal length..')
     train_convos = convo_batch_max_tokens(sr_flat_convo['train'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
     eval_convos = convo_batch_max_tokens(sr_flat_convo['eval'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
@@ -538,24 +569,29 @@ def max_tokens_dataset(chat_csv, tokenizer, cfg, text_only=False):
         'validation': datasets.Dataset.from_dict({'text': eval_convos}, split='validation'),
     })
     
-    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
+    if dataset_format == 'raw':
+        return dset
+
+    tokenizer_kwargs={'add_special_tokens': False} # If returning as text, do NOT add spec tokens. When the Trainer tokenizes, it WILL add special tokens,
+    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)})
+    
     # https://huggingface.co/learn/nlp-course/chapter5/3
-    if not text_only:
+    if dataset_format=='tokens':
         dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
 
     return dset
 
 
 
-def jsonl_dataset(train_jsonl, eval_jsonl, tokenizer, cfg, text_only=False):
+def jsonl_dataset(train_jsonl:str, eval_jsonl:str, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['tokens','raw'] = 'tokens'):
     dset = datasets.load_dataset("json", data_files={"train": train_jsonl, "validation": eval_jsonl})
-    if not text_only:
+    if dataset_format == 'tokens':
         dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
     
     return dset
 
 
-def ungrouped_dataset(chat_csv, tokenizer, cfg, text_only=False):
+def ungrouped_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['tokens','raw'] = 'tokens'):
     '''Dataset of chat messages without any grouping by time or chunk size. 
 
     The dataset is constructed from the raw dataframe. No further processing or parsing is preformed.
@@ -568,20 +604,28 @@ def ungrouped_dataset(chat_csv, tokenizer, cfg, text_only=False):
     if not cfg.use_sft_trainer:
         raise ValueError('for dataset "ungrouped_eos" SFTTrainer must be used to preserve message order')
     
-    df_proc= etl.process_csv(chat_csv, youtube_encode_fetch=True, filter_prefixes=('!', '/'), merge_window=7.0)
-    df_all = etl.format_text_tags(df_proc, author_tag=cfg.author_tag, tag_sep=cfg.tag_sep, postfix=cfg.postfix, eval_frac=cfg.dataset.get('eval_frac',0.01))
-    
-    cfg = fill_cfg_from_data(df_all['formatted_author_tag'], cfg) # fill fprompt, name_mappings
+    # No grouping means system message cannot be added anywhere.
     system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer) # may update tokenizer
     
-    df_all = df_all[['split', 'Date', 'time_gap', 'formatted_author_tag','text']].set_index('split')
+    df_all = df_chat[['split', 'Date', 'time_gap', 'formatted_author_tag','text']]
     
-    ds_ungrouped = datasets.DatasetDict({
+    # Concatenate the author tag and text, adding tag_sep if need be
+    if cfg.tag_sep and not df_all['formatted_author_tag'].str.endswith(cfg.tag_sep).all():
+        df_all['formatted_author_tag'] = df_all['formatted_author_tag'].str.removesuffix(cfg.tag_sep) + cfg.tag_sep
+    
+    df_all['text'] = df_all['formatted_author_tag'] + df_all['text']
+    df_all = df_all.set_index('split')
+    
+    dset = datasets.DatasetDict({
         'train': datasets.Dataset.from_pandas(df_all.loc['train'], split='train', preserve_index=False),
         'validation': datasets.Dataset.from_pandas(df_all.loc['eval'], split='validation', preserve_index=False)
     })
-    #dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
-    if not text_only:
-        ds_ungrouped = map_to_inputs(ds_ungrouped, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, text_field='text')
     
-    return ds_ungrouped
+    if dataset_format == 'raw':
+        return dset
+    
+    #dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
+    if dataset_format == 'tokens':
+        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, text_field='text')
+    
+    return dset
