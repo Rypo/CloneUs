@@ -26,6 +26,7 @@ from transformers import (
     TextIteratorStreamer
 )
 import transformers
+from peft.utils.hotswap import hotswap_adapter # TODO: drop import when transformers v5
 
 from cloneus.data import tokenization, useridx
 from cloneus.plugins import youtube
@@ -440,18 +441,40 @@ class Cloneus(GenConfigUtilities):
         
         same_base_model = new_cfg.model_id == self.cfg.model_id
         lora_to_lora = new_path_data.has_adapter and self.path_data.has_adapter
+        # TODO: Tag placement should not prohibit hotswaps. But because each tag method has a dedicated Cloneus subclass, it needs to be reinstantiated
+        # this could be remedied by allowing a model to be attached post-instantiation or passed in a class method
+        same_tag_placement = new_cfg.tag_placement == self.cfg.tag_placement
 
-        return same_base_model and lora_to_lora
+        return same_base_model and lora_to_lora and same_tag_placement
 
 
+    # also: https://huggingface.co/docs/peft/main/en/package_reference/hotswap#peft.utils.hotswap.hotswap_adapter
+    # https://huggingface.co/docs/peft/v0.18.0/en/package_reference/hotswap
     def _swap_adapter(self, new_cfg, new_path_data:ModelPathComponents, gen_config:str=None, dtype=None):
-        adapter_name = (new_path_data.run_name + '-' + new_path_data.checkpoint_name).replace('.','')
-        if not adapter_name in self.model.peft_config:
-            self.model.load_adapter(new_path_data.checkpoint_path, adapter_name=adapter_name)
+        # adapter_name = (new_path_data.run_name + '-' + new_path_data.checkpoint_name).replace('.','')
+        adapter_name = 'default'
         
-        self.model.set_adapter(adapter_name)
+        active_adapter = self.model.active_adapter
+        if active_adapter:
+            hotswap_adapter(self.model, new_path_data.checkpoint_path.as_posix(), active_adapter, 'cuda')
+        else:
+            #if adapter_name not in self.model.peft_config:
+            self.model.load_adapter(new_path_data.checkpoint_path, adapter_name=adapter_name, is_trainable=False, adapter_kwargs=dict(dtype=self.torch_dtype), low_cpu_mem_usage=True)#, autocast_adapter_dtype=False)
+            
+            self.model.set_adapter(adapter_name)
+        self.model.set_requires_grad(adapter_name, False)
+        # self.model.merge_adapter(adapter_names=[adapter_name], safe_merge = True)
+
+        # self.model.enable_peft_hotswap(target_rank=max_rank) # max_rank = higher r, max_rank=32 would suffice for >90% of models
+        # NOTE: this may fail for compiled models
+        # https://huggingface.co/docs/transformers/v5.0.0rc0/en/peft#hotswapping-adapters
+        #self.model.load_adapter(new_path_data.checkpoint_path, hotswap=True, adapter_name=adapter_name)
+        
         # necessary -- https://huggingface.co/docs/peft/v0.10.0/en/package_reference/lora#peft.LoraModel.set_adapter
+        # still necessary -- https://huggingface.co/docs/peft/v0.18.0/en/package_reference/peft_model#peft.PeftModel.set_adapter
         for name,param in self.model.named_parameters():
+            if param.dtype in [torch.float32, torch.float, torch.float16]:
+                param.data = param.to(self.torch_dtype).data
             if hasattr(param,'requires_grad'):
                 param.requires_grad_(False)
         
