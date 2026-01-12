@@ -1,4 +1,5 @@
 import os
+import re
 import typing
 from contextlib import contextmanager
 import torch
@@ -164,16 +165,22 @@ def batchsafe_tokenizer(tokenizer):
         tokenizer.padding_side = pad_side
         tokenizer.pad_token_id = pad_tokenid
 
-def set_tokenizer_inference(tokenizer, ensure_bos:bool = True,):
+def set_tokenizer_inference(tokenizer, uncomment_chat_template_bos:bool = True, force_bos_chat_template:bool = False):
     tokenizer.padding_side = 'left'
     
     # Hermes-2-Theta-Llama-3-8B breaks on batched unless pad=eos. Need batch for author probas
     # by default, pad = <|end_of_text|> (llama-3's eos token) but needs to be <eot_id>
     # there was a reason why I did this check, but I don't remember which model(s) it was necessary for
-    if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.unk_token_id:
+    if tokenizer.pad_token_id is None or tokenizer.pad_token_id == getattr(tokenizer,'unk_token_id', None):
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
-    if ensure_bos:
+    if uncomment_chat_template_bos and tokenizer.chat_template:
+        # match commented out bos_token, remove comment tags e.g. {# {{- bos_token }} #} -> {{- bos_token }}
+        # Needed for Llama3.1 variants where they are commented out during training to avoid double BOS, but need to add back for inference
+        bos_re = re.compile(re.escape("{#") + "(.*" + re.escape("{{") + ".*bos_token.*" + re.escape("}}") + ".*)" + re.escape("#}"), re.I)
+        tokenizer.chat_template = bos_re.sub(lambda m: m.group(1).strip(), tokenizer.chat_template)
+
+    if force_bos_chat_template:
         tokenizer.chat_template = bos_chat_template(tokenizer)
         
     return tokenizer

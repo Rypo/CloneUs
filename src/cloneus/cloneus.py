@@ -20,6 +20,8 @@ import unsloth # Unsloth should be imported before trl, transformers, peft to en
 from transformers import (
     AutoConfig,
     AutoTokenizer,
+    AutoProcessor,
+    PreTrainedTokenizerBase,
     GenerationConfig,
     TextIteratorStreamer
 )
@@ -287,9 +289,9 @@ class Cloneus(GenConfigUtilities):
 
         return config,path_data
     
-    def apply_stop_rules(self, tokenizer:transformers.PreTrainedTokenizer, gen_config:GenerationConfig, stop_criteria: transformers.StoppingCriteriaList|None = None):
+    def apply_stop_rules(self, tokenizer:PreTrainedTokenizerBase, gen_config:GenerationConfig, stop_criteria: transformers.StoppingCriteriaList|None = None):
         '''Sets special cases for eos_tokens and stopping criteria'''
-        tokenizer = tokenization.set_tokenizer_inference(tokenizer)
+        tokenizer = tokenization.set_tokenizer_inference(tokenizer, uncomment_chat_template_bos=True, force_bos_chat_template=False)
 
         #if gen_config.pad_token_id is None or gen_config.eos_token_id is None:
         gen_config.pad_token_id = tokenizer.pad_token_id
@@ -343,6 +345,8 @@ class Cloneus(GenConfigUtilities):
             ClonuesCls = CloneusRole
         elif config.tag_placement == 'content_prefix':
             ClonuesCls = CloneusUA
+        elif config.tag_placement == 'content_prefix_ot':
+            ClonuesCls = CloneusUAOneTurn
         elif config.tag_placement == 'tag_only':
             ClonuesCls = CloneusTag
         else:
@@ -353,7 +357,9 @@ class Cloneus(GenConfigUtilities):
         
         if ytm is None:
             ytm = youtube.YouTubeManager(enabled=True)
+
         clo = ClonuesCls(path_data=path_data, cfg=config, gen_config=gen_config, ytm=ytm, **kwargs)
+        
         if load:
             return clo.load_model()
         return clo
@@ -369,6 +375,11 @@ class Cloneus(GenConfigUtilities):
     @iload.cleanup
     def load_model(self):
         quant_method = self.init_kwargs.get('quant_method',None) # quant_method:typing.Literal['awq','merged','gptq','unsloth','aqlm','bnb4', ]=None
+
+        # use unsloth for inference by default if it was used for training 
+        if quant_method is None and self.cfg.get('flashattn_lib', None) == 'unsloth': 
+            quant_method = 'unsloth'
+        
         self.unload_model(partial=True) # make sure all states are cleared first. If we want to preserve state, then should have called swap_model
         self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, quant_method=quant_method, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
         self.tokenizer, self.gen_config, self.stop_criteria = self.apply_stop_rules(self.tokenizer, self.gen_config, stop_criteria=None)
@@ -381,7 +392,7 @@ class Cloneus(GenConfigUtilities):
         if self.base_dtype not in [torch.float16, torch.bfloat16]: 
             self.base_dtype = torch.bfloat16 # Avoid ever running as float32
                 
-        self.base_has_system = tokenization.check_if_system(self.tokenizer) 
+        self.base_has_system = tokenization.check_if_system(self.base_tokenizer) 
         self.base_needs_bos = self.base_tokenizer.chat_template and 'bos_token' not in self.base_tokenizer.chat_template
 
         logger.info('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {}, has_prompt: {}, tag_placement: {}'.format(
@@ -390,7 +401,8 @@ class Cloneus(GenConfigUtilities):
             self.base_has_system, (self.cfg.fprompt is not None), self.cfg.tag_placement,
         ))
         
-        self.model.eval()
+        self.model = self.model.eval().requires_grad_(False)
+        
 
         return self
         

@@ -1,8 +1,10 @@
 import typing
+import logging
 from pathlib import Path
-import torch
 
-from unsloth import FastLanguageModel, FastModel
+import torch
+from unsloth import FastLanguageModel, FastModel, FastVisionModel
+from unsloth.chat_templates import get_chat_template, CHAT_TEMPLATES
 
 from transformers import (
     AutoTokenizer,
@@ -18,24 +20,39 @@ from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_pef
 
 from ..utils import misc
 from ..data import tokenization
+from ..types import cpaths
 
-def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str|typing.Literal['chatml'] = None):
+logger = logging.getLogger(__name__)
+
+def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str = None):
     # from trl import setup_chat_format
     # if chat_template_format is None:
     #     return model, tokenizer
+    if not custom_chat_template:
+        return model, tokenizer
     
-    if custom_chat_template == 'chatml': 
+    if custom_chat_template.endswith('.jinja'):
+        if not (ct_path := Path(custom_chat_template)).is_absolute():
+            ct_path = cpaths.ROOT_DIR/custom_chat_template
+        custom_chat_template = ct_path.read_text()
+        tokenizer.chat_template = custom_chat_template
+    
+    elif custom_chat_template in ["chatmlH", "chatmlX"]:
         if any(v not in tokenizer.get_added_vocab() for v in ['<|im_start|>', '<|im_end|>']):
             print('NOTE: custom_chat_template="chatml" but detected non-chatml format. Missing chatml tokens will be added.')
             # tweaked based on Hermes models
         model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlH', custom_roles=True)
         custom_chat_template = tokenizer.chat_template
-    elif custom_chat_template.endswith('.jinja'):
-        custom_chat_template = Path(custom_chat_template).read_text()
-    #else:
-    #    raise ValueError(f'Unsupported chat_template_format: {chat_template_format!r}')
+
+        tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
     
-    tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
+    else:
+        try:
+            tokenizer = get_chat_template(tokenizer, chat_template = custom_chat_template,)
+        except KeyError as e:
+            logger.error(f'Unknown chat template {custom_chat_template!r}\nOptions: {CHAT_TEMPLATES.keys()}', exc_info=e)
+            raise e    
+    
     return model, tokenizer
 
 def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
@@ -44,12 +61,14 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_id,
         max_seq_length = max_seq_length,
-        dtype = None,
+        dtype = torch.bfloat16,
         fix_tokenizer=True,
         load_in_4bit = (peft_config.init_lora_weights != 'loftq'),
         device_map = "sequential",
         # use_gradient_checkpointing = True,
         use_gradient_checkpointing = "unsloth",
+        attn_implementation = "flash_attention_2",
+        unsloth_tiled_mlp = False,
     )
     if Path(model_id).joinpath('optimizer.pt').exists():
         return model,tokenizer
@@ -63,10 +82,9 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
         r = peft_config.r,
         target_modules = list(peft_config.target_modules),
         lora_alpha = peft_config.lora_alpha,
-        lora_dropout = 0, # Currently only supports dropout = 0
+        lora_dropout = peft_config.lora_dropout, # Supports any, dropout = 0 optimized
         bias = "none",    # Currently only supports bias = "none"
-        use_gradient_checkpointing = True,
-        # use_gradient_checkpointing = "unsloth",
+        use_gradient_checkpointing = "unsloth",
         random_state = 3407,
         max_seq_length = max_seq_length,
         use_rslora=peft_config.use_rslora,

@@ -35,7 +35,7 @@ def cleanup(func):
     return wrapper
 
 
-def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer:bool=False, ensure_bos:bool = True, *inputs, **kwargs):
+def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer:bool=False, uncomment_chat_template_bos:bool = True, *inputs, **kwargs):
     '''AutoTokenizer.from_pretrained but force padding_side=left and if needed pad_tok=eos_tok, add bos to chat template'''
     # Fixes issues with some tokenizers special token spacing. If trained with unsloth, should have fixed+saved already. 
     if refix_tokenizer:
@@ -44,7 +44,7 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
     else:
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
 
-    tokenizer = tokenization.set_tokenizer_inference(tokenizer, ensure_bos=ensure_bos)
+    tokenizer = tokenization.set_tokenizer_inference(tokenizer, uncomment_chat_template_bos=uncomment_chat_template_bos)
     
     sampler_hijack.hijack_samplers(tokenizer) # this enables XTC, DRY sampling methods
 
@@ -125,7 +125,7 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
     #llm.create_chat_completion
     return llm
 
-
+@torch.inference_mode()
 def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
     #print('NAME OR PATH',f'{tokenizer.name_or_path=}')
@@ -142,8 +142,9 @@ def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing
         attn_implementation=attn_implementation,
 
     )
-    
+    tokenizer = tokenization.set_tokenizer_inference(tokenizer, uncomment_chat_template_bos=True, force_bos_chat_template=False)
     model = FastLanguageModel.for_inference(model).to(dtype)
+    model = model.eval().requires_grad_(False)
 
     return model, tokenizer
 
