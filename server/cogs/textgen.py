@@ -128,7 +128,27 @@ class TextGen(commands.Cog, SetTextConfig):
         event_logger.log(lvl, '[{mstat}] {a.display_name}({a.name}) message {message.content!r}'.format(
             mstat=mstat, a=message.author, message=message), extra=self._log_extra)
 
+    @commands.Cog.listener('on_raw_message_delete')
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        if (message := payload.cached_message) is not None:
+            try:
+                self.msgmgr.remove_message(message)
+            except ValueError:
+                pass
+            print(f'Message Deleted: {message.author} - "{message.content}"')
+            event_logger.info('[DELETE] {a.display_name}({a.name}) message {message.content!r}'.format(
+                a=message.author, message=message), extra=self._log_extra)
 
+    @commands.Cog.listener('on_message_edit')
+    async def on_message_edit(self, before:discord.Message, after:discord.Message):
+        if before.author != self.bot.user:
+            try:
+                await self.msgmgr.replace_message(before, after)
+            except ValueError:
+                pass
+                
+            event_logger.info('[EDIT] {user.display_name}({user.name}) UPDATE message {b.content!r} TO {a.content!r}'.format(
+                user=before.author, b=before, a=after), extra=self._log_extra)
 
 
     async def _react_thumb_down(self, reaction: discord.Reaction):
