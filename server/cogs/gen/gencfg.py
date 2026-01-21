@@ -17,7 +17,7 @@ from cmds import (
 
 from managers.txtman import CloneusManager
 from managers.msgman import MessageManager
-from utils.reporting import StatusItem
+from utils.status import StatusItem
 
 
 class ConfigManager:

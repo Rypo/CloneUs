@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 
 import config.settings as settings
 from utils import text as text_utils, io as io_utils
-from utils.reporting import StatusItem
+from utils.status import StatusItem
 
 from utils.globthread import wrap_async_executor
 

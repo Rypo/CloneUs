@@ -21,8 +21,7 @@ from managers import imgman
 import config.settings as settings
 
 from cmds import transformers as cmd_tfms, choices as cmd_choices, flags as cmd_flags
-from utils.command import check_up
-from utils.reporting import StatusItem
+from utils.status import StatusItem, check_up
 from utils.globthread import stop_global_executors, wrap_async_executor, async_gen
 from utils import image as imgutil
 from views import imageui

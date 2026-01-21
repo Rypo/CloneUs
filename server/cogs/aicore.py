@@ -16,7 +16,7 @@ import torch
 import config.settings as settings
 
 from utils import io as io_utils, globthread
-from utils.reporting import StatusItem, vram_usage
+from utils.status import StatusItem, vram_usage
 from views import contextview as cview
 
 

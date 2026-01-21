@@ -22,8 +22,7 @@ from cloneus.data import useridx
 
 import config.settings as settings
 from utils import text as text_utils, io as io_utils
-from utils.command import check_up
-from utils.reporting import StatusItem
+from utils.status import StatusItem, check_up
 from utils.globthread import wrap_async_executor, stop_global_executors
 
 from views import contextview as cview
