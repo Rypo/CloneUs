@@ -1,9 +1,11 @@
 import os
 import re
 import typing
+from dataclasses import dataclass
 from contextlib import contextmanager
 import torch
 import transformers
+from trl.models.utils import ChatMlSpecialTokens
 
 def check_if_system(tokenizer):
     from jinja2.exceptions import TemplateError
@@ -37,6 +39,109 @@ def to_jinja_template(tag_sep:str, postfix:str):
     template = template.replace('__TAG_SEP__',tag_sep).replace('__POSTFIX__', postfix)
     return template
 
+
+# inspired by: https://huggingface.co/NousResearch/Hermes-2-Theta-Llama-3-8B/blob/main/tokenizer_config.json
+@dataclass
+class ChatMlHybridSpecialTokens(ChatMlSpecialTokens):
+    """Dataclass for special tokens used in ChatML that reuses existing BOS and PAD if available"""
+
+    bos_token: str | None = None
+    pad_token: str | None = None
+    bot_token: str = "<|im_start|>"
+    eos_token: str = "<|im_end|>"
+    custom_roles: bool = True
+    
+    @property
+    def chat_template(self):
+        return (
+            (f"{{{{'{self.bos_token}'}}}}" if self.bos_token is not None else '')+ # Qwen = no bos
+            "{% for message in messages %}"
+            f"{{{{'{self.bot_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            +(f"{{{{ '{self.bot_token}' }}}}" if self.custom_roles else f"{{{{ '{self.assistant}\n' }}}}")+
+            "{% endif %}"
+        )
+
+@dataclass
+class ChatMlXSpecialTokens(ChatMlHybridSpecialTokens):
+    """Dataclass for special tokens used in ChatML - OpenHermes2.5 flavor, including system, user, assistant, bos, eos, and pad tokens."""
+
+    bos_token: str = "<s>"
+    pad_token: str = "</s>"
+    
+    @property
+    def chat_template(self):
+        return (
+            "{% for message in messages %}"
+            f"{{{{'{self.bot_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            +(f"{{{{ '{self.bot_token}' }}}}" if self.custom_roles else f"{{{{ '{self.assistant}\n' }}}}")+
+            "{% endif %}"
+        )
+
+FORMAT_MAPPING = {"chatml": ChatMlSpecialTokens, "chatmlX": ChatMlXSpecialTokens, "chatmlH": ChatMlHybridSpecialTokens}
+
+
+def setup_chat_format_patched(
+    model: transformers.PreTrainedModel,
+    tokenizer: transformers.PreTrainedTokenizer,
+    format: typing.Optional[typing.Literal["chatmlH","chatmlX"]] = "chatmlH",
+    custom_roles: bool = True,
+    resize_to_multiple_of: typing.Optional[int] = None,
+) -> tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
+    """
+    Setup chat format by adding special tokens to the tokenizer, setting the correct format, and extending the embedding layer of the model based on the new special tokens.
+
+    Args:
+      model (`~transformers.PreTrainedModel`): The model to be modified.
+      tokenizer (`~transformers.PreTrainedTokenizer`): The tokenizer to be modified.
+      format (`Optional[Literal["chatml"]]`): The format to be set. Defaults to "chatml".
+      resize_to_multiple_of (`Optional[int]`): Number to resize the embedding layer to. Defaults to None.
+    Returns:
+      model (`~transformers.PreTrainedModel`): The modified model.
+      tokenizer (`~transformers.PreTrainedTokenizer`): The modified tokenizer.
+    """
+    # check if format available and retrieve
+    if format not in FORMAT_MAPPING:
+        raise ValueError(f"Format {format} not available. Please use one of {FORMAT_MAPPING.keys()}")
+
+    if format == "chatmlH":
+        if tokenizer.pad_token is not None:
+            pad_token = tokenizer.pad_token
+        else:
+            pad_token = tokenizer.eos_token # use the model's existing eos *not* <|im_end|>
+        chat_format = ChatMlHybridSpecialTokens(bos_token = tokenizer.bos_token, pad_token=pad_token, custom_roles=custom_roles)
+    elif format == "chatmlX":
+        chat_format = ChatMlXSpecialTokens(custom_roles=custom_roles)
+    else:
+        chat_format = FORMAT_MAPPING[format]()
+
+    # set special tokens and them
+    tokenizer.eos_token = chat_format.eos_token
+    tokenizer.pad_token = chat_format.pad_token
+    tokenizer.bos_token = chat_format.bos_token
+    tokenizer.add_special_tokens({"additional_special_tokens": [chat_format.bot_token, chat_format.eos_token]})
+    # set chat format for tokenizer
+    tokenizer.chat_template = chat_format.chat_template
+
+    # resize embedding layer to a multiple of 64, https://x.com/karpathy/status/1621578354024677377
+    model.resize_token_embeddings(
+        len(tokenizer), pad_to_multiple_of=resize_to_multiple_of if resize_to_multiple_of is not None else None
+    )
+    # Update the model config to use the new eos & bos tokens
+    if getattr(model, "config", None) is not None:
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.config.bos_token_id = tokenizer.bos_token_id
+        model.config.eos_token_id = tokenizer.eos_token_id
+    # Make sure to update the generation config to use the new eos & bos token
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.bos_token_id = tokenizer.bos_token_id
+        model.generation_config.eos_token_id = tokenizer.eos_token_id
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
+
+    return model, tokenizer
 
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict: typing.Dict,
@@ -166,7 +271,7 @@ def batchsafe_tokenizer(tokenizer):
         tokenizer.pad_token_id = pad_tokenid
 
 def set_tokenizer_inference(tokenizer, uncomment_chat_template_bos:bool = True, force_bos_chat_template:bool = False):
-    tokenizer.padding_side = 'left'
+    tokenizer.padding_side = 'left' # This is 100% necessary. Batched predictions will ALWAYS fail with right padded tokenizers.  
     
     # Hermes-2-Theta-Llama-3-8B breaks on batched unless pad=eos. Need batch for author probas
     # by default, pad = <|end_of_text|> (llama-3's eos token) but needs to be <eot_id>
@@ -174,7 +279,7 @@ def set_tokenizer_inference(tokenizer, uncomment_chat_template_bos:bool = True, 
     if tokenizer.pad_token_id is None or tokenizer.pad_token_id == getattr(tokenizer,'unk_token_id', None):
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
-    if uncomment_chat_template_bos and tokenizer.chat_template:
+    if uncomment_chat_template_bos and 'bos_token' in tokenizer.chat_template:
         # match commented out bos_token, remove comment tags e.g. {# {{- bos_token }} #} -> {{- bos_token }}
         # Needed for Llama3.1 variants where they are commented out during training to avoid double BOS, but need to add back for inference
         bos_re = re.compile(re.escape("{#") + "(.*" + re.escape("{{") + ".*bos_token.*" + re.escape("}}") + ".*)" + re.escape("#}"), re.I)

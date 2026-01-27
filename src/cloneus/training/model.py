@@ -18,7 +18,6 @@ import transformers
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model, AutoPeftModelForCausalLM
 
 
-from ..utils import misc
 from ..data import tokenization
 from ..types import cpaths
 
@@ -41,7 +40,7 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
         if any(v not in tokenizer.get_added_vocab() for v in ['<|im_start|>', '<|im_end|>']):
             print('NOTE: custom_chat_template="chatml" but detected non-chatml format. Missing chatml tokens will be added.')
             # tweaked based on Hermes models
-        model, tokenizer = misc.setup_chat_format_patched(model, tokenizer, format='chatmlH', custom_roles=True)
+        model, tokenizer = tokenization.setup_chat_format_patched(model, tokenizer, format=custom_chat_template, custom_roles=True)
         custom_chat_template = tokenizer.chat_template
 
         tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
