@@ -35,22 +35,31 @@ def write_first_batches(trainer:mtrain.Trainer, batchsample_dir='_tmp/sample_bat
     sample_path = (cpaths.ROOT_DIR/batchsample_dir)
     sample_path.mkdir(parents=True, exist_ok=True)
     
-    with open(sample_path/'eval.txt', 'w') as f:
+    with open(sample_path/'eval_batch.txt', 'w') as f:
         try:
             f.writelines(mtrain.get_batch(trainer, train=False))
         except Exception as e:
             f.write(str(e))
     
-    with open(sample_path/'train.txt', 'w') as f:
+    with open(sample_path/'train_batch.txt', 'w') as f:
         try:
             f.writelines(mtrain.get_batch(trainer, train=True))
         except Exception as e:
             f.write(str(e))
-    
-    if 'labels' in trainer.train_dataset.column_names:
-        tokenizer = trainer.processing_class
-        masked_sample = tokenizer.decode([tokenizer.pad_token_id if x == -100 else x for x in trainer.train_dataset[0]["labels"]]).replace(tokenizer.pad_token, " ")
-        (sample_path/'train_masked.txt').write_text(masked_sample)
+
+    with open(sample_path/'train_batch_masked.txt', 'w') as f:
+        try:
+            f.writelines(mtrain.get_batch(trainer, train=True, masked=True))
+        except Exception as e:
+            f.write(str(e))
+
+    with open(sample_path/'train_item_masked.txt', 'w') as f:
+        try:
+            tokenizer = trainer.processing_class
+            masked_sample = tokenizer.decode([tokenizer.pad_token_id if x == -100 else x for x in trainer.train_dataset[0]["labels"]]).replace(tokenizer.pad_token, " ")
+            f.write(masked_sample)
+        except Exception as e: # KeyError expected if if no labels
+            f.write(str(e))
 
 def model_id_alias(model_id:str, alias_filepath:str=None):
     '''If `alias_filepath` exists, read and map `model_id` to user defined alias, otherwise return portion of model_id after `/`

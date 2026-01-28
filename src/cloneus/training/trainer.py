@@ -389,11 +389,17 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
 
     return args
 
-def get_batch(trainer:Trainer, train=False):
+def get_batch(trainer:Trainer, train:bool = False, masked: bool = False):
     dl = trainer.get_train_dataloader() if train else trainer.get_eval_dataloader()
     b0=next(iter(dl))
+    if masked:
+        tokenizer = trainer.processing_class
+        masked_label_ids = torch.where(b0["labels"] == -100, tokenizer.pad_token_id, b0["labels"])
+        masked_texts = [b.replace(tokenizer.pad_token, " ") for b in tokenizer.batch_decode(masked_label_ids, skip_special_tokens=False)]
+        # out = [tokenizer.decode([tokenizer.pad_token_id if x == -100 else x for x in batch_item]).replace(tokenizer.pad_token, " ") for batch_item in b0["labels"]]
+        return masked_texts
+    
     return trainer.processing_class.batch_decode(b0['input_ids'], skip_special_tokens=False)
-    #return trainer.tokenizer.batch_decode(b0.input_ids, skip_special_tokens=False)
 
 class FullSaveCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
