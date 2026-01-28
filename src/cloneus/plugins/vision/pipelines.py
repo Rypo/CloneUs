@@ -967,23 +967,23 @@ class SingleStagePipeline:
         # subtract 1 for first image
         nframes = nframes - 1
         
-        latents = []
+        
         image_frames = []
         if image is None:
             strength_end = np.clip(strength_end, 1/steps, 1) 
             strengths = [strength_end]*nframes
             w,h = self.config.get_dims(aspect)
             # timesteps=AysSchedules["StableDiffusionXLTimesteps"]
-            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0] # num_images_per_prompt=4
+            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='pil', generator=gseed).images#[0] # num_images_per_prompt=4
             
-            latents.append(image)
+            image_frames.extend(image)
         else:
             strengths = discretize_strengths(steps, nframes, start=strength_start, end=strength_end)
             # round up strengths since they will be floored in get_timesteps via int()
             # and it makes step distribution more uniform for lightning models
             image = self._resize_image(image, aspect=aspect, dim_choices=SDXL_DIMS)
 
-            image_frames.append(image)
+            image_frames.extend(image)
             w,h = image.size
         
         #yield image
@@ -991,12 +991,15 @@ class SingleStagePipeline:
                 
         for i in range(nframes):
             # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
-            image = self.i2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='latent', generator=gseed).images
-            latents.append(image)
+            image = self.i2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images
+            image_frames.extend(image)
             yield i
             
-        image_frames += self.decode_latents(latents, height=h, width=w, )
+        if isinstance(image_frames[-1], torch.Tensor):
+            image_frames = self.decode_latents(image_frames, height=h, width=w, )
+        
         release_memory()
+        
         if mid_frames:
             image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
             
@@ -1074,7 +1077,8 @@ class SingleStagePipeline:
         
         if two_stage:
             latents=torch.cat(latents, 0)
-            raw_image_latents, latent_soft_mask = self._prepare_raw_latents(resized_images, aseed)
+            raw_image_latents = self.encode_images(resized_images, steps, astrength, aseed)
+            latent_soft_mask = self._prepare_soft_mask(resized_images, size=raw_image_latents.shape[-2:]).to(raw_image_latents)
             latent_blend = self._interpolate_latents(raw_image_latents, latents, latent_soft_mask, dim_out, time_blend=True, keep_dims=True)
             
             latents = []
@@ -1093,20 +1097,18 @@ class SingleStagePipeline:
         release_memory()
     
     @torch.inference_mode()
-    def _prepare_raw_latents(self, resized_images, seed):
-        raw_image_latents = self.encode_images(resized_images, seed)
-        
+    def _prepare_soft_mask(self, resized_images, size):
         mot_mask_tensor = torch.from_numpy(interpolation.motion_mask(resized_images, px_thresh=0.02, qtile=90))
         #if raw_image_latents.ndim == 4:
         mot_mask_tensor = mot_mask_tensor.expand(1, 1, -1, -1)
 
         latent_soft_mask = torch.nn.functional.interpolate(
             mot_mask_tensor,
-            size=raw_image_latents.shape[-2:], #(h // self.pipei2i.vae_scale_factor, w // self.pipei2i.vae_scale_factor)
+            size=size, #(h // self.pipei2i.vae_scale_factor, w // self.pipei2i.vae_scale_factor)
             mode='area',#'bilinear',
-            ).to(raw_image_latents)
+        )
         #print(raw_image_latents.shape, latent_soft_mask.shape)
-        return raw_image_latents, latent_soft_mask
+        return latent_soft_mask
     
     @torch.inference_mode()
     def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
@@ -1285,7 +1287,81 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
+
+    @torch.inference_mode()
+    def generate_frames(self, prompt: str, 
+                            image: Image.Image|None = None, 
+                            nframes: int = 11,
+                            steps: int = None, 
+                            strength_end: float = 0.80, 
+                            strength_start: float = 0.30, 
+                            negative_prompt: str = None, 
+                            guidance_scale: float = None, 
+                            aspect: typing.Literal['square','portrait','landscape'] = None, 
+                            mid_frames:int=0,
+                            seed: int = None, 
+                            **kwargs):   
         
+        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        # NOTE: if you attempt to update the seed on each iteration, you get some interesting behavoir
+        # you effectively turn it into a coloring book generator. I assume this is a product of how diffusion works
+        # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
+        # the minimal representation of the prompt. If you 
+        
+        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
+        
+        negative_prompt=fkwg['negative_prompt']
+        guidance_scale=fkwg['guidance_scale']
+        steps = fkwg['steps']
+        aspect = fkwg['aspect']
+
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip, partial_offload=True, image=image)
+        
+        # subtract 1 for first image
+        nframes = nframes - 1
+        
+        # SDXL-based models (exclusively?) accept latents in place of image inputs. 
+        # We can massively improve performance by putting of all frame decodes until the very end. 
+
+        latents = []
+        image_frames = []
+        if image is None:
+            strength_end = np.clip(strength_end, 1/steps, 1) 
+            strengths = [strength_end]*nframes
+            w,h = self.config.get_dims(aspect)
+            # timesteps=AysSchedules["StableDiffusionXLTimesteps"]
+            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0] # num_images_per_prompt=4
+            
+            latents.append(image)
+        else:
+            strengths = discretize_strengths(steps, nframes, start=strength_start, end=strength_end)
+            # round up strengths since they will be floored in get_timesteps via int()
+            # and it makes step distribution more uniform for lightning models
+            image = self._resize_image(image, aspect=aspect, dim_choices=SDXL_DIMS)
+
+            image_frames.append(image)
+            w,h = image.size
+        
+        #yield image
+        yield -1
+                
+        for i in range(nframes):
+            # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
+            image = self.i2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='latent', generator=gseed).images
+            latents.append(image)
+            yield i
+            
+        image_frames += self.decode_latents(latents, height=h, width=w, )
+        release_memory()
+        if mid_frames:
+            image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
+            
+            #image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
+        yield image_frames
+        release_memory()        
 
 class SD3Base(SingleStagePipeline):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
