@@ -1,58 +1,29 @@
 import re
 import io
-import time
-import random
 import typing
 import asyncio
 import datetime
 import tempfile
-import itertools
 from pathlib import Path
 from urllib.error import HTTPError
 
-
 import discord
-from discord import app_commands
 from discord.ext import commands
 
-from diffusers.utils import load_image, make_image_grid
 import numpy as np
-
-import orjson
-import aiohttp
-import requests
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png # imageio.plugins.freeimage.download()
-
-
+from diffusers.utils import load_image, make_image_grid
 
 import config.settings as settings
+from . import http as http_util
+
 
 IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
 THUMB_DIR = IMG_DIR.parent/'thumbnails'
 IMG_DIR.mkdir(parents=True, exist_ok=True)
 THUMB_DIR.mkdir(exist_ok=True)
-UA_FILE = settings.RES_DIR/'user_agents.json'
-
-def _read_user_agents():
-    # https://github.com/microlinkhq/top-user-agents/blob/master/src/desktop.json
-    try:
-        iso_today = datetime.datetime.today().isocalendar()
-        iso_mtime = datetime.datetime.fromtimestamp(UA_FILE.stat().st_mtime).isocalendar()
-        # simple weekly update
-        update_ua_file = iso_mtime.year + iso_mtime.week/100 < iso_today.year + iso_today.week/100
-    except FileNotFoundError:
-        update_ua_file = True
-
-    if update_ua_file:
-        resp = requests.get('https://raw.githubusercontent.com/microlinkhq/top-user-agents/refs/heads/master/src/desktop.json')
-        resp.raise_for_status()
-        UA_FILE.write_bytes(orjson.dumps(resp.json()))
-    
-    return orjson.loads(UA_FILE.read_bytes())
-
-USER_AGENTS = _read_user_agents()
 
 
 def prompt_to_filename(prompt:str, ext:typing.Literal['PNG','WebP','JPEG', 'GIF', 'MP4']='PNG', bidx:int=None):
@@ -176,71 +147,6 @@ def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=
         return discord.File(fp=outbin, filename=filename, description=description, spoiler=spoiler)
 
 
-def correct_tenor_url(url: str):
-    if not isinstance(url, str) or 'tenor' not in url:
-        return url
-    if 'https/media.tenor.com' in url: # https://images-ext-1.discordapp.net/external/sW67YUaWQx_lnwJE5_TP2p3GMBAXbehBhrxzrSFn4tA/https/media.tenor.com/aUz-N2QvBOsAAAPo/the-isle-evrima.mp4
-        outlink = 'https://' + url.split('https/')[-1]
-        return outlink
-    elif url.startswith('https://tenor.com/view/'):# in url: # https://tenor.com/view/the-isle-evrima-kaperoo-quality-assurance-hypno-gif-25376214
-        #channel.history(limit=100, oldest_first=False)
-        #discord.utils.find()
-        #for emb in message.embeds:
-            #pprint.pprint(emb.to_dict()['video']['url'])
-        raise ValueError('Incorrect Tenor URL format: Long form')
-    
-    elif url.startswith('https://tenor.com/') and url.endswith('.gif'): # https://tenor.com/bSDFW.gif'
-        raise ValueError('Incorrect Tenor URL format: Short form')
-    
-    return url
-
-
-def clean_discord_url(url:str, verbose=False):
-    if not isinstance(url, str) or 'discordapp' not in url:
-        return url
-    # GIF: https://media.discordapp.net/attachments/.../XYZ.gif?ex=...&is=...&=&width=837&height=837
-    # JPG: https://media.discordapp.net/attachments/.../.../XYZ.jpg?ex=...&is=...&hm=...&=&format=webp&width=396&height=836
-    clean_url = url.split('&=&')[0] # gifs don't have a "format=", but both gifs and images have "&=&"
-    #clean_url = re.sub(r'&(?:width|height)=\d*','',url).strip('&')
-    #if '&format=' not in clean_url:
-    #    clean_url += '&=&format=webp&quality=lossless'
-    clean_url = clean_url.split('format=')[0].rstrip('&=?')
-    
-    if verbose:
-        print(f'old discord url: {url}\nnew discord url: {clean_url}')
-    return clean_url
-
-def clean_image_url(url:str, check_tenor:bool):
-    url = clean_discord_url(url, verbose=False)
-    if check_tenor:
-        url = correct_tenor_url(url)
-    return url
-
-def image_fix(image:np.ndarray, animated:bool=False, transparency:bool=False):
-    if image.ndim == 2: # grayscale
-        return image[:, :, None].repeat(3, -1) # copy 3x, HW->HWC
-    if not animated and image.ndim > 3:
-        image = image[0] # gifs -> take first frame
-    if not transparency and image.shape[-1] > 3: # discard alpha channel
-        image = image[..., :3] # avoid [:, :, :3] in case animated with transparency
-    return image
-
-
-def extract_image_url(message: discord.Message, verbose=False):
-    """read image url from message"""
-    url = None
-    if message.embeds:
-        url = message.embeds[0].url
-        if verbose: print('embeds_url:', url)
-        
-    elif message.attachments:
-        url = message.attachments[0].url
-        #img_filename = message.attachments[0].filename
-        if verbose: print('attach_url:', url)
-        
-
-    return clean_discord_url(url)
-        
 
 async def read_attach(ctx: commands.Context):
     try:
@@ -251,33 +157,26 @@ async def read_attach(ctx: commands.Context):
         image = Image.open(io.BytesIO(await attach.read())).convert('RGB')
         return image
     except IndexError as e:
-        await ctx.send('No image attachment given!')
-        return
-
-def img_bytestream(image_url:str, random_ua:bool=True):
-    headers = {"User-Agent": random.choice(USER_AGENTS)} if random_ua else None
-    rsp = requests.get(image_url, stream=True, headers=headers)
-    rsp.raise_for_status()
-    return rsp.raw.read()
-
-async def async_img_bytestream(image_url, random_ua:bool=True):
-    headers = {"User-Agent": random.choice(USER_AGENTS)} if random_ua else None
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(image_url) as resp:
-            resp.raise_for_status()
-            
-            return await resp.read()
+        return await ctx.send('No image attachment given!')
 
 
 async def is_animated(image_url:str) -> bool:
     try:
-        image_url = correct_tenor_url(image_url)
-        img_props = iio.improps(await async_img_bytestream(image_url))
-            # transparent png is batch but n_images = 0
+        img_props = iio.improps(await http_util.aget_bytestream(image_url))
+        # transparent png is batch but n_images = 0
         return img_props.is_batch and img_props.n_images > 1 
     except HTTPError as e: # urllib.error.HTTPError: HTTP Error 403: Forbidden
         print(e)
         return False
+
+def image_fix(image:np.ndarray, animated:bool=False, transparency:bool=False):
+    if image.ndim == 2: # grayscale
+        return image[:, :, None].repeat(3, -1) # copy 3x, HW->HWC
+    if not animated and image.ndim > 3:
+        image = image[0] # gifs -> take first frame
+    if not transparency and image.shape[-1] > 3: # discard alpha channel
+        image = image[..., :3] # avoid [:, :, :3] in case animated with transparency
+    return image
 
 def convert_imgarr(image:np.ndarray, result_type:typing.Literal['PIL','np']|None = None) -> np.ndarray|Image.Image:
     if image.ndim < 4 or image.shape[0] < 2:
@@ -299,7 +198,7 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
     '''
     simage_uri = str(image_uri)
     if simage_uri.startswith("http://") or simage_uri.startswith("https://"):
-        imbytes = await async_img_bytestream(image_uri)
+        imbytes = await http_util.aget_bytestream(image_uri)
         imeta = iio.immeta(imbytes)
         image = iio.imread(imbytes)
     else:
@@ -308,7 +207,7 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
             image = iio.imread(image_uri)
         except HTTPError as e:
             print(e)
-            imbytes = img_bytestream(image_uri)
+            imbytes = http_util.get_bytestream(image_uri)
 
             imeta = iio.immeta(imbytes)
             image = iio.imread(imbytes)
@@ -318,22 +217,6 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
 
     return image, imeta
 
-def load_images(image_uri:str, result_type:typing.Literal['PIL','np']|None = None):
-    '''Fetch an image, UA spoof if necessary
-
-    default return type if None:
-        animated image: numpy array
-        non-animated image: PIL.Image
-    '''
-    try:
-        image = iio.imread(image_uri)
-    except HTTPError as e:
-        print(e)
-        image = iio.imread(img_bytestream(image_uri))
-    
-    image = convert_imgarr(image, result_type)
-
-    return image
 
 
 def print_image_info(image:Image.Image):

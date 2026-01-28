@@ -23,7 +23,7 @@ import config.settings as settings
 from cmds import transformers as cmd_tfms, choices as cmd_choices, flags as cmd_flags
 from utils.status import StatusItem, check_up
 from utils.globthread import stop_global_executors, wrap_async_executor, async_gen
-from utils import image as imgutil
+from utils import image as imgutil, http as http_util
 from views import imageui
 from run import BotUs
 
@@ -499,7 +499,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             text_only: If True, only return text description, otherwise show the image. Default=False.
         """
         await self.view_check_defer(ctx)
-        image_url = imgutil.clean_image_url(imgurl, check_tenor=False)
+        image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=False)
         # test for gif/mp4/animated file
 
         image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
@@ -547,7 +547,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         image_urls = []
         for image_url in img_urls:
             try:
-                image_url = imgutil.clean_image_url(image_url.strip(), check_tenor=True)
+                image_url = http_util.normalize_media_url(image_url.strip(), tenor_mp4_url=True)
             except ValueError:
                 return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
             image_urls.append(image_url)
@@ -599,8 +599,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         needs_view = await self.view_check_defer(ctx)
         
         # this may be passed a url string in drawUI config
-        image_url1 = imgutil.clean_image_url(imgfile1.url if isinstance(imgfile1, discord.Attachment) else imgurl1, check_tenor=False)
-        image_url2 = imgutil.clean_image_url(imgfile2.url if isinstance(imgfile2, discord.Attachment) else imgurl2, check_tenor=False)
+        image_url1 = http_util.normalize_media_url(imgfile1.url if isinstance(imgfile1, discord.Attachment) else imgurl1, tenor_mp4_url=False)
+        image_url2 = http_util.normalize_media_url(imgfile2.url if isinstance(imgfile2, discord.Attachment) else imgurl2, tenor_mp4_url=False)
         
         images:list[Image.Image] = []
         for image_url in [image_url1,image_url2]:
@@ -756,7 +756,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         
         # this may be passed a url string in drawUI config
         image_url = imgfile.url if isinstance(imgfile, discord.Attachment) else imgurl
-        image_url = imgutil.clean_image_url(image_url, check_tenor=False)
+        image_url = http_util.normalize_media_url(image_url, tenor_mp4_url=False)
         image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
         image = imgutil.image_fix(image, animated=False, transparency=False)
         
@@ -861,7 +861,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         for imgurl in imgurls:
             if imgurl:
-                image_url = imgutil.clean_image_url(imgurl, check_tenor=False)
+                image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=False)
                 image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
                 image = imgutil.image_fix(image, animated=False, transparency=False)
 
@@ -944,7 +944,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             image = imgfile # get a little cheeky here to bypass the download
         else:
             image_url = imgfile.url if isinstance(imgfile,discord.Attachment) else imgurl
-            image_url = imgutil.clean_image_url(image_url, check_tenor=False)
+            image_url = http_util.normalize_media_url(image_url, tenor_mp4_url=False)
             image, imgmeta = await imgutil.aload_image(image_url)
         
         try:
@@ -1022,7 +1022,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
         image = None
         if imgurl is not None:
-            image_url = imgutil.clean_image_url(imgurl, check_tenor=False)
+            image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=False)
             image, imgmeta = await imgutil.aload_image(image_url, result_type=None)
         
         try:
@@ -1110,7 +1110,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             return await ctx.send(f'{self.igen.model_name} does not support `/reanimate`', ephemeral=True)
         # this may be passed a url string in drawUI config
         try:
-            image_url = imgutil.clean_image_url(imgurl, check_tenor=True)
+            image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=True)
         except ValueError:
             return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
         
