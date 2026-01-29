@@ -1171,11 +1171,11 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         
         pag_config = {'enabled':False, 'scale':None, 'layers':None}
         if pag_scale:
-            if 'page_scale' not in self.pipe_xkwgs:
+            if 'pag_scale' not in self.pipe_xkwgs:
                 pag_kwargs = {'enable_pag':True, 'pag_applied_layers':pag_applied_layers,}
-                self.base: StableDiffusionXLPAGPipeline = AutoPipelineForText2Image.from_pipe(self.base, **pag_kwargs,)
+                self.base: StableDiffusionXLPAGPipeline = AutoPipelineForText2Image.from_pipe(self.base, **pag_kwargs, torch_dtype=self.dtype)
                 # self.basei2i: StableDiffusionXLPAGImg2ImgPipelinePatch = AutoPipelineForImage2Image.from_pipe(self.basei2i, **pag_kwargs,)
-                self.basei2i: StableDiffusionXLPAGImg2ImgPipeline = StableDiffusionXLPAGImg2ImgPipeline.from_pipe(self.basei2i, pag_applied_layers=pag_applied_layers,)
+                self.basei2i: StableDiffusionXLPAGImg2ImgPipeline = StableDiffusionXLPAGImg2ImgPipeline.from_pipe(self.basei2i, pag_applied_layers=pag_applied_layers, torch_dtype=self.dtype,)
                 if self.offload:
                     self.base.enable_model_cpu_offload()
                     self.basei2i.enable_model_cpu_offload()
@@ -1189,8 +1189,8 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
 
         elif disable_on_zero:
             self.pipe_xkwgs.pop('pag_scale', None)
-            self.base = AutoPipelineForText2Image.from_pipe(self.base, enable_pag=False)
-            self.basei2i = AutoPipelineForImage2Image.from_pipe(self.basei2i, enable_pag=False,)
+            self.base = AutoPipelineForText2Image.from_pipe(self.base, enable_pag=False, torch_dtype=self.dtype)
+            self.basei2i = AutoPipelineForImage2Image.from_pipe(self.basei2i, enable_pag=False, torch_dtype=self.dtype,)
             if self.offload:
                 self.base.enable_model_cpu_offload()
                 self.basei2i.enable_model_cpu_offload()
