@@ -298,23 +298,18 @@ def rebatch_prompt_embs(emb_prompts:dict[str, torch.Tensor], batch_size:int):
             
     return rebatched_prombs
 
-def generator_batch(seed:int|list[int]|None, num_seeds:int, device='cpu', all_unique:bool=False):
+def generator_batch(seed: int|list[int]|None, num_seeds:int, device='cpu', all_unique:bool=False):
     if seed is None:
         return None
     
     if isinstance(seed, int):
-        seeds = [seed]*num_seeds
-    
+        seeds = [seed+i for i in range(num_seeds)] if all_unique else [seed]*num_seeds
     else:
         seeds = seed
         # given the exact same params, you can use 1 generator to reproduce. 
         # But if you change how you iterate over inputs, outputs with differ. This controls for that.
-        
         if (unqlen := len(set(seeds))) != num_seeds:
             raise ValueError(f'If `seed` is a list of ints, it must have `num_seeds` ({num_seeds}) unique elements but only ({unqlen}) unique seeds passed')
-        #seeds = seed
-        #seeds = [seed + i for i in range(batch_size)]
-
 
     return [torch.Generator(device=device).manual_seed(s) for s in seeds]
 
