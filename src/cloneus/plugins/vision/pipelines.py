@@ -1504,7 +1504,7 @@ class FluxBase(SingleStagePipeline):
         self.max_seq_len = 512
         
     @torch.inference_mode()
-    def _load_text_encoder2(self, source: typing.Literal['nunchaku','unchained','default','default_nf4'] = 'default'):
+    def _load_text_encoder2(self, source: typing.Literal['nunchaku','unchained','default','default_nf4'] = 'default_nf4'):
         match source:
             case 'nunchaku':
                 text_encoder_2 = NunchakuT5EncoderModel.from_pretrained(
@@ -1520,14 +1520,14 @@ class FluxBase(SingleStagePipeline):
         
                 text_encoder_2.load_state_dict(sft.load_file(sd_path), assign=True)
                 text_encoder_2 = text_encoder_2.to(dtype=torch.bfloat16)
-            case 'default' | 'default_nf4':
+            case 'default_nf4':
                 quant_config = TransBitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_compute_dtype=torch.bfloat16)
                 text_encoder_2 = AutoModelForTextEncoding.from_pretrained(
-                    self.model_path,
-                    subfolder = 'text_encoder_2',
-                    low_cpu_mem_usage = True,
-                    dtype=torch.bfloat16,
-                    quantization_config = (quant_config if source.endswith('nf4') else None),
+                    'diffusers/t5-nf4', low_cpu_mem_usage = True, dtype=torch.bfloat16, quantization_config = quant_config,
+                )
+            case 'default':
+                text_encoder_2 = AutoModelForTextEncoding.from_pretrained(
+                    self.model_path, subfolder = 'text_encoder_2', low_cpu_mem_usage = True, dtype=torch.bfloat16,
                 )
             case _:
                 raise ValueError(f'unknown source: {source!r}')
