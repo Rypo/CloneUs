@@ -412,7 +412,7 @@ class DeepCacheMixin:
             else: self.dc_base.disable()
             self.dc_enabled = enable
 
-    
+#region Base Class 
 class SingleStagePipeline:
     def __init__(self, 
                  model_name: str, 
@@ -464,8 +464,6 @@ class SingleStagePipeline:
         return self.base(*args, **kwargs, **self.pipe_xkwgs)
     
     def i2i(self, *args, **kwargs):
-        kwargs.pop('height',None)
-        kwargs.pop('width', None)
         return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
     
     def pbar_config(self, **kwargs):
@@ -584,24 +582,26 @@ class SingleStagePipeline:
     def dc_fastmode(self, enable:bool, img2img=False):
         pass
 
-    @abstractmethod  
+    @torch.inference_mode()
     def compile_pipeline(self):
-        raise NotImplementedError('Requires subclass override')
-    
-
-    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
-        dims_opts = {
-            'tiny': [(512,512), (512,640), (640,512)], # 1.25
-            'small': [(640,640), (512,768), (768,512)], # 1.5
-            'med': [(768,768), (640,896), (896,640)], # 1.4
-            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
-        }
+        # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
+        # - https://huggingface.co/docs/diffusers/optimization/torch2.0#torchcompile
+        # https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3#using-torch-compile-to-speed-up-inference
+        torch_compile_flags()
+        self.base.transformer.to(memory_format=torch.channels_last)
+        self.base.vae.to(memory_format=torch.channels_last)
+        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
+        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
         
-        #batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2} # With out vae_slicing
-        batch_sizes = {'tiny': 24, 'small': 16, 'med': 12, 'full': 4} # With vae_slicing # 12.6gb, 13.5gb, 15gb -- NO BLOCK. (until converting gif)
-        #batch_sizes = {'tiny': 32, 'small': 20, 'med': 16, 'full': 6} # With vae_slicing # 14gb, X, X -- 13.5gb, X, X heatbeat blocked small, 
-        #batch_sizes = {'tiny': 24, 'small': 32, 'med': 24, 'full': 16} # With vae_slicing # 17gb, 16.5gb, 20gb -- heartbeat blocked all 3
-        return (dims_opts[imsize], batch_sizes[imsize])
+        for _ in range(3):
+            _ = self.t2i("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
+        self.is_compiled = True
+        torch.compiler.reset()
+    
+    
+    @abstractmethod
+    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ) -> tuple[list[tuple[int, int]], int]:
+        raise NotImplementedError('Requires subclass override')
 
     def preprocess_prompts(self, prompt:str, negative_prompt:str = None):
         if negative_prompt is None:
@@ -1072,7 +1072,7 @@ class SingleStagePipeline:
         
         if two_stage:
             latents=torch.cat(latents, 0)
-            raw_image_latents = self.encode_images(resized_images, steps, astrength, aseed)
+            raw_image_latents = self.encode_images(resized_images, seed = aseed)
             latent_soft_mask = self._prepare_soft_mask(resized_images, size=raw_image_latents.shape[-2:]).to(raw_image_latents)
             latent_blend = self._interpolate_latents(raw_image_latents, latents, latent_soft_mask, dim_out, time_blend=True, keep_dims=True)
             
@@ -1107,9 +1107,8 @@ class SingleStagePipeline:
     
     @torch.inference_mode()
     def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
-        # flux will override this
         blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
-        return blended_latents
+        return self.decode_latents(blended_latents) # back to images by default
 
   
     @abstractmethod
@@ -1119,12 +1118,17 @@ class SingleStagePipeline:
     @abstractmethod
     def decode_latents(self, latents, **kwargs):
         raise NotImplementedError('Requires subclass override')
-    
+#endregion
 
-
+#region SDXL
 class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sdxl')
+
+    def i2i(self, *args, **kwargs):
+        kwargs.pop('height',None)
+        kwargs.pop('width', None) # sdxl image-to-image does not accept height or width input
+        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
         
     def load_pipeline(self):
         _pipe_kwargs = dict(torch_dtype=self.dtype, variant="fp16", use_safetensors=True, add_watermarker=False, )
@@ -1151,7 +1155,7 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
 
         if self.offload:
             # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
-            # https://huggingface.co/docs/diffusers/using-diffusers/loading?pipelines=specific+pipeline#:~:text=Some%20pipeline%20methods
+            # https://huggingface.co/docs/diffusers/v0.36.0/en/using-diffusers/loading#:~:text=reapply%20these%20methods
             self.base.enable_model_cpu_offload()
             self.basei2i.enable_model_cpu_offload()
         
@@ -1210,6 +1214,24 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         #batch_sizes = {'tiny': 32, 'small': 20, 'med': 16, 'full': 6} # With vae_slicing # 14gb, X, X -- 13.5gb, X, X heatbeat blocked small, 
         #batch_sizes = {'tiny': 24, 'small': 32, 'med': 24, 'full': 16} # With vae_slicing # 17gb, 16.5gb, 20gb -- heartbeat blocked all 3
         return (dims_opts[imsize], batch_sizes[imsize])
+    
+    @torch.inference_mode()
+    def compile_pipeline(self):
+        # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
+        # Some benefit from arg dynamic = True out of the box, some don't 
+        # https://huggingface.co/docs/diffusers/optimization/fp16#dynamic-shape-compilation
+
+        torch_compile_flags()
+        torch.fx.experimental._config.use_duck_shape = False
+        self.base.unet.to(memory_format=torch.channels_last)
+        self.base.vae.to(memory_format=torch.channels_last)
+        self.base.unet = torch.compile(self.base.unet, mode="max-autotune", fullgraph=True, dynamic=True)
+        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True, dynamic=True)
+        
+        for _ in range(3):
+            _ = self.t2i("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
+        self.is_compiled = True
+        torch.compiler.reset()
 
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
@@ -1282,7 +1304,12 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
-
+    
+    @torch.inference_mode()
+    def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
+        blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
+        return blended_latents # SDXL can opperate on raw latents, no decode required
+    
     @torch.inference_mode()
     def generate_frames(self, prompt: str, 
                             image: Image.Image|None = None, 
@@ -1357,7 +1384,9 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
             #image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
         yield image_frames
         release_memory()        
+#endregion
 
+# region SD3
 class SD3Base(SingleStagePipeline):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sd35')
@@ -1397,7 +1426,18 @@ class SD3Base(SingleStagePipeline):
         
         self.is_ready = True
     
+    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
+        dims_opts = {
+            'tiny': [(512,512), (512,640), (640,512)], # 1.25
+            'small': [(640,640), (512,768), (768,512)], # 1.5
+            'med': [(768,768), (640,896), (896,640)], # 1.4
+            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
+        }
         
+        batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
+
+        return (dims_opts[imsize], batch_sizes[imsize])
+
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
         prompt = [prompt]
@@ -1412,22 +1452,6 @@ class SD3Base(SingleStagePipeline):
         
         torch.cuda.empty_cache()
         return dict(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds, negative_pooled_prompt_embeds=negative_pooled_prompt_embeds) # .bfloat16()
-    
-    @torch.inference_mode()
-    def compile_pipeline(self):
-        # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
-        # - https://huggingface.co/docs/diffusers/optimization/torch2.0#torchcompile
-        # https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3#using-torch-compile-to-speed-up-inference
-        torch_compile_flags()
-        self.base.transformer.to(memory_format=torch.channels_last)
-        self.base.vae.to(memory_format=torch.channels_last)
-        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
-        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
-        
-        for _ in range(3):
-            _ = self.t2i("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
-        self.is_compiled = True
-        torch.compiler.reset()
     
     @torch.inference_mode()
     def encode_images(self, images:list[Image.Image], seed:int=42):
@@ -1461,8 +1485,9 @@ class SD3Base(SingleStagePipeline):
         image = self.basei2i.image_processor.postprocess(image, output_type='pil')
         
         return image
+#endregion
 
-
+#region Flux
 class FluxBase(SingleStagePipeline):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='flux')
@@ -1470,10 +1495,6 @@ class FluxBase(SingleStagePipeline):
         self.adapter_paths = {}
         self.variant = model_name.split('_')[-1] # flux_schell,flux_dev,flux_* -> *
         self.max_seq_len = 512
-    
-    def i2i(self, *args, **kwargs):
-        # because latents shape cannot be reliably inferred, height and width are required for flux img2img
-        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
     
     def unload_pipeline(self):
         components = ['text_encoder','text_encoder_2','transformer','vae']
@@ -1625,27 +1646,11 @@ class FluxBase(SingleStagePipeline):
     
     
     @torch.inference_mode()
-    def compile_pipeline(self):
-        # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
-        # - https://huggingface.co/docs/diffusers/optimization/torch2.0#torchcompile
-        # https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_3#using-torch-compile-to-speed-up-inference
-        torch_compile_flags()
-        self.base.transformer.to(memory_format=torch.channels_last)
-        self.base.vae.to(memory_format=torch.channels_last)
-        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
-        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
-        
-        for _ in range(3):
-            _ = self.t2i("a photo of a cat holding a sign that says hello world")#, num_inference_steps=4, guidance_scale=self.config.guidance_scale)
-        self.is_compiled = True
-        torch.compiler.reset()
-    
-    @torch.inference_mode()
     def encode_images(self, images:list[Image.Image], seed:int=42):
         nframes = len(images)
         w,h = images[0].size
-        generators = generator_batch(seed, nframes, device='cpu')
-        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(self.basei2i.device, self.basei2i.dtype)
+        generators = generator_batch(seed, nframes, device='cuda')
+        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(self.basei2i.vae.device, self.basei2i.vae.dtype)
         latents = self.basei2i._encode_vae_image(image=proc_images, generator=generators)
         
         release_memory()
@@ -1665,8 +1670,8 @@ class FluxBase(SingleStagePipeline):
         if out_latents.ndim == 3 and out_latents.shape[-1] == 64:
             out_latents = self.basei2i._unpack_latents(out_latents, img_h, img_w, self.basei2i.vae_scale_factor)
         blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
-        packed_blended_latents = self._repack_latents(blended_latents, img_h, img_w)
-        return packed_blended_latents
+
+        return blended_latents
     
     @torch.inference_mode()
     def decode_latents(self, latents, height:int, width:int):
@@ -1684,8 +1689,9 @@ class FluxBase(SingleStagePipeline):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
+#endregion
 
-
+#region Qwen Image
 class QwenImageBase(SingleStagePipeline):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None, 
                  num_inference_steps = 4, rank=32):
@@ -1803,21 +1809,6 @@ class QwenImageBase(SingleStagePipeline):
         return prompt_encodings
     
     @torch.inference_mode()
-    def compile_pipeline(self):
-        # # calling the compiled pipeline on a different image size triggers compilation again which can be expensive.
-        torch_compile_flags()
-        self.base.transformer.to(memory_format=torch.channels_last)
-        self.base.vae.to(memory_format=torch.channels_last)
-        self.base.transformer = torch.compile(self.base.transformer, mode="max-autotune", fullgraph=True)
-        self.base.vae.decode = torch.compile(self.base.vae.decode, mode="max-autotune", fullgraph=True)
-        
-        for _ in range(3):
-            _ = self.t2i("a photo of a cat holding a sign that says hello world")
-        self.is_compiled = True
-        torch.compiler.reset()
-
-    
-    @torch.inference_mode()
     def decode_latents(self, latents, height, width, **kwargs):
         # https://github.com/huggingface/diffusers/blob/6f1042e36cd588a7b66498f45c3bb7085e4fa395/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_img2img.py#L852
         if isinstance(latents, list):
@@ -1839,8 +1830,9 @@ class QwenImageBase(SingleStagePipeline):
         image = self.basei2i.image_processor.postprocess(image, output_type='pil')
         
         return image
+#endregion
 
-
+#region Qwen Edit
 class QwenEditBase(QwenImageBase):
     CONDITION_IMAGE_SIZE = 384 * 384
     VAE_IMAGE_SIZE = 1024 * 1024
