@@ -69,7 +69,7 @@ from transformers import Qwen2_5_VLForConditionalGeneration, T5Model, T5EncoderM
 
 from optimum import quanto
 from accelerate import cpu_offload,init_empty_weights
-from accelerate.utils import BnbQuantizationConfig, load_and_quantize_model
+from accelerate.utils import release_memory
 from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
 
 from transformers import AutoConfig, AutoModelForTextEncoding
@@ -85,7 +85,7 @@ from cloneus import cpaths
 from . import quantops,specialists,loraops,interpolation
 from .lpw_sdxl import get_weighted_text_embeddings_sdxl
 
-from cloneus.utils.common import release_memory, batched
+from cloneus.utils.common import batched # release_memory
 
 logger = logging.getLogger(__name__)
 SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
@@ -478,16 +478,23 @@ class SingleStagePipeline:
         raise NotImplementedError('Requires subclass override')
     
     def unload_pipeline(self):
-        self.base = None
-        self.basei2i = None
-        self.compeler = None
-        self.upsampler = None
-        self.florence = None
-        self.interpolator = None
-        self.vqa = None
-        self.initial_scheduler_config = None
-        self.scheduler_kwargs = None
-        release_memory()
+        if self.base:
+            for comp in self.base.components: 
+                setattr(self.base, comp, None)
+        if self.basei2i:
+            for comp in self.basei2i.components: 
+                setattr(self.basei2i, comp, None)
+        (
+            self.base, self.basei2i, 
+            self.compeler, self.upsampler, self.florence, self.interpolator, self.vqa, 
+            self.initial_scheduler_config, self.scheduler_kwargs
+        ) = release_memory(
+             self.base, self.basei2i, 
+             self.compeler, self.upsampler, self.florence, self.interpolator, self.vqa, 
+             self.initial_scheduler_config, self.scheduler_kwargs
+        )
+        # The ugliest possible way to set a bunch of things to None
+
         self.is_ready = False
         if self.is_compiled:
             torch_compile_flags(restore_defaults=True)
@@ -1495,18 +1502,7 @@ class FluxBase(SingleStagePipeline):
         self.adapter_paths = {}
         self.variant = model_name.split('_')[-1] # flux_schell,flux_dev,flux_* -> *
         self.max_seq_len = 512
-    
-    def unload_pipeline(self):
-        components = ['text_encoder','text_encoder_2','transformer','vae']
-        if self.is_ready:
-            #self.base.to('cpu')
-            for comp in components:
-                #getattr(self.base, comp).to('cpu')
-                setattr(self.base, comp, None)
-                setattr(self.basei2i, comp, None)
-            
-        super().unload_pipeline()
-    
+        
     @torch.inference_mode()
     def _load_text_encoder2(self, source: typing.Literal['nunchaku','unchained','default','default_nf4'] = 'default'):
         match source:
@@ -1728,16 +1724,6 @@ class QwenImageBase(SingleStagePipeline):
         }
         return FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
 
-    def unload_pipeline(self):
-        if self.is_ready:
-            #self.base.to('cpu')
-            components = self.base.components.keys()
-            for comp in components:
-                #getattr(self.base, comp).to('cpu')
-                setattr(self.base, comp, None)
-                setattr(self.basei2i, comp, None)
-            
-        super().unload_pipeline()
 
     @torch.inference_mode()
     def load_pipeline(self):
