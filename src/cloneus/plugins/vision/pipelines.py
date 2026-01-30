@@ -1508,7 +1508,7 @@ class FluxBase(SingleStagePipeline):
         match source:
             case 'nunchaku':
                 text_encoder_2 = NunchakuT5EncoderModel.from_pretrained(
-                    "nunchaku-tech/nunchaku-t5/awq-int4-flux.1-t5xxl.safetensors", 
+                    "nunchaku-ai/nunchaku-t5/awq-int4-flux.1-t5xxl.safetensors", 
                     torch_dtype=torch.bfloat16, 
                     offload=self.offload
                 )
@@ -1537,7 +1537,7 @@ class FluxBase(SingleStagePipeline):
 
     @torch.inference_mode()
     def load_pipeline(self):
-        transformer_model_path = f"nunchaku-tech/nunchaku-flux.1-dev/svdq-{get_precision()}_r32-flux.1-dev.safetensors"
+        transformer_model_path = f"nunchaku-ai/nunchaku-flux.1-dev/svdq-{get_precision()}_r32-flux.1-dev.safetensors"
         transformer = NunchakuFluxTransformer2dModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)
 
         self.base = FluxPipeline.from_pretrained(
@@ -1740,8 +1740,7 @@ class QwenImageBase(SingleStagePipeline):
         
         scheduler = self._scheduler_get()
 
-        
-        transformer_model_path = f"nunchaku-tech/nunchaku-qwen-image/svdq-int4_r{self.rank}-qwen-image-lightningv1.0-{self.num_inference_steps}steps.safetensors"
+        transformer_model_path = f"nunchaku-ai/nunchaku-qwen-image/svdq-int4_r{self.rank}-qwen-image-lightningv1.0-{self.num_inference_steps}steps.safetensors"
         
         transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)#, device_map="auto", low_cpu_mem_usage = True, )
 
@@ -1866,7 +1865,8 @@ class QwenEditBase(QwenImageBase):
         
         scheduler = self._scheduler_get()
 
-        transformer_model_path = (f"nunchaku-tech/nunchaku-qwen-image-edit-2509/lightning-251115/svdq-{get_precision()}_r{self.rank}-qwen-image-edit-2509-lightning-{self.num_inference_steps}steps-251115.safetensors")
+        transformer_model_path = (f"nunchaku-ai/nunchaku-qwen-image-edit-2509/lightning-251115/svdq-{get_precision()}_r{self.rank}-qwen-image-edit-2509-lightning-{self.num_inference_steps}steps-251115.safetensors")
+        # transformer_model_path = (f"QuantFunc/Nunchaku-Qwen-Image-EDIT-2511/nunchaku_qwen_image_edit_2511_balance_{get_precision()}.safetensors")
         transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)
         transformer = transformer.eval().requires_grad_(False)
 
