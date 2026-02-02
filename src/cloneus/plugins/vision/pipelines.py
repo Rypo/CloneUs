@@ -29,9 +29,6 @@ from diffusers import (
     StableDiffusionXLImg2ImgPipeline, 
     StableDiffusionXLPAGPipeline,
     StableDiffusionXLPAGImg2ImgPipeline,
-    StableDiffusion3Pipeline,
-    StableDiffusion3Img2ImgPipeline,
-    SD3Transformer2DModel,
     UNet2DConditionModel, 
     DPMSolverMultistepScheduler, 
     DPMSolverSinglestepScheduler,
@@ -45,7 +42,6 @@ from diffusers import (
     AutoencoderKL,
     AnimateDiffSDXLPipeline,
     BitsAndBytesConfig,
-    StableDiffusion3PAGPipeline,
     QwenImagePipeline, 
     QwenImageImg2ImgPipeline, 
     QwenImageTransformer2DModel, 
@@ -1391,107 +1387,6 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
             #image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
         yield image_frames
         release_memory()        
-#endregion
-
-# region SD3
-class SD3Base(SingleStagePipeline):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sd35')
-        self.max_seq_len = 512
-    
-    @torch.inference_mode()
-    def load_pipeline(self):
-        if self.model_path.endswith('.safetensors'):
-            self.base = StableDiffusion3Pipeline.from_single_file(self.model_path, torch_dtype=self.dtype,  use_safetensors=True,)
-            # SD3Transformer2DModel.from_single_file
-        else:
-            quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
-            transformer = SD3Transformer2DModel.from_pretrained(self.model_path, subfolder="transformer", quantization_config = quant_config, torch_dtype=self.dtype)
-            
-            self.base: StableDiffusion3Pipeline =  StableDiffusion3Pipeline.from_pretrained(
-                self.model_path, transformer=transformer, torch_dtype=self.dtype, use_safetensors=True,
-            )
-        
-        # self.load_lora('sd35Fusion_8Steps.safetensors', 1.0)
-        device = torch.device('cuda')
-        if not self.offload:
-            self.base = self.base.to(device)
-            self.base.text_encoder_3 = self.base.text_encoder_3.to(device, self.dtype)
-            self.base.text_encoder_3 = cpu_offload(self.base.text_encoder_3, execution_device = device)
-
-        self.base.vae.enable_slicing()
-
-        self._scheduler_init()
-        self.load_loras()
-
-        self.basei2i: StableDiffusion3Img2ImgPipeline = StableDiffusion3Img2ImgPipeline.from_pipe(self.base,)
-
-        
-        if self.offload:
-            self.base.enable_model_cpu_offload()
-            self.basei2i.enable_model_cpu_offload()
-        
-        self.is_ready = True
-    
-    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
-        dims_opts = {
-            'tiny': [(512,512), (512,640), (640,512)], # 1.25
-            'small': [(640,640), (512,768), (768,512)], # 1.5
-            'med': [(768,768), (640,896), (896,640)], # 1.4
-            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
-        }
-        
-        batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
-
-        return (dims_opts[imsize], batch_sizes[imsize])
-
-    @torch.inference_mode()
-    def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
-        prompt = [prompt]
-        if negative_prompt is not None:
-            negative_prompt = [negative_prompt]
-
-
-        device = torch.device('cuda')
-        (prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds) = self.base.encode_prompt(
-            prompt=prompt, prompt_2=None, prompt_3=None, negative_prompt=negative_prompt, num_images_per_prompt=batch_size,
-            device=device, lora_scale=kwargs.get('lora_scale'), clip_skip=kwargs.get('clip_skip'), max_sequence_length=self.max_seq_len)
-        
-        torch.cuda.empty_cache()
-        return dict(prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, pooled_prompt_embeds=pooled_prompt_embeds, negative_pooled_prompt_embeds=negative_pooled_prompt_embeds) # .bfloat16()
-    
-    @torch.inference_mode()
-    def encode_images(self, images:list[Image.Image], seed:int=42):
-        nframes = len(images)
-        w,h = images[0].size
-        
-        gseed = generator_batch(seed, nframes, 'cpu') #[torch.Generator('cpu').manual_seed(seed) for _ in range(nframes)]
-        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(dtype=torch.float32)
-        
-        #latents = self.basei2i._encode_vae_image(image=proc_images, generator=gseed)
-        #img_encodings = self.basei2i.vae.encode(proc_images)
-        # NOTE: this might be wrong
-        latents = [
-            retrieve_latents(self.basei2i.vae.encode(proc_images), generator=gseed[0])# for i in range(batch_size)
-        ]
-        latents = torch.cat(latents, dim=0)
-
-        latents = (latents - self.basei2i.vae.config.shift_factor) * self.basei2i.vae.config.scaling_factor
-        #latents = self.basei2i.prepare_latents(proc_images, timestep=None, batch_size=1, num_images_per_prompt=nframes, dtype=torch.bfloat16, device=0, generator=gseed, add_noise=False)
-        release_memory()
-        return latents
-    
-    @torch.inference_mode()
-    def decode_latents(self, latents, **kwargs):
-        # https://github.com/huggingface/diffusers/blob/f63c12633f154c2a1d79c17f4238fb073133652c/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py#L924
-        if isinstance(latents, list):
-            latents = torch.cat(latents, dim=0)
-        
-        latents = (latents / self.basei2i.vae.config.scaling_factor) + self.basei2i.vae.config.shift_factor
-        image = self.basei2i.vae.decode(latents, return_dict=False)[0]
-        image = self.basei2i.image_processor.postprocess(image, output_type='pil')
-        
-        return image
 #endregion
 
 #region Flux
