@@ -72,6 +72,12 @@ class BaseQwenEditManager(ImageGenManager, pipelines.QwenEditBase):
                  num_inference_steps = 8, rank=128):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, num_inference_steps = num_inference_steps, rank = rank)
 
+class BaseZImageManager(ImageGenManager, pipelines.ZImageBase):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
+                 rank = 256):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, rank = rank)
+
+
 class SDXLTurboManager(BaseSDXLManager):
     def __init__(self, offload=False):
         super().__init__(
@@ -219,6 +225,25 @@ class QwenEditManager(BaseQwenEditManager):
         )
 
 
+class ZImageTurboManager(BaseZImageManager):
+    def __init__(self, offload=False):
+        rank = 256  # Use 32 for faster sampling; 256 (INT4 only) for best quality
+        super().__init__(
+            model_name = 'zimg_turbo',
+            model_path = 'Tongyi-MAI/Z-Image-Turbo',
+            config = DiffusionConfig(
+                steps = CfgItem(9, bounds=(5,17)),
+                guidance_scale = CfgItem(0.0, locked=True), 
+                strength = CfgItem(0.60, bounds=(0.6, 0.9)),
+                img_dims = [(1024,1024), (832,1216), (1216,832)],
+                # img_dims = [(1024,1024), (896,1152), (1152,896)],
+                locked=['refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+            init_loras = None,
+            rank = rank,
+        )
+
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
@@ -248,5 +273,9 @@ AVAILABLE_MODELS = {
     'qwen_edit': {
         'manager': QwenEditManager,
         'desc': '⚡Qwen Image Edit' # (XLg, avg)
+    },
+    'zimg_turbo': {
+        'manager': ZImageTurboManager,
+        'desc': 'Z-Image Turbo' # (M, fast)
     }
 }

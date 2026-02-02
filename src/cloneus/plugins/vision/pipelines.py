@@ -39,15 +39,15 @@ from diffusers import (
     FluxPipeline, 
     FluxTransformer2DModel,
     FluxImg2ImgPipeline,
-    AutoencoderKL,
-    AnimateDiffSDXLPipeline,
-    BitsAndBytesConfig,
     QwenImagePipeline, 
     QwenImageImg2ImgPipeline, 
     QwenImageTransformer2DModel, 
-    QwenImageEditPlusPipeline
+    QwenImageEditPlusPipeline,
+    ZImageTransformer2DModel,
+    ZImagePipeline,
+    ZImageImg2ImgPipeline
 )
-from unsloth import FastModel
+
 from diffusers.quantizers import PipelineQuantizationConfig
 from diffusers.quantizers.quantization_config import GGUFQuantizationConfig, QuantoConfig, TorchAoConfig, BitsAndBytesConfig as DiffuBitsAndBytesConfig
 from diffusers.schedulers import AysSchedules
@@ -56,12 +56,12 @@ from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img 
 from diffusers.hooks import apply_group_offloading
 from huggingface_hub import hf_hub_download, snapshot_download
 
-from nunchaku import NunchakuFluxTransformer2dModel, NunchakuT5EncoderModel, NunchakuQwenImageTransformer2DModel
+from nunchaku import NunchakuFluxTransformer2dModel, NunchakuT5EncoderModel, NunchakuQwenImageTransformer2DModel, NunchakuZImageTransformer2DModel
 from nunchaku.lora.flux.compose import compose_lora
 from nunchaku.utils import get_precision
 
 from transformers.image_processing_utils import select_best_resolution
-from transformers import Qwen2_5_VLForConditionalGeneration, T5Model, T5EncoderModel, T5PreTrainedModel, BitsAndBytesConfig as TransBitsAndBytesConfig
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3ForCausalLM, T5Model, T5EncoderModel, T5PreTrainedModel, BitsAndBytesConfig as TransBitsAndBytesConfig
 
 from optimum import quanto
 from accelerate import cpu_offload,init_empty_weights
@@ -76,6 +76,7 @@ from PIL import Image
 from spandrel import ImageModelDescriptor, ModelLoader
 # from compel import Compel, ReturnedEmbeddingsType
 from compel import CompelForSDXL, CompelForFlux # alternative: https://github.com/xhinker/sd_embed
+from unsloth import FastModel, FastVisionModel, FastLanguageModel # Do NOT import before transformers / hf_libs - it prevents unloading models
 
 from cloneus import cpaths
 from . import quantops,specialists,loraops,interpolation
@@ -2111,3 +2112,138 @@ class QwenEditBase(QwenImageBase):
             
         yield image_frames
         release_memory()
+#endregion
+
+#region Z-Image
+class ZImageBase(SingleStagePipeline):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
+                 rank = 256):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='zimg')
+        self.rank = rank
+        self.max_seq_len = 512
+    
+    @torch.inference_mode()
+    def load_pipeline(self):
+        pipeline_quant_config = PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16, 'bnb_4bit_use_double_quant': False},
+            components_to_quantize=["text_encoder", ], #"transformer",],
+        ) if not self.offload else None
+        
+        text_encoder,tokenizer = FastLanguageModel.from_pretrained(
+            "unsloth/Qwen3-4B-unsloth-bnb-4bit",
+            dtype=torch.bfloat16,
+            load_in_4bit=True,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+            low_cpu_mem_usage = True,
+            quantization_config = TransBitsAndBytesConfig(**pipeline_quant_config.quant_kwargs, ),
+        )
+        
+        text_encoder: Qwen3ForCausalLM = FastLanguageModel.for_inference(text_encoder)
+        text_encoder = text_encoder.eval().requires_grad_(False)
+        text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
+
+        
+        transformer_model_path = f"nunchaku-ai/nunchaku-z-image-turbo/svdq-{get_precision()}_r{self.rank}-z-image-turbo.safetensors"
+        transformer = NunchakuZImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16,)
+        transformer = transformer.eval().requires_grad_(False)
+            
+        self.base: ZImagePipeline =  ZImagePipeline.from_pretrained(self.model_path, torch_dtype=self.dtype, transformer=transformer, text_encoder=text_encoder, )#quantization_config = pipeline_quant_config)
+        
+        self._scheduler_init()
+        self.load_loras()
+
+        self.basei2i: ZImageImg2ImgPipeline = ZImageImg2ImgPipeline.from_pipe(self.base, transformer=self.base.transformer, text_encoder=self.base.text_encoder, torch_dtype=self.dtype)
+        
+        for pipe in (self.base, self.basei2i):
+            pipe.enable_xformers_memory_efficient_attention()
+            pipe.transformer.set_attention_backend("xformers") # "flash"
+            # pipe.text_encoder.set_attn_implementation('flash_attention_2')
+            pipe.vae.enable_slicing()
+            if self.offload:
+                pipe.enable_model_cpu_offload()
+        
+        self.is_ready = True
+
+    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
+        dims_opts = {
+            'tiny': [(768,768), (640,896), (896,640)], # 1.4
+            'small': [(768,768), (640,896), (896,640)], # 1.4
+            'med': [(768,768), (640,896), (896,640)], # 1.4
+            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
+        }
+        
+        batch_sizes = {'tiny': 1, 'small': 1, 'med': 1, 'full': 1} # Batch > 1 crashes with "Assertion `rotary_emb.shape[0] * rotary_emb.shape[1] == M'"
+
+        return (dims_opts[imsize], batch_sizes[imsize])
+    
+
+
+    @torch.inference_mode()
+    def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
+        prompt = [prompt]
+        if negative_prompt is not None:
+            negative_prompt = [negative_prompt]
+
+        device = torch.device('cuda')
+        prompt_embeds, negative_prompt_embeds = self.base.encode_prompt(prompt=prompt, device=device, negative_prompt=negative_prompt, max_sequence_length=self.max_seq_len,)#num_images_per_prompt=batch_size,
+        
+        prompt_embeds = [pe for pe in prompt_embeds for _ in range(batch_size)]
+        if negative_prompt_embeds:
+            negative_prompt_embeds = [npe for npe in negative_prompt_embeds for _ in range(batch_size)]
+        
+        prompt_encodings = dict(prompt_embeds=torch.stack(prompt_embeds, 0), negative_prompt_embeds=torch.stack(negative_prompt_embeds, 0))
+        torch.cuda.empty_cache()
+        return prompt_encodings
+    
+    
+    @torch.inference_mode()
+    def encode_images(self, images:list[Image.Image], seed:int=42):
+        nframes = len(images)
+        w,h = images[0].size
+        
+        generator = generator_batch(seed, nframes, 'cuda') #[torch.Generator('cpu').manual_seed(seed) for _ in range(nframes)]
+        device = torch.device('cuda')
+        num_channels_latents = self.basei2i.transformer.in_channels
+
+        batch_size = 1 * nframes
+        #actual_batch_size = batch_size * nframes
+
+        image = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(device=device, dtype=self.dtype)
+
+        # Encode the input image
+        if image.shape[1] == num_channels_latents:
+            image_latents = image
+        else:
+            if isinstance(generator, list):
+                image_latents = torch.cat([retrieve_latents(self.basei2i.vae.encode(image[i : i + 1]), generator=generator[i]) for i in range(image.shape[0])], dim = 0)
+            else:
+                image_latents = retrieve_latents(self.basei2i.vae.encode(image), generator=generator)
+
+            # Apply scaling (inverse of decoding: decode does latents/scaling_factor + shift_factor)
+            image_latents = (image_latents - self.basei2i.vae.config.shift_factor) * self.basei2i.vae.config.scaling_factor
+        
+        # Handle batch size expansion
+        if batch_size > image_latents.shape[0]: 
+            if batch_size % image_latents.shape[0] == 0:
+                image_latents = torch.cat([image_latents] * (batch_size // image_latents.shape[0]), dim=0) # additional_image_per_prompt = batch_size//image_latents.shape[0]
+            else:
+                raise ValueError(f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts.")
+        
+        release_memory()
+        return image_latents
+    
+    @torch.inference_mode()
+    def decode_latents(self, latents, **kwargs):
+        # https://github.com/huggingface/diffusers/blob/f6b6a7181eb44f0120b29cd897c129275f366c2a/src/diffusers/pipelines/z_image/pipeline_z_image_img2img.py#L696
+        if isinstance(latents, list):
+            latents = torch.cat(latents, dim=0)
+        
+        latents = latents.to(self.basei2i.vae.dtype)
+        latents = (latents / self.basei2i.vae.config.scaling_factor) + self.basei2i.vae.config.shift_factor
+        image = self.basei2i.vae.decode(latents, return_dict=False)[0]
+        image = self.basei2i.image_processor.postprocess(image, output_type='pil')
+        
+        return image
+#endregion

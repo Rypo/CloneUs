@@ -228,7 +228,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # self.igen = imgman.FluxTurboManager(offload=False)
         # self.igen = imgman.JuggernautRagnarokManager(offload=False)
         # self.igen = imgman.QwenImageManager(offload=True)
-        self.igen = imgman.QwenEditManager(offload=True)
+        # self.igen = imgman.QwenEditManager(offload=True)
+        self.igen = imgman.ZImageTurboManager(offload=False)
 
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
