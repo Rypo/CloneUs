@@ -114,7 +114,7 @@ class Autocorrect:
 
 class SetImageConfig:
     bot: BotUs
-    igen: imgman.BaseSDXLManager|imgman.BaseFluxManager|imgman.BaseSD3Manager
+    igen: imgman.BasePipelineManager
 
     def argsettings(self):
         return [
@@ -123,7 +123,7 @@ class SetImageConfig:
     
     @commands.hybrid_group(name='iset')#, fallback='arg')#, description='Quick set a value', aliases=[])
     async def isetarg(self, ctx: commands.Context):
-        '''(GROUP). Image Settings. call `!help set` to see sub-commands.'''
+        '''(GROUP). Image Settings. call `!help iset` to see sub-commands.'''
         if ctx.invoked_subcommand is None:
             await ctx.send(f"{ctx.subcommand_passed} does not belong to iset")
     

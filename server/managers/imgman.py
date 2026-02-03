@@ -50,6 +50,9 @@ class ImageGenManager:#(pipelines.SingleStagePipeline):
             func = getattr(self, meth)
             setattr(self, meth, wrap_async_executor(func, use_alternate_executor=True))
 
+
+class BasePipelineManager(ImageGenManager, pipelines.SingleStagePipeline): pass # Generic for typing purposes
+
 class BaseFluxManager(ImageGenManager, pipelines.FluxBase):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
@@ -57,10 +60,6 @@ class BaseFluxManager(ImageGenManager, pipelines.FluxBase):
 class BaseSDXLManager(ImageGenManager, pipelines.SDXLBase):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
-
-class BaseSD3Manager(ImageGenManager, pipelines.SD3Base):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)   
 
 class BaseQwenImageManager(ImageGenManager, pipelines.QwenImageBase):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
