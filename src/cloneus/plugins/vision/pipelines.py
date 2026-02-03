@@ -78,9 +78,7 @@ from spandrel import ImageModelDescriptor, ModelLoader
 from compel import CompelForSDXL, CompelForFlux # alternative: https://github.com/xhinker/sd_embed
 from unsloth import FastModel, FastVisionModel, FastLanguageModel # Do NOT import before transformers / hf_libs - it prevents unloading models
 
-from cloneus import cpaths
-from . import quantops,specialists,loraops,interpolation
-from .lpw_sdxl import get_weighted_text_embeddings_sdxl
+from . import specialists,interpolation
 
 from cloneus.utils.common import batched # release_memory
 

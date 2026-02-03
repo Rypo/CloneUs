@@ -31,12 +31,9 @@ import matplotlib.patches as patches
 from PIL import Image, ImageDraw, ImageFont 
 
 from spandrel import ImageModelDescriptor, ModelLoader
-
-
+from unsloth_zoo.vision_utils import process_vision_info
 
 from cloneus import cpaths
-# from cloneus.plugins.vision.qwen_vl_utils import process_vision_info
-from .qwen_vl_utils import process_vision_info
 
 def fig_to_np(fig:mpf.Figure):
     with io.BytesIO() as buff:
