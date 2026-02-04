@@ -20,6 +20,7 @@ import torch
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_grad_enabled(False)
+from unsloth import FastModel, FastLanguageModel
 
 from diffusers import (
     AutoPipelineForText2Image, 
@@ -71,12 +72,11 @@ from xformers.ops import MemoryEfficientAttentionFlashAttentionOp
 from transformers import AutoConfig, AutoModelForTextEncoding
 import safetensors.torch as sft
 
-
+# import cache_dit
 from PIL import Image
 from spandrel import ImageModelDescriptor, ModelLoader
 # from compel import Compel, ReturnedEmbeddingsType
 from compel import CompelForSDXL, CompelForFlux # alternative: https://github.com/xhinker/sd_embed
-from unsloth import FastModel, FastVisionModel, FastLanguageModel # Do NOT import before transformers / hf_libs - it prevents unloading models
 
 from . import specialists,interpolation
 
@@ -85,6 +85,30 @@ from cloneus.utils.common import batched # release_memory
 logger = logging.getLogger(__name__)
 SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
 # other: [(1280, 768),(768, 1280),]
+# Qwen-Image
+_aspect_ratios_qi = { # (width, height)
+    "1:1": (1328, 1328), # 1.76m
+    "16:9": (1664, 928), # 1.54m
+    "9:16": (928, 1664), # 1.54m
+    "4:3": (1472, 1140), # 1.68m
+    "3:4": (1140, 1472), # 1.68m
+    "3:2": (1584, 1056), # 1.67m
+    "2:3": (1056, 1584), # 1.67m
+}
+# multiple-64, ar_exact (other than 9;16)  
+_aspect_ratios_64 = { # (width, height)
+    "1:1": (1152, 1152), # 1.33m
+    "16:9": (1472, 832), # 1.23m
+    "9:16": (832, 1472), # 1.23m
+    "4:3": (1280, 960),  # 1.23m
+    "3:4": (960, 1280),  # 1.23m
+    "3:2": (1344, 896),  # 1.20m
+    "2:3": (896, 1344),  # 1.20m
+}
+# https://huggingface.co/docs/diffusers/en/quantization/gguf#using-optimized-cuda-kernels-with-gguf
+# os.environ.update({'DIFFUSERS_GGUF_CUDA_KERNELS':'true'})
+# - No support for torch > 2.7: https://huggingface.co/Isotr0py/ggml/tree/main/build
+# - https://github.com/Isotr0py/ggml-libtorch/tree/main/hf-kernels/ggml-kernels
 
 def print_memstats(label:str, reset_peak:bool=True):
     print(f'({label}) max_memory_allocated:', torch.cuda.max_memory_allocated()/(1024**2), 'max_memory_reserved:', torch.cuda.max_memory_reserved()/(1024**2))
@@ -1142,25 +1166,25 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         
         if not self.offload:
             self.base = self.base.to(0)
-        self.base.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
-        # Workaround for not accepting attention shape using VAE for Flash Attention
-        self.base.vae.enable_xformers_memory_efficient_attention(attention_op=None)
-
-        self.base.vae.enable_slicing()
+       
         self._scheduler_init()
         self.load_loras()
         # https://github.com/comfyanonymous/ComfyUI/blob/f58475827150c2ac610cbb113019276efcd1a733/comfy/sd1_clip.py#L234
 
         self.compeler = CompelForSDXL(self.base)
         
-        self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base)
+        self.basei2i: StableDiffusionXLImg2ImgPipeline = AutoPipelineForImage2Image.from_pipe(self.base, **_pipe_kwargs)
 
-        if self.offload:
-            # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
-            # https://huggingface.co/docs/diffusers/v0.36.0/en/using-diffusers/loading#:~:text=reapply%20these%20methods
-            self.base.enable_model_cpu_offload()
-            self.basei2i.enable_model_cpu_offload()
-        
+        # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
+        # https://huggingface.co/docs/diffusers/v0.36.0/en/using-diffusers/loading#:~:text=reapply%20these%20methods
+        for pipe in (self.base, self.basei2i):
+            pipe.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
+            # Workaround for not accepting attention shape using VAE for Flash Attention
+            pipe.vae.enable_xformers_memory_efficient_attention(attention_op=None)
+            pipe.vae.enable_slicing()
+            if self.offload:
+                pipe.enable_model_cpu_offload()
+
         self.is_ready = True
 
     
@@ -1175,7 +1199,6 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
             if 'pag_scale' not in self.pipe_xkwgs:
                 pag_kwargs = {'enable_pag':True, 'pag_applied_layers':pag_applied_layers,}
                 self.base: StableDiffusionXLPAGPipeline = AutoPipelineForText2Image.from_pipe(self.base, **pag_kwargs, torch_dtype=self.dtype)
-                # self.basei2i: StableDiffusionXLPAGImg2ImgPipelinePatch = AutoPipelineForImage2Image.from_pipe(self.basei2i, **pag_kwargs,)
                 self.basei2i: StableDiffusionXLPAGImg2ImgPipeline = StableDiffusionXLPAGImg2ImgPipeline.from_pipe(self.basei2i, pag_applied_layers=pag_applied_layers, torch_dtype=self.dtype,)
                 if self.offload:
                     self.base.enable_model_cpu_offload()
@@ -1432,7 +1455,7 @@ class FluxBase(SingleStagePipeline):
     @torch.inference_mode()
     def load_pipeline(self):
         transformer_model_path = f"nunchaku-ai/nunchaku-flux.1-dev/svdq-{get_precision()}_r32-flux.1-dev.safetensors"
-        transformer = NunchakuFluxTransformer2dModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)
+        transformer = NunchakuFluxTransformer2dModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload) # nunchaku forces device='cuda'
 
         self.base = FluxPipeline.from_pretrained(
             self.model_path, 
@@ -1441,25 +1464,28 @@ class FluxBase(SingleStagePipeline):
             torch_dtype = torch.bfloat16,
             dtype = torch.bfloat16,
             low_cpu_mem_usage = True,
-        ).to("cuda")
+        )
         
-        self.base.enable_xformers_memory_efficient_attention()
-        self.base.vae.enable_slicing() # all this does is iterate over batch instead of all at once, no reason to ever disable
-
-        if self.offload:
-            self.base.enable_model_cpu_offload()
-        elif not self.offload and not getattr(self.base.text_encoder_2, 'is_quantized', False): 
-           # if not offloading everything, just offload text_encoder_2
-           apply_group_offloading(self.base.text_encoder_2, onload_device=torch.device('cuda'), offload_type="block_level", 
-                                  num_blocks_per_group=1, use_stream=True, record_stream=True, non_blocking=True)
-
+        if not self.offload:
+            self.base = self.base.to(0)
+            
         
         self._scheduler_init()
         self.load_loras()
-        
+
         self.compeler = CompelForFlux(self.base) 
-        
         self.basei2i: FluxImg2ImgPipeline = FluxImg2ImgPipeline.from_pipe(self.base, transformer=self.base.transformer, torch_dtype=torch.bfloat16) # Do NOT forget torch_dtype or will 2x Vram
+
+        
+        for pipe in (self.base, self.basei2i):
+            # pipe.enable_xformers_memory_efficient_attention()
+            pipe.vae.enable_slicing() # all this does is iterate over batch instead of all at once, no reason to ever disable
+            if self.offload:
+                pipe.enable_model_cpu_offload()
+            elif not getattr(pipe.text_encoder_2, 'is_quantized', False): 
+                # if not offloading everything, just offload text_encoder_2 if in full precision
+                apply_group_offloading(pipe.text_encoder_2, onload_device=torch.device('cuda'), offload_type="block_level", 
+                                        num_blocks_per_group=1, use_stream=True, record_stream=True, non_blocking=True)
 
         self.is_ready = True
         release_memory()
@@ -1621,35 +1647,36 @@ class QwenImageBase(SingleStagePipeline):
 
     @torch.inference_mode()
     def load_pipeline(self):
-        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        text_encoder,tokenizer = FastModel.from_pretrained(#Qwen2_5_VLForConditionalGeneration.from_pretrained(
             'unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit',
             dtype=torch.bfloat16,
-            # torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            # attn_implementation="flash_attention_2",
             # device_map="auto",
             low_cpu_mem_usage = True,
         )
         text_encoder: Qwen2_5_VLForConditionalGeneration = FastModel.for_inference(text_encoder)
         text_encoder = text_encoder.eval().requires_grad_(False)
-        
+        text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
+
         scheduler = self._scheduler_get()
 
         transformer_model_path = f"nunchaku-ai/nunchaku-qwen-image/svdq-int4_r{self.rank}-qwen-image-lightningv1.0-{self.num_inference_steps}steps.safetensors"
-        
-        transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)#, device_map="auto", low_cpu_mem_usage = True, )
+        transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, device=("cpu" if self.offload else "cuda")) #offload=self.offload)#, device_map="auto", low_cpu_mem_usage = True, )
+        transformer = transformer.eval().requires_grad_(False)
 
         self.base: QwenImagePipeline = QwenImagePipeline.from_pretrained(
             self.model_path, transformer=transformer, text_encoder=text_encoder, scheduler=scheduler, torch_dtype=torch.bfloat16, low_cpu_mem_usage = True,
         )
         
-        self.base.enable_xformers_memory_efficient_attention()
-        self.base.vae.enable_slicing()
-
-        if self.offload:
-            self.base.enable_model_cpu_offload()
-                
         self.basei2i: QwenImageImg2ImgPipeline = QwenImageImg2ImgPipeline.from_pipe(self.base, transformer=None, torch_dtype=torch.bfloat16)
         self.basei2i.transformer = self.base.transformer
+
+        for pipe in (self.base, self.basei2i):
+            # pipe.enable_xformers_memory_efficient_attention() # appears to use more vram?
+            pipe.vae.enable_slicing()
+            if self.offload:
+                pipe.enable_model_cpu_offload()
+
         self.is_ready = True
     
 
@@ -1736,51 +1763,39 @@ class QwenEditBase(QwenImageBase):
 
     @torch.inference_mode()
     def load_pipeline(self):
-        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        text_encoder,tokenizer = FastModel.from_pretrained(#Qwen2_5_VLForConditionalGeneration.from_pretrained(
             'unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit',
             dtype=torch.bfloat16,
-            # torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            device_map="auto",
+            # attn_implementation="flash_attention_2",
+            # device_map="auto",
             low_cpu_mem_usage = True,
         )
         text_encoder: Qwen2_5_VLForConditionalGeneration = FastModel.for_inference(text_encoder)
         text_encoder = text_encoder.eval().requires_grad_(False)
-
-        # text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        #     "Qwen/Qwen-Image-Edit-2509",
-        #     subfolder="text_encoder",
-        #     dtype=torch.bfloat16,
-        #     # torch_dtype=torch.bfloat16,
-        #     attn_implementation="flash_attention_2",
-        #     device_map="auto",
-        #     low_cpu_mem_usage = True,
-        # )
+        text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
         
         scheduler = self._scheduler_get()
 
         transformer_model_path = (f"nunchaku-ai/nunchaku-qwen-image-edit-2509/lightning-251115/svdq-{get_precision()}_r{self.rank}-qwen-image-edit-2509-lightning-{self.num_inference_steps}steps-251115.safetensors")
         # transformer_model_path = (f"QuantFunc/Nunchaku-Qwen-Image-EDIT-2511/nunchaku_qwen_image_edit_2511_balance_{get_precision()}.safetensors")
-        transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, offload=self.offload)
+        transformer = NunchakuQwenImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16, device=("cpu" if self.offload else "cuda")) # offload=self.offload) -- offload here = gen faster by ~3-4s, but memory cannot be reclaimed with unload_pipeline
         transformer = transformer.eval().requires_grad_(False)
 
         self.basei2i: QwenImageEditPlusPipeline = QwenImageEditPlusPipeline.from_pretrained(
             self.model_path, transformer=transformer, text_encoder=text_encoder, scheduler=scheduler, torch_dtype=torch.bfloat16, low_cpu_mem_usage = True,
         )
         
-        self.basei2i.enable_xformers_memory_efficient_attention()
-        self.basei2i.vae.enable_slicing()
+        self.base = QwenImagePipeline.from_pipe(self.basei2i, transformer=None, text_encoder=self.basei2i.text_encoder, scheduler=self.basei2i.scheduler, torch_dtype=torch.bfloat16,)
+        self.base.transformer = self.basei2i.transformer # late bind or will get "ValueError: Casting a quantized model to a new `dtype` is unsupported." 
         
-        if self.offload:
-            self.basei2i.enable_model_cpu_offload()
-        
-
-        self.base = QwenImagePipeline.from_pipe(self.basei2i, transformer=self.basei2i.transformer, scheduler=self.basei2i.scheduler, torch_dtype=torch.bfloat16,)
-        # self.base.transformer = self.basei2i.transformer
+        for pipe in (self.base, self.basei2i):
+            # pipe.enable_xformers_memory_efficient_attention() # appears to use more vram?
+            pipe.vae.enable_slicing()
+            if self.offload:
+                pipe.enable_model_cpu_offload()
 
         self.is_ready = True
         
-        # self.max_seq_len = 512
         self.pipe_xkwgs['true_cfg_scale'] = 1.0
         
     
@@ -2132,23 +2147,25 @@ class ZImageBase(SingleStagePipeline):
             "unsloth/Qwen3-4B-unsloth-bnb-4bit",
             dtype=torch.bfloat16,
             load_in_4bit=True,
-            attn_implementation="flash_attention_2",
-            device_map="auto",
+            # attn_implementation="flash_attention_2",
+            # device_map="auto",
             low_cpu_mem_usage = True,
-            quantization_config = TransBitsAndBytesConfig(**pipeline_quant_config.quant_kwargs, ),
+            # quantization_config = TransBitsAndBytesConfig(**pipeline_quant_config.quant_kwargs, ),
         )
         
         text_encoder: Qwen3ForCausalLM = FastLanguageModel.for_inference(text_encoder)
         text_encoder = text_encoder.eval().requires_grad_(False)
         text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
-
         
         transformer_model_path = f"nunchaku-ai/nunchaku-z-image-turbo/svdq-{get_precision()}_r{self.rank}-z-image-turbo.safetensors"
-        transformer = NunchakuZImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16,)
+        transformer = NunchakuZImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16)
         transformer = transformer.eval().requires_grad_(False)
             
-        self.base: ZImagePipeline =  ZImagePipeline.from_pretrained(self.model_path, torch_dtype=self.dtype, transformer=transformer, text_encoder=text_encoder, )#quantization_config = pipeline_quant_config)
+        self.base: ZImagePipeline =  ZImagePipeline.from_pretrained(self.model_path, transformer=transformer, text_encoder=text_encoder, torch_dtype=self.dtype, low_cpu_mem_usage = False,)
         
+        if not self.offload:
+            self.base = self.base.to(0)
+
         self._scheduler_init()
         self.load_loras()
 
@@ -2156,7 +2173,7 @@ class ZImageBase(SingleStagePipeline):
         
         for pipe in (self.base, self.basei2i):
             pipe.enable_xformers_memory_efficient_attention()
-            pipe.transformer.set_attention_backend("xformers") # "flash"
+            # pipe.transformer.set_attention_backend("xformers") # "flash"
             # pipe.text_encoder.set_attn_implementation('flash_attention_2')
             pipe.vae.enable_slicing()
             if self.offload:
