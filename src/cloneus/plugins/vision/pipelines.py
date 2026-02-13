@@ -1651,13 +1651,14 @@ class QwenImageBase(SingleStagePipeline):
 
     @torch.inference_mode()
     def load_pipeline(self):
-        text_encoder,tokenizer = FastModel.from_pretrained(#Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             'unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit',
             dtype=torch.bfloat16,
-            # attn_implementation="flash_attention_2",
-            # device_map="auto",
+            attn_implementation="flash_attention_2",
+            device_map="auto",
             low_cpu_mem_usage = True,
         )
+
         text_encoder: Qwen2_5_VLForConditionalGeneration = FastModel.for_inference(text_encoder)
         text_encoder = text_encoder.eval().requires_grad_(False)
         text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
@@ -1767,13 +1768,14 @@ class QwenEditBase(QwenImageBase):
 
     @torch.inference_mode()
     def load_pipeline(self):
-        text_encoder,tokenizer = FastModel.from_pretrained(#Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             'unsloth/Qwen2.5-VL-7B-Instruct-unsloth-bnb-4bit',
             dtype=torch.bfloat16,
-            # attn_implementation="flash_attention_2",
-            # device_map="auto",
+            attn_implementation="flash_attention_2",
+            device_map="auto",
             low_cpu_mem_usage = True,
         )
+
         text_encoder: Qwen2_5_VLForConditionalGeneration = FastModel.for_inference(text_encoder)
         text_encoder = text_encoder.eval().requires_grad_(False)
         text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
@@ -2100,14 +2102,13 @@ class ZImageBase(SingleStagePipeline):
             quant_backend="bitsandbytes_4bit",
             quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16, 'bnb_4bit_use_double_quant': False},
             components_to_quantize=["text_encoder", ], #"transformer",],
-        ) if not self.offload else None
+        )
         
-        text_encoder,tokenizer = FastLanguageModel.from_pretrained(
+        text_encoder = Qwen3ForCausalLM.from_pretrained(
             "unsloth/Qwen3-4B-unsloth-bnb-4bit",
             dtype=torch.bfloat16,
-            load_in_4bit=True,
-            # attn_implementation="flash_attention_2",
-            # device_map="auto",
+            attn_implementation="flash_attention_2",
+            device_map="auto",
             low_cpu_mem_usage = True,
             # quantization_config = TransBitsAndBytesConfig(**pipeline_quant_config.quant_kwargs, ),
         )
