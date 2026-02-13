@@ -697,26 +697,26 @@ class SingleStagePipeline:
 
     @torch.inference_mode()
     def _pipe_txt2img(self, prompt_encodings:dict, num_inference_steps:int, guidance_scale:float, target_size:tuple[int,int], seed=None):
-        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
+        gseed = torch.Generator(device='cuda').manual_seed(seed) if seed is not None else None
         h,w = target_size
-        image = self.t2i(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0] # num_images_per_prompt=4
+        image = self.t2i(num_inference_steps=num_inference_steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images
         
-        return image
+        return image[0]
 
     @torch.inference_mode()
     def _pipe_img2img(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, strength:float, guidance_scale:float, seed=None):
-        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
-        w,h = image.size
+        gseed = torch.Generator(device='cuda').manual_seed(seed) if seed is not None else None
+        w,h = image[0].size if isinstance(image, list) else image.size
         #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
         strength = np.clip(strength, 1/num_inference_steps, 1)
-        image = self.i2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images[0]
+        image = self.i2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed).images
         
-        return image
+        return image[0]
 
     @torch.inference_mode()
     def _pipe_img2upimg(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, refine_strength:float, guidance_scale:float, seed=None, scale=1.5):
-        image = self.upsample(image, scale=scale)[0]
-        print('upsized (w,h):', image.size)
+        image = self.upsample(image, scale=scale)
+        logger.debug(f'upsized (w,h): {image[0].size if isinstance(image, list) else image.size}')
         torch.cuda.empty_cache()
 
         return self._pipe_img2img(prompt_encodings, image, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
@@ -751,7 +751,7 @@ class SingleStagePipeline:
         generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
         if generators is None:
             generators = [None]*num_images
-        w,h = image.size
+        w,h = image[0].size if isinstance(image, list) else image.size
 
         batch_size = min(num_images, batch_size)
         batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
@@ -777,16 +777,20 @@ class SingleStagePipeline:
 
             yield images
 
-    def _resize_image(self, image:Image.Image, aspect = None, dim_choices = None):
-        dim_out = self.config.nearest_dims(image.size, dim_choices=dim_choices, use_hf_sbr=False)
-        if aspect is not None:
-             dim_out = self.config.get_dims(aspect) 
-        #else:
-            
-        print('_resize_image input size:', image.size, '->', dim_out)
+    def _resize_image(self, images: list[Image.Image], aspect: typing.Literal['square', 'portrait', 'landscape'] | None = None, dim_choices = None) -> list[Image.Image]:
+        if not isinstance(images, list):
+            images = [images]
+
+        aspect_dims = self.config.get_dims(aspect) if aspect is not None else None
         
-        image = image.resize(dim_out, resample=Image.Resampling.LANCZOS)
-        return image
+        resized_images = []
+        for image in images:
+            dim_out = self.config.nearest_dims(image.size, dim_choices=dim_choices, use_hf_sbr=False) if aspect_dims is None else aspect_dims
+            resized_images.append(image.resize(dim_out, resample=Image.Resampling.LANCZOS))
+
+            logger.debug(f'_resize_image input size: {image.size} -> {dim_out}')
+        
+        return resized_images
     
     @torch.inference_mode()
     def _resize_image_frames(self, frame_array:np.ndarray, dim_choices, max_num_frames:int=100, upsample_px_thresh:int = 256, upsample_bsz:int = 8):
@@ -1009,7 +1013,7 @@ class SingleStagePipeline:
         
         #yield image
         yield -1
-                
+        
         for i in range(nframes):
             # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
             image = self.i2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images
@@ -1870,50 +1874,6 @@ class QwenEditBase(QwenImageBase):
     
 
     @torch.inference_mode()
-    def _pipe_img2img(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, strength:float, guidance_scale:float, seed=None, output_type='pil'):
-        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
-        w,h = image.size if isinstance(image, Image.Image) else image[0].size
-        #num_inference_steps = calc_esteps(num_inference_steps, strength, min_effective_steps=1)
-        strength = np.clip(strength, 1/num_inference_steps, 1)
-        image = self.i2i(image=image, num_inference_steps=num_inference_steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, generator=gseed, output_type=output_type,).images[0]
-        
-        return image
-
-    @torch.inference_mode()
-    def _pipe_img2upimg(self, prompt_encodings:dict, image:Image.Image, num_inference_steps:int, refine_strength:float, guidance_scale:float, seed=None, scale=1.5):
-        image = self.upsample(image, scale=scale)
-        logger.debug('upsized (w,h):', image[0].size)
-        torch.cuda.empty_cache()
-
-        return self._pipe_img2img(prompt_encodings, image, num_inference_steps, strength=refine_strength, guidance_scale=guidance_scale, seed=seed)
-    
-
-    @torch.inference_mode()
-    def _batched_img2img(self, prompt_encodings:dict[str, torch.Tensor], image:Image.Image, num_images:int, batch_size:int, num_inference_steps:int, strength:float, guidance_scale:float, seed:list[int]|None, output_type:str='pil'):
-        generators = generator_batch(seed, num_images, device='cpu', all_unique=True) # if seed is set, want a reproducible set of n different images, 
-        if generators is None:
-            generators = [None]*num_images
-        w,h = image.size if isinstance(image, Image.Image) else image[0].size
-
-        batch_size = min(num_images, batch_size)
-        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
-        
-        for gen_batch in batched(generators, batch_size):
-            if (batch_len := len(gen_batch)) != batch_size:
-                batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
-            if gen_batch[0] is None:
-                gen_batch = None
-            #if generators is not None:
-            #    gen_batch, generators = generators[:batch_len], generators[batch_len:] # pop slice
-            
-            images = self.i2i(image=image, num_inference_steps=num_inference_steps,  guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=gen_batch, output_type=output_type).images 
-            
-            if output_type != 'latent':
-                torch.cuda.empty_cache()
-
-            yield images
-    
-    @torch.inference_mode()
     def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
         #batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
         batched_prompts = {k: torch.split(v, batch_size) for k,v in prompt_encodings.items()}
@@ -1955,8 +1915,7 @@ class QwenEditBase(QwenImageBase):
         if not isinstance(image, list):
             image = [image]
         # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
-        image = [self._resize_image(img, aspect) for img in image]
-                
+        image = self._resize_image(image, aspect)
 
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
         prompt_encodings = self.embed_prompts(prompt, image=image, negative_prompt=negative_prompt, clip_skip=self.clip_skip, )
