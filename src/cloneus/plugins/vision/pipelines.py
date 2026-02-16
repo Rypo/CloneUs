@@ -1674,12 +1674,13 @@ class QwenImageBase(SingleStagePipeline):
         self.base: QwenImagePipeline = QwenImagePipeline.from_pretrained(
             self.model_path, transformer=transformer, text_encoder=text_encoder, scheduler=scheduler, torch_dtype=torch.bfloat16, low_cpu_mem_usage = True,
         )
-        
+            
         self.basei2i: QwenImageImg2ImgPipeline = QwenImageImg2ImgPipeline.from_pipe(self.base, transformer=None, torch_dtype=torch.bfloat16)
         self.basei2i.transformer = self.base.transformer
 
         for pipe in (self.base, self.basei2i):
             # pipe.enable_xformers_memory_efficient_attention() # appears to use more vram?
+            
             pipe.vae.enable_slicing()
             if self.offload:
                 pipe.enable_model_cpu_offload()
@@ -1695,10 +1696,7 @@ class QwenImageBase(SingleStagePipeline):
             'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
         }
         
-        # batch_sizes = {'tiny': 4, 'small': 4, 'med': 3, 'full': 2} # With out vae_slicing
-        batch_sizes = {'tiny': 8, 'small': 8, 'med': 6, 'full': 4} # With out vae_slicing
-        # batch_sizes = {'tiny': 6, 'small': 6, 'med': 4, 'full': 2} # With out vae_slicing
-        #batch_sizes = {'tiny': 24, 'small': 16, 'med': 12, 'full': 4} 
+        batch_sizes = {'tiny': 2, 'small': 2, 'med': 1, 'full': 1} 
 
         return (dims_opts[imsize], batch_sizes[imsize])    
 
@@ -1707,27 +1705,46 @@ class QwenImageBase(SingleStagePipeline):
         device = torch.device('cuda:0')
         
         # prompt += ", Ultra HD, 4K, cinematic composition."
-        prompt = [prompt]
         
         prompt_embeds, prompt_embeds_mask = self.base.encode_prompt(prompt=prompt, num_images_per_prompt=batch_size, device=device, max_sequence_length=self.max_seq_len)
         
         prompt_encodings = dict(prompt_embeds=prompt_embeds, prompt_embeds_mask=prompt_embeds_mask)
-             
+
         if negative_prompt:
-            negative_prompt = [negative_prompt]
             negative_prompt_embeds, negative_prompt_embeds_mask = self.base.encode_prompt(prompt=negative_prompt, num_images_per_prompt=batch_size, device=device, max_sequence_length=self.max_seq_len)
             prompt_encodings.update(negative_prompt_embeds=negative_prompt_embeds, negative_prompt_embeds_mask=negative_prompt_embeds_mask)
         
         torch.cuda.empty_cache()
         return prompt_encodings
-    
+
+    @torch.inference_mode()
+    def encode_images(self, images:list[Image.Image], seed:int=42):
+        nframes = len(images)
+        w,h = images[0].size
+        generators = generator_batch(seed, nframes, device='cuda')
+        device = torch.device('cuda:0')
+        proc_images = self.basei2i.image_processor.preprocess(images, height=h, width=w).to(device, dtype=self.basei2i.vae.dtype)
+        
+        # If image is [B,C,H,W] -> add T=1. If it's already [B,C,T,H,W], leave it.
+        if proc_images.dim() == 4:
+            proc_images = proc_images.unsqueeze(2)
+        
+        image_latents = self.basei2i._encode_vae_image(image=proc_images, generator=generators)
+        image_latents = torch.cat([image_latents], dim=0)
+        # image_latents = image_latents.transpose(1, 2)  # [B,1,z,H',W'] 
+        release_memory()
+        return image_latents
+
     @torch.inference_mode()
     def decode_latents(self, latents, height, width, **kwargs):
         # https://github.com/huggingface/diffusers/blob/6f1042e36cd588a7b66498f45c3bb7085e4fa395/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_img2img.py#L852
         if isinstance(latents, list):
             latents = torch.cat(latents, dim=0)
         
-        latents = self.basei2i._unpack_latents(latents, height, width, self.basei2i.vae_scale_factor).to(self.basei2i.vae.dtype)
+        if latents.ndim == 3 and latents.shape[-1] == self.basei2i.transformer.config.in_channels: # 64
+            latents = self.basei2i._unpack_latents(latents, height, width, self.basei2i.vae_scale_factor).to(self.basei2i.vae.dtype)
+        elif latents.ndim == 4 and latents.shape[1] == self.basei2i.vae.config.z_dim:
+            latents = latents.unsqueeze(2) # [B,z,H',W'] -> [B,z,1,H',W']
         
         latents_mean = (
             torch.tensor(self.basei2i.vae.config.latents_mean)
@@ -1743,6 +1760,33 @@ class QwenImageBase(SingleStagePipeline):
         image = self.basei2i.image_processor.postprocess(image, output_type='pil')
         
         return image
+    
+    @torch.inference_mode()
+    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
+
+        img_w,img_h = resized_images[0].size
+        if isinstance(latents, list):
+            latents = torch.cat(latents, dim=0)
+        if latents.ndim == 3 and latents.shape[-1] == self.basei2i.transformer.config.in_channels: # 64
+            latents = self.basei2i._unpack_latents(latents, img_h, img_w, self.basei2i.vae_scale_factor)
+        
+        #latent_blend = super()._regen_stage2(latents=latents, resized_images=resized_images, aseed=aseed, output_type='latent')
+        latents = latents.squeeze() # [B,z,1,H',W'] -> # [B,z,H',W']
+        raw_image_latents = self.encode_images(resized_images, seed = aseed).squeeze() # [B,1,z,H',W'] -> [B,z,H',W']
+        # create a soft mask based on interframe pixel differences
+        mot_mask_tensor = torch.from_numpy(interpolation.motion_mask(resized_images, px_thresh=0.02, qtile=90))
+        # interpolate to latent shape
+        xdims = [1]*(raw_image_latents.ndim - 2) # we only care about last two dims, broadcast all others
+        latent_soft_mask = torch.nn.functional.interpolate(mot_mask_tensor.expand(*xdims, -1, -1), size=raw_image_latents.shape[-2:], mode='area',).to(raw_image_latents)
+        # slerp between input and output latents guided by soft_mask and then lerp consecutive latent frames pairs
+        
+        latent_blend = interpolation.blend_latents(raw_image_latents, latents, latent_soft_mask, time_blend=True, keep_dims=True)
+        
+        latent_blend = latent_blend.unsqueeze(2) # [B,z,H',W'] -> [B,z,1,H',W']
+        if output_type == 'latent':
+            return latent_blend
+        
+        return self.decode_latents(latent_blend, img_h, img_w)
 #endregion
 
 #region Qwen Edit
