@@ -1098,13 +1098,10 @@ class SingleStagePipeline:
         for img_lats in self._batched_imgs2imgs(prompt_encodings, resized_images, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
             latents.append(img_lats)
             yield len(img_lats)
- 
+
         
         if two_stage:
-            latents=torch.cat(latents, 0)
-            raw_image_latents = self.encode_images(resized_images, seed = aseed)
-            latent_soft_mask = self._prepare_soft_mask(resized_images, size=raw_image_latents.shape[-2:]).to(raw_image_latents)
-            latent_blend = self._interpolate_latents(raw_image_latents, latents, latent_soft_mask, dim_out, time_blend=True, keep_dims=True)
+            latent_blend = self._regen_stage2(latents, resized_images, aseed)
             
             latents = []
             for img_lats in self._batched_imgs2imgs(prompt_encodings, latent_blend, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
@@ -1112,8 +1109,9 @@ class SingleStagePipeline:
                 yield len(img_lats)
             
         latents = torch.cat(latents, 0)
-        
+    
         image_frames = self.decode_latents(latents, height=h, width=w)
+        
         yield image_frames
 
         te = time.perf_counter()
@@ -1122,23 +1120,22 @@ class SingleStagePipeline:
         release_memory()
     
     @torch.inference_mode()
-    def _prepare_soft_mask(self, resized_images, size):
+    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
+        if isinstance(latents, list):
+            latents = torch.cat(latents, dim=0)
+        
+        raw_image_latents = self.encode_images(resized_images, seed = aseed)
+        # create a soft mask based on interframe pixel differences
         mot_mask_tensor = torch.from_numpy(interpolation.motion_mask(resized_images, px_thresh=0.02, qtile=90))
-        #if raw_image_latents.ndim == 4:
-        mot_mask_tensor = mot_mask_tensor.expand(1, 1, -1, -1)
-
-        latent_soft_mask = torch.nn.functional.interpolate(
-            mot_mask_tensor,
-            size=size, #(h // self.pipei2i.vae_scale_factor, w // self.pipei2i.vae_scale_factor)
-            mode='area',#'bilinear',
-        )
-        #print(raw_image_latents.shape, latent_soft_mask.shape)
-        return latent_soft_mask
-    
-    @torch.inference_mode()
-    def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
-        blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
-        return self.decode_latents(blended_latents) # back to images by default
+        # interpolate to latent shape
+        latent_soft_mask = torch.nn.functional.interpolate(mot_mask_tensor.expand(1, 1, -1, -1), size=raw_image_latents.shape[-2:], mode='area',).to(raw_image_latents)
+        # slerp between input and output latents guided by soft_mask and then lerp consecutive latent frames pairs
+        latent_blend = interpolation.blend_latents(raw_image_latents, latents, latent_soft_mask, time_blend=True, keep_dims=True)
+        
+        if output_type == 'latent':
+            return latent_blend
+        # decode back to images by default
+        return self.decode_latents(latent_blend) 
 
   
     @abstractmethod
@@ -1335,9 +1332,8 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         return image
     
     @torch.inference_mode()
-    def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
-        blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
-        return blended_latents # SDXL can opperate on raw latents, no decode required
+    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'latent'):
+        return super()._regen_stage2(latents=latents, resized_images=resized_images, aseed=aseed, output_type='latent')
     
     @torch.inference_mode()
     def generate_frames(self, prompt: str, 
@@ -1584,14 +1580,6 @@ class FluxBase(SingleStagePipeline):
         latents = self.basei2i._pack_latents(latents, latents.shape[0], num_channels_latents, height, width)
         return latents
             
-    @torch.inference_mode()
-    def _interpolate_latents(self, raw_image_latents, out_latents, latent_soft_mask, img_wh, time_blend=True, keep_dims=True):
-        img_w,img_h = img_wh
-        if out_latents.ndim == 3 and out_latents.shape[-1] == 64:
-            out_latents = self.basei2i._unpack_latents(out_latents, img_h, img_w, self.basei2i.vae_scale_factor)
-        blended_latents = interpolation.blend_latents(raw_image_latents, out_latents, latent_soft_mask, time_blend=time_blend, keep_dims=keep_dims)
-
-        return blended_latents
     
     @torch.inference_mode()
     def decode_latents(self, latents, height:int, width:int):
@@ -1601,7 +1589,7 @@ class FluxBase(SingleStagePipeline):
         #print(latents.shape)
         
         # make sure the VAE is in float32 mode, as it overflows in float16
-        if latents.ndim == 3 and latents.shape[-1] == 64:
+        if latents.ndim == 3 and latents.shape[-1] == self.basei2i.transformer.config.in_channels: # 64
             latents = self.base._unpack_latents(latents, height, width, self.base.vae_scale_factor)
         latents = (latents / self.base.vae.config.scaling_factor) + self.base.vae.config.shift_factor
         image = self.base.vae.decode(latents, return_dict=False)[0]
@@ -1609,6 +1597,20 @@ class FluxBase(SingleStagePipeline):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
+    
+    @torch.inference_mode()
+    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
+        img_w,img_h = resized_images[0].size
+        if isinstance(latents, list):
+            latents = torch.cat(latents, dim=0)
+        if latents.ndim == 3 and latents.shape[-1] == self.basei2i.transformer.config.in_channels: # 64
+            latents = self.basei2i._unpack_latents(latents, img_h, img_w, self.basei2i.vae_scale_factor)
+        
+        latent_blend = super()._regen_stage2(latents=latents, resized_images=resized_images, aseed=aseed, output_type='latent')
+        if output_type == 'latent':
+            return latent_blend
+        
+        return self.decode_latents(latent_blend, img_h, img_w)
 #endregion
 
 #region Qwen Image
