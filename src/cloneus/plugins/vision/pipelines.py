@@ -1884,39 +1884,54 @@ class QwenEditBase(QwenImageBase):
             return condition_images
     
     @torch.inference_mode()
+    def _rebatch_embeds(self, prompt_embeds:torch.Tensor, prompt_embeds_mask:torch.Tensor, num_images_per_prompt:int, max_sequence_length:int|None = None):
+        batch_size = 1
+        if max_sequence_length:
+            prompt_embeds = prompt_embeds[:, :max_sequence_length]
+            prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
+        
+        _, seq_len, _ = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+        prompt_embeds_mask = prompt_embeds_mask.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
+        return prompt_embeds, prompt_embeds_mask
+
+        
+    @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, image: Image.Image|list[Image.Image]|None = None, **kwargs):
         # https://github.com/huggingface/diffusers/blob/6f1042e36cd588a7b66498f45c3bb7085e4fa395/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit_plus.py#L287
         device = torch.device('cuda:0')
         
-        prompt = [prompt]
-
-        encode_prompt_kwargs = dict(
-            device = device, 
-            num_images_per_prompt = batch_size, 
-            max_sequence_length = self.max_seq_len
-        )
+        if isinstance(prompt, str):
+            prompt = [prompt]
 
         if image is not None:
-            pipeline = self.basei2i
-
             if isinstance(image, np.ndarray): # prevents processor from incrementing Picture:{i} in image prompt when trying to true batch
                 cond_images = image
                 prompt = prompt*len(cond_images)
             else:
                 cond_images = self.preprocess_image(image)
-                
-            encode_prompt_kwargs.update(image = cond_images)
+
+            prompt_embeds, prompt_embeds_mask = self.basei2i._get_qwen_prompt_embeds(prompt, cond_images, device)
+            if negative_prompt:
+                negative_prompt_embeds, negative_prompt_embeds_mask = self.basei2i._get_qwen_prompt_embeds(negative_prompt, cond_images, device)
+
         else:
-            pipeline = self.base
+            prompt_embeds, prompt_embeds_mask = self.base._get_qwen_prompt_embeds(prompt, device)
+            if negative_prompt:
+                negative_prompt_embeds, negative_prompt_embeds_mask = self.base._get_qwen_prompt_embeds(negative_prompt, device)
 
-        prompt_encodings = {}
-        prompt_encodings['prompt_embeds'], prompt_encodings['prompt_embeds_mask'] = pipeline.encode_prompt(prompt=prompt, **encode_prompt_kwargs)
-            
+        if batch_size > 1:
+            max_seq_length = self.max_seq_len if image is None else None # edit++ doesn't use max_seq_len to truncate embeds
+            prompt_embeds, prompt_embeds_mask = self._rebatch_embeds(prompt_embeds, prompt_embeds_mask, num_images_per_prompt=batch_size, max_sequence_length=max_seq_length)
+            if negative_prompt:
+                negative_prompt_embeds, negative_prompt_embeds_mask = self._rebatch_embeds(negative_prompt_embeds, negative_prompt_embeds_mask, num_images_per_prompt=batch_size, max_sequence_length=max_seq_length)
+
+        prompt_encodings = dict(prompt_embeds=prompt_embeds, prompt_embeds_mask=prompt_embeds_mask)
         if negative_prompt:
-            negative_prompt = [negative_prompt]
-            prompt_encodings['negative_prompt_embeds'], prompt_encodings['negative_prompt_embeds_mask'] = pipeline.encode_prompt(prompt=negative_prompt, **encode_prompt_kwargs)
-                
-
+            prompt_encodings.update(negative_prompt_embeds=negative_prompt_embeds, negative_prompt_embeds_mask=negative_prompt_embeds_mask)
+        
         torch.cuda.empty_cache()
         return prompt_encodings                    
     
