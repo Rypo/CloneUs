@@ -153,7 +153,6 @@ class DiffusionConfig:
     strength: float = 0.55
     negative_prompt: str = None
     aspect: typing.Literal['square','portrait','landscape'] = 'square'
-    clip_skip: int = None
     
     img_dims: tuple[int, int]|list[tuple[int, int]] = (1024, 1024)
     refine_guidance_scale: float = None
@@ -462,8 +461,6 @@ class SingleStagePipeline:
         self.adapter_weights = {}
 
         self.root_name = root_name
-
-        self.clip_skip = self.config.clip_skip
 
         # core
         self.base = None
@@ -852,7 +849,7 @@ class SingleStagePipeline:
 
         
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
 
         call_kwargs = dict(prompt=prompt, steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
                            aspect=aspect, refine_strength=refine_strength, seed=seed)
@@ -894,18 +891,17 @@ class SingleStagePipeline:
         guidance_scale = fkwg['guidance_scale']
         negative_prompt=fkwg['negative_prompt']
         strength = fkwg['strength']
-        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
-        
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
         image = self._resize_image(image, aspect)
                 
 
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip, image=image)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
         
         # don't want to pass around full image, going to replace with image_url in imagegen anyway
         call_kwargs = dict(prompt=prompt, image='PLACEHOLDER', steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                        aspect=aspect, refine_strength=refine_strength, seed=seed,)
+                           aspect=aspect, refine_strength=refine_strength, seed=seed,)
         
         
         if n_images > 1:
@@ -948,7 +944,7 @@ class SingleStagePipeline:
         image = self._resize_image(image, aspect=None, dim_choices=None) # Resize to best dim match
 
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt,  clip_skip=self.clip_skip, image=image)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
 
         image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
         
@@ -987,7 +983,7 @@ class SingleStagePipeline:
         logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip, partial_offload=True, image=image)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
         
         # subtract 1 for first image
         nframes = nframes - 1
@@ -1088,7 +1084,7 @@ class SingleStagePipeline:
         w,h = dim_out
         
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, clip_skip=self.clip_skip, partial_offload=True, image=resized_images)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, image=resized_images)
         
         # First, yield the total number of frames since it may have changed from slice
         yield len(resized_images)
@@ -1149,8 +1145,11 @@ class SingleStagePipeline:
 
 #region SDXL
 class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
+                 clip_skip: int = None):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='sdxl')
+        
+        self.pipe_xkwgs['clip_skip'] = clip_skip # TODO: because of Compel, this has no effect
 
     def i2i(self, *args, **kwargs):
         kwargs.pop('height',None)
@@ -1365,7 +1364,7 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
         prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, clip_skip=self.clip_skip, partial_offload=True, image=image)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
         
         # subtract 1 for first image
         nframes = nframes - 1
@@ -2064,7 +2063,7 @@ class QwenEditBase(QwenImageBase):
 
         for image_next in resized_images:
             # image_next = resized_images[i]
-            prompt_encs.append(self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=1,  clip_skip=self.clip_skip, partial_offload=True, image=image_next))
+            prompt_encs.append(self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=1, image=image_next))
         
         for img,embeds in zip(resized_images, prompt_encs):
             generator = torch.Generator('cpu').manual_seed(aseed)

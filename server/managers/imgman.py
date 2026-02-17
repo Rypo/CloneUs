@@ -58,8 +58,9 @@ class BaseFluxManager(ImageGenManager, pipelines.FluxBase):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
         
 class BaseSDXLManager(ImageGenManager, pipelines.SDXLBase):
-    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
-        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
+                 clip_skip: int = None,):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, clip_skip=clip_skip)
 
 class BaseQwenImageManager(ImageGenManager, pipelines.QwenImageBase):
     def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,
@@ -111,12 +112,12 @@ class ColorfulXLLightningManager(BaseSDXLManager):
                 strength = CfgItem(0.85, bounds=(0.3, 0.95)),
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 aspect='square',#'portrait',
-                clip_skip=1,
                 locked = [ 'refine_guidance_scale']
             ),
             offload=offload,
             scheduler_setup = ('Euler A', 'sgm_uniform'), # {'timestep_spacing': "trailing"}
             init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
+            clip_skip=1,
         )
      
 class JuggernautRagnarokManager(BaseSDXLManager):
@@ -132,12 +133,12 @@ class JuggernautRagnarokManager(BaseSDXLManager):
                 #negative_prompt='bad eyes, cgi, airbrushed, plastic, deformed, watermark'
                 img_dims = [(1024,1024), (832,1216), (1216,832)],
                 aspect='portrait',
-                clip_skip=2,
                 locked = ['refine_guidance_scale']
             ),
             offload=offload,
             scheduler_setup=('DPM++ 2M SDE', {'euler_at_final':True}),#, {'lower_order_final':True}) # https://huggingface.co/docs/diffusers/en/api/pipelines/stable_diffusion/stable_diffusion_xl#tips
             init_loras = [(LORA_DIR.joinpath('sdxl','detail-tweaker-xl.safetensors').as_posix(), 0.0)],
+            clip_skip=2,
         )
 
         
