@@ -9,6 +9,7 @@ import typing
 import logging
 import itertools
 import functools
+import contextlib
 from pathlib import Path
 from abc import abstractmethod
 from dataclasses import dataclass, field, asdict, KW_ONLY, InitVar
@@ -483,11 +484,37 @@ class SingleStagePipeline:
         return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
     
     def pbar_config(self, **kwargs):
-        if self.base is not None:
-            self.base.set_progress_bar_config(**kwargs)
-        if self.basei2i is not None:
-            self.basei2i.set_progress_bar_config(**kwargs)
-    
+        for pipe in (self.base, self.basei2i):
+            if pipe is not None:
+                pipe.set_progress_bar_config(**kwargs)
+
+    @contextlib.contextmanager
+    def offload_disabled(self, components: tuple[str, ...] = ('vae', 'transformer', 'unet')):
+        if isinstance(components, str):
+            components = (components, )
+        try:
+            on_device = torch.device("cuda:0")
+            if self.offload:
+                for pipe in (self.base, self.basei2i):
+                    pipe.maybe_free_model_hooks()
+                    pipe.remove_all_hooks()
+                    for comp_name in components:
+                        if (component := getattr(pipe, comp_name, None)):
+                            component.to(on_device, ) # non_blocking=True)
+                    
+                    # patch over the class' device property -- https://stackoverflow.com/a/31591589
+                    class _FixedDevicePipeline(pipe.__class__): device=on_device
+                    pipe.__class__ = _FixedDevicePipeline
+                    # pipe.__class__ = type('_FixedDevicePipeline', (pipe.__class__, ), dict(device = on_device)) # -- one-liner, but less obvious
+            yield
+        finally:
+            if self.offload:
+                for pipe in (self.base, self.basei2i):
+                    if pipe.__class__.__name__ == '_FixedDevicePipeline':
+                        pipe.__class__ = pipe.__class__.__base__ # restore original class
+                    pipe.remove_all_hooks()
+                    pipe.reset_device_map()
+                    pipe.enable_model_cpu_offload()
     
     @abstractmethod
     def load_pipeline(self):
