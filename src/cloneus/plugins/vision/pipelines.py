@@ -2086,16 +2086,19 @@ class QwenEditBase(QwenImageBase):
     @torch.inference_mode()
     def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
         #batched_prompts = rebatch_prompt_embs(prompts_encodings, batch_size)
-        batched_prompts = {k: torch.split(v, batch_size) for k,v in prompt_encodings.items()}
-        batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
+        # batched_prompts = {k: torch.split(v, batch_size) for k,v in prompt_encodings.items()}
+        if isinstance(prompt_encodings, dict):
+            # {k1: Tensor (B, :, ...), k2: Tensor (B, :, ...), ...} -> [{k1: tensor(b,:, ...), k2: tensor(b,:,...), ...} for n in B//b] # TODO: refactor
+            batched_prompts = [dict(zip(prompt_encodings.keys(), vals)) for vals in zip(*[torch.split(v, batch_size, dim=0) for v in prompt_encodings.values()])]
+        elif isinstance(prompt_encodings, list):
+            batched_prompts = list(batched(prompt_encodings, batch_size))
+        #batched_prompts = [{key: v} for key,val in prompt_encodings.items() for v in torch.split(val, batch_size)]
+        batched_images = torch.split(images, batch_size, dim=0) if isinstance(images, torch.Tensor) else list(batched(images, batch_size))
         w,h = img_wh # need wh in case `images` is a batch of latents
         
-        
+        #gen_batches = (generator_batch(seed, len(b), device='cuda') for b in batched_images)
         for i,imbatch in enumerate(batched_images):
-            #batch_len = 
-            embed_batch = {k: v[i] for k,v in batched_prompts.items()}
-            # shared common seed helps SIGNIFICANTLY with cohesion
-            # list of generators is very important. Otherwise it does not apply correctly
+            embed_batch = batched_prompts[i]
             generators = generator_batch(seed, len(imbatch), device='cuda')
 
             latents = self.i2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **embed_batch, generator=generators, output_type='latent', **kwargs).images 
@@ -2113,73 +2116,50 @@ class QwenEditBase(QwenImageBase):
                           two_stage: bool = False, 
                           aseed: int = None, 
                           **kwargs):   
-        
-       
+
         # NOTE: special behavior since having a seed improves results substantially 
         if aseed is None: 
             aseed = np.random.randint(1e9, 1e10-1)
         elif aseed < 0:
             aseed = None
             
-
         fkwg = self.config.get_if_none(steps=steps, strength=astrength, negative_prompt=negative_prompt, guidance_scale=guidance_scale)
         steps = fkwg['steps']
-        strength = fkwg['strength']
         negative_prompt=fkwg['negative_prompt']
         guidance_scale=fkwg['guidance_scale']
-
-        # astrength = np.clip(astrength, 1/steps, 1) # clip strength so at least 1 step occurs
-        #astrength = max(astrength*steps, 1)/steps 
         logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
                 
-        dim_choices,_ = self.batch_settings(imsize)
-        bsz = 1
+        dim_choices,bsz = self.batch_settings(imsize)
+        n_per_prompt = 1
         resized_images = self._resize_image_frames(frame_array, dim_choices, max_num_frames=30, upsample_px_thresh=256, upsample_bsz=8) # upsample first if less 256^2 pixels 
         dim_out = resized_images[0].size
-        
-        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        
-        #condition_images = np.stack(self.preprocess_image(resized_images), 0) 
-        #prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=1, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True, image=condition_images)
-        
+        w,h = dim_out
+
         # First, yield the total number of frames since it may have changed from slice
         yield len(resized_images)
-        #batch_iter = self._batched_imgs2imgs(prompts_encodings, resized_images, bsz, steps, strength=strength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs)
-        #image_prev = self._pipe_img2img(prompts_encodings, img_init, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=aseed, )
-        
-        t0 = time.perf_counter()
-        latents = []
 
+        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
+        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=n_per_prompt, image=[[img] for img in resized_images]) # pre-batch to differentiate from multi-image
         
         latents = []
-        w,h = dim_out
-        # image_frames = [image_prev]
-        # # prompt = prompt + '. Continue on from image 2 though it was the previous frame in an animated GIF.' # '. Use image 2 as the starting point for the transformation.'
-        prompt_encs = []
+        for img_lats in self._batched_imgs2imgs(prompt_encodings, resized_images, batch_size=bsz, steps=steps, strength=astrength, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+            latents.append(img_lats)
+            yield len(img_lats)
+        
+        if two_stage:
+            raw_image_latents = self.encode_images(resized_images, seed = aseed)
+            latent_blend = self._regen_stage2(latents, raw_image_latents, resized_images, output_type = 'pil')
+            
+            latents = []
+            for img_lats in self._batched_imgs2imgs(prompt_encodings, latent_blend, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
+                latents.append(img_lats)
+                yield len(img_lats)
 
-        for image_next in resized_images:
-            # image_next = resized_images[i]
-            prompt_encs.append(self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=1, image=image_next))
-        
-        for img,embeds in zip(resized_images, prompt_encs):
-            generator = torch.Generator('cpu').manual_seed(aseed)
-            #img_input = image_next # [image_next, image_prev]
-            # prompts_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, batch_size=bsz, lora_scale=lora_scale, clip_skip=self.clip_skip, partial_offload=True, image=image_next)
-            lat = self.i2i(image=img, **embeds, num_inference_steps=steps, guidance_scale=guidance_scale, num_images_per_prompt=1, 
-                           generator=generator, height=h, width=w, max_sequence_length=self.max_seq_len, output_type='latent',).images
-            # lat = self._pipe_img2img(prompts_encodings, image_next, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=aseed)
-            latents.append(lat)
-            yield bsz
-         
-        # latents = torch.cat(latents, 0)
-        
+        latents = torch.cat(latents, 0)
         image_frames = self.decode_latents(latents, height=h, width=w)
-        yield image_frames
 
-        te = time.perf_counter()
-        runtime = te-t0
-        logger.info(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
-        release_memory()
+        prompt_encodings, latents = release_memory(prompt_encodings, latents)
+        yield image_frames
     
     @torch.inference_mode()
     def generate_frames(self, prompt: str, 
