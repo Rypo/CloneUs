@@ -2002,27 +2002,30 @@ class QwenEditBase(QwenImageBase):
         return (dims_opts[imsize], batch_sizes[imsize])  
     
     @torch.inference_mode()
-    def preprocess_image(self, image: Image.Image | list[Image.Image]):
-        if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.basei2i.latent_channels):
-            if not isinstance(image, list):
-                image = [image]
-            #condition_image_sizes = []
-            condition_images = []
-            #vae_image_sizes = []
-            #vae_images = []
+    def preprocess_image(self, image: Image.Image | list[Image.Image] | None):
+        if image is None or (isinstance(image, torch.Tensor) and image.size(1) == self.basei2i.latent_channels): # 16
+            return image
+        
+        if isinstance(image, Image.Image):
+            image = [image]
 
-            for img in image:
-                image_width, image_height = img.size
-                condition_width, condition_height = self.calculate_dimensions(self.CONDITION_IMAGE_SIZE, image_width / image_height)
-                #vae_width, vae_height = self.calculate_dimensions(self.VAE_IMAGE_SIZE, image_width / image_height)
-                #condition_image_sizes.append((condition_width, condition_height))
-                #vae_image_sizes.append((vae_width, vae_height))
-                condition_images.append(self.basei2i.image_processor.resize(img, condition_height, condition_width))
-                #vae_images.append(self.image_processor.preprocess(img, vae_height, vae_width).unsqueeze(2))
-            return condition_images
+        condition_images = []
+        #vae_images = []
+
+        for img in image:
+            image_width, image_height = img.size
+            condition_width, condition_height = self.calculate_dimensions(self.CONDITION_IMAGE_SIZE, image_width / image_height)
+            #vae_width, vae_height = self.calculate_dimensions(self.VAE_IMAGE_SIZE, image_width / image_height)
+            condition_images.append(self.basei2i.image_processor.resize(img, condition_height, condition_width))
+            #vae_images.append(self.image_processor.preprocess(img, vae_height, vae_width).unsqueeze(2))
+        return condition_images
     
     @torch.inference_mode()
     def _rebatch_embeds(self, prompt_embeds:torch.Tensor, prompt_embeds_mask:torch.Tensor, num_images_per_prompt:int, max_sequence_length:int|None = None):
+        if num_images_per_prompt == 1:
+            return prompt_embeds, prompt_embeds_mask
+        
+        # Carefully adjust batch since usually >1 img != batch
         batch_size = 1
         if max_sequence_length:
             prompt_embeds = prompt_embeds[:, :max_sequence_length]
@@ -2035,44 +2038,50 @@ class QwenEditBase(QwenImageBase):
         prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
         return prompt_embeds, prompt_embeds_mask
 
-        
+    @torch.inference_mode()
+    def _get_qwen_prompt_embeds(self, prompt:str | list[str], image: list[Image.Image] | None, device: torch.device, dtype: torch.dtype = None):
+        if image is None:
+            return self.base._get_qwen_prompt_embeds(prompt, device, dtype)
+        return self.basei2i._get_qwen_prompt_embeds(prompt, image, device, dtype)
+
     @torch.inference_mode()
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, image: Image.Image|list[Image.Image]|None = None, **kwargs):
         # https://github.com/huggingface/diffusers/blob/6f1042e36cd588a7b66498f45c3bb7085e4fa395/src/diffusers/pipelines/qwenimage/pipeline_qwenimage_edit_plus.py#L287
         device = torch.device('cuda:0')
-        
+        max_seq_length = self.max_seq_len if image is None else None # edit++ doesn't use max_seq_len to truncate embeds
+
         if isinstance(prompt, str):
             prompt = [prompt]
-
-        if image is not None:
-            if isinstance(image, np.ndarray): # prevents processor from incrementing Picture:{i} in image prompt when trying to true batch
-                cond_images = image
-                prompt = prompt*len(cond_images)
-            else:
-                cond_images = self.preprocess_image(image)
-
-            prompt_embeds, prompt_embeds_mask = self.basei2i._get_qwen_prompt_embeds(prompt, cond_images, device)
-            if negative_prompt:
-                negative_prompt_embeds, negative_prompt_embeds_mask = self.basei2i._get_qwen_prompt_embeds(negative_prompt, cond_images, device)
-
-        else:
-            prompt_embeds, prompt_embeds_mask = self.base._get_qwen_prompt_embeds(prompt, device)
-            if negative_prompt:
-                negative_prompt_embeds, negative_prompt_embeds_mask = self.base._get_qwen_prompt_embeds(negative_prompt, device)
-
-        if batch_size > 1:
-            max_seq_length = self.max_seq_len if image is None else None # edit++ doesn't use max_seq_len to truncate embeds
-            prompt_embeds, prompt_embeds_mask = self._rebatch_embeds(prompt_embeds, prompt_embeds_mask, num_images_per_prompt=batch_size, max_sequence_length=max_seq_length)
-            if negative_prompt:
-                negative_prompt_embeds, negative_prompt_embeds_mask = self._rebatch_embeds(negative_prompt_embeds, negative_prompt_embeds_mask, num_images_per_prompt=batch_size, max_sequence_length=max_seq_length)
-
-        prompt_encodings = dict(prompt_embeds=prompt_embeds, prompt_embeds_mask=prompt_embeds_mask)
+        
+        if not isinstance(image, list):
+            image = [image]
+        
+        if isinstance(image[0], list):
+            image = [self.preprocess_image(img) for img in image] # batch of images:  list[list[Image]] e.g. [[i1],[i2],[i3]]
+        elif image[0] is not None:
+            image = [self.preprocess_image(image)] # multi-image: list[Image], e.g. [[i1, i2, i3]]
+        
+        
+        prompt_embeds, prompt_embeds_mask = tuple(zip(*[self._get_qwen_prompt_embeds(prompt, img, device) for img in image]))
+        prompt_embeds, prompt_embeds_mask = torch.cat(prompt_embeds,0), torch.cat(prompt_embeds_mask,0)
+        prompt_embeds, prompt_embeds_mask = self._rebatch_embeds(prompt_embeds, prompt_embeds_mask, num_images_per_prompt=batch_size, max_sequence_length=max_seq_length)
+        
+        prompt_encodings = {
+            'prompt_embeds': prompt_embeds, 
+            'prompt_embeds_mask': prompt_embeds_mask,
+        }
+        
         if negative_prompt:
-            prompt_encodings.update(negative_prompt_embeds=negative_prompt_embeds, negative_prompt_embeds_mask=negative_prompt_embeds_mask)
+            negative_prompt_embeds, negative_prompt_embeds_mask = tuple(zip(*[self._get_qwen_prompt_embeds(negative_prompt, img, device) for img in image]))
+            negative_prompt_embeds, negative_prompt_embeds_mask = torch.cat(negative_prompt_embeds,0), torch.cat(negative_prompt_embeds_mask,0)
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._rebatch_embeds(negative_prompt_embeds, negative_prompt_embeds_mask, num_images_per_prompt=batch_size, max_sequence_length=max_seq_length)
+            prompt_encodings.update({
+                'negative_prompt_embeds': negative_prompt_embeds, 
+                'negative_prompt_embeds_mask': negative_prompt_embeds_mask
+            })
         
         torch.cuda.empty_cache()
-        return prompt_encodings                    
-    
+        return prompt_encodings
 
     @torch.inference_mode()
     def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
