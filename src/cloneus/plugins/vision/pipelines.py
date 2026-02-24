@@ -1103,7 +1103,7 @@ class SingleStagePipeline:
 
         astrength = np.clip(astrength, 1/steps, 1) # clip strength so at least 1 step occurs
         #astrength = max(astrength*steps, 1)/steps 
-        print(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
+        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
                 
         dim_choices,bsz = self.batch_settings(imsize)
         resized_images = self._resize_image_frames(frame_array, dim_choices, max_num_frames=100, upsample_px_thresh=256, upsample_bsz=8) # upsample first if less 256^2 pixels 
@@ -1124,7 +1124,8 @@ class SingleStagePipeline:
 
         
         if two_stage:
-            latent_blend = self._regen_stage2(latents, resized_images, aseed)
+            raw_image_latents = self.encode_images(resized_images, seed = aseed)
+            latent_blend = self._regen_stage2(latents, raw_image_latents, resized_images)
             
             latents = []
             for img_lats in self._batched_imgs2imgs(prompt_encodings, latent_blend, batch_size=bsz, steps=steps, strength=0.3, guidance_scale=guidance_scale, img_wh=dim_out, seed=aseed, **kwargs):
@@ -1143,11 +1144,12 @@ class SingleStagePipeline:
         release_memory()
     
     @torch.inference_mode()
-    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
+    def _regen_stage2(self, latents:torch.Tensor, raw_image_latents:torch.Tensor, resized_images:list[Image.Image], *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
+        img_w,img_h = resized_images[0].size
+
         if isinstance(latents, list):
             latents = torch.cat(latents, dim=0)
         
-        raw_image_latents = self.encode_images(resized_images, seed = aseed)
         # create a soft mask based on interframe pixel differences
         mot_mask_tensor = torch.from_numpy(interpolation.motion_mask(resized_images, px_thresh=0.02, qtile=90))
         # interpolate to latent shape
@@ -1158,7 +1160,7 @@ class SingleStagePipeline:
         if output_type == 'latent':
             return latent_blend
         # decode back to images by default
-        return self.decode_latents(latent_blend) 
+        return self.decode_latents(latent_blend, height=img_h, width=img_w)
 
   
     @abstractmethod
@@ -1356,85 +1358,6 @@ class SDXLBase(DeepCacheMixin, SingleStagePipeline, ):
         image = self.base.image_processor.postprocess(image, output_type='pil')
         
         return image
-    
-    @torch.inference_mode()
-    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'latent'):
-        return super()._regen_stage2(latents=latents, resized_images=resized_images, aseed=aseed, output_type='latent')
-    
-    @torch.inference_mode()
-    def generate_frames(self, prompt: str, 
-                            image: Image.Image|None = None, 
-                            nframes: int = 11,
-                            steps: int = None, 
-                            strength_end: float = 0.80, 
-                            strength_start: float = 0.30, 
-                            negative_prompt: str = None, 
-                            guidance_scale: float = None, 
-                            aspect: typing.Literal['square','portrait','landscape'] = None, 
-                            mid_frames:int=0,
-                            seed: int = None, 
-                            **kwargs):   
-        
-        gseed = torch.Generator(device='cpu').manual_seed(seed) if seed is not None else None
-        # NOTE: if you attempt to update the seed on each iteration, you get some interesting behavoir
-        # you effectively turn it into a coloring book generator. I assume this is a product of how diffusion works
-        # since it predicts the noise to remove, when you feed its last prediction autoregressive style, boils it down
-        # the minimal representation of the prompt. If you 
-        
-        fkwg = self.config.get_if_none(steps=steps, negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect)
-        
-        negative_prompt=fkwg['negative_prompt']
-        guidance_scale=fkwg['guidance_scale']
-        steps = fkwg['steps']
-        aspect = fkwg['aspect']
-
-        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
-        
-        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
-        
-        # subtract 1 for first image
-        nframes = nframes - 1
-        
-        # SDXL-based models (exclusively?) accept latents in place of image inputs. 
-        # We can massively improve performance by putting of all frame decodes until the very end. 
-
-        latents = []
-        image_frames = []
-        if image is None:
-            strength_end = np.clip(strength_end, 1/steps, 1) 
-            strengths = [strength_end]*nframes
-            w,h = self.config.get_dims(aspect)
-            # timesteps=AysSchedules["StableDiffusionXLTimesteps"]
-            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w,  **prompt_encodings, output_type='latent', generator=gseed).images#[0] # num_images_per_prompt=4
-            
-            latents.append(image)
-        else:
-            strengths = discretize_strengths(steps, nframes, start=strength_start, end=strength_end)
-            # round up strengths since they will be floored in get_timesteps via int()
-            # and it makes step distribution more uniform for lightning models
-            image = self._resize_image(image, aspect=aspect, dim_choices=SDXL_DIMS)
-
-            image_frames.append(image)
-            w,h = image.size
-        
-        #yield image
-        yield -1
-                
-        for i in range(nframes):
-            # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
-            image = self.i2i(image=image, num_inference_steps=steps, strength=strengths[i], guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='latent', generator=gseed).images
-            latents.append(image)
-            yield i
-            
-        image_frames += self.decode_latents(latents, height=h, width=w, )
-        release_memory()
-        if mid_frames:
-            image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
-            
-            #image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
-        yield image_frames
-        release_memory()        
 #endregion
 
 #region Flux
@@ -1625,14 +1548,16 @@ class FluxBase(SingleStagePipeline):
         return image
     
     @torch.inference_mode()
-    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
+    def _regen_stage2(self, latents:torch.Tensor, raw_image_latents:torch.Tensor, resized_images:list[Image.Image], *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
         img_w,img_h = resized_images[0].size
+        
         if isinstance(latents, list):
             latents = torch.cat(latents, dim=0)
+        
         if latents.ndim == 3 and latents.shape[-1] == self.basei2i.transformer.config.in_channels: # 64
             latents = self.basei2i._unpack_latents(latents, img_h, img_w, self.basei2i.vae_scale_factor)
         
-        latent_blend = super()._regen_stage2(latents=latents, resized_images=resized_images, aseed=aseed, output_type='latent')
+        latent_blend = super()._regen_stage2(latents=latents, raw_image_latents=raw_image_latents, resized_images=resized_images, output_type='latent')
         if output_type == 'latent':
             return latent_blend
         
@@ -1651,10 +1576,19 @@ class QwenImageBase(SingleStagePipeline):
         self.max_seq_len = 1024
         self.pipe_xkwgs['true_cfg_scale'] = 1.0
 
+    def t2i(self, *args, **kwargs):
+        out = self.base(*args, **kwargs, **self.pipe_xkwgs)
+        if kwargs.get('output_type') == 'latent':
+            # squeeze in necessary to pass image_preprocessor filter which checks ndim ∈ {3,4}. decode_latents calls .unsqueeze(2) to correct for this
+            out.images = self.base._unpack_latents(out.images, kwargs.get('height'), kwargs.get('width'), self.base.vae_scale_factor).squeeze(2) # [B,C,1,H',W']->[B,C,H',W']
+        return out
+    
     def i2i(self, *args, **kwargs):
-        # because latents shape cannot be reliably inferred, height and width are required for img2img
-        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
-            
+        out = self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
+        if kwargs.get('output_type') == 'latent':
+            out.images = self.basei2i._unpack_latents(out.images, kwargs.get('height'), kwargs.get('width'), self.basei2i.vae_scale_factor).squeeze(2) # [B,C,1,H',W']->[B,C,H',W']
+        return out
+    
     @torch.inference_mode()
     def _scheduler_get(self):
         #  From https://github.com/ModelTC/Qwen-Image-Lightning/blob/342260e8f5468d2f24d084ce04f55e101007118b/generate_with_diffusers.py#L82C9-L97C10
@@ -1757,9 +1691,9 @@ class QwenImageBase(SingleStagePipeline):
         
         image_latents = self.basei2i._encode_vae_image(image=proc_images, generator=generators)
         image_latents = torch.cat([image_latents], dim=0)
-        # image_latents = image_latents.transpose(1, 2)  # [B,1,z,H',W'] 
+        # image_latents = image_latents.transpose(1, 2)  # -> [B,1,z,H',W'] 
         release_memory()
-        return image_latents
+        return image_latents.squeeze(2) # [B,z,1,H',W'] -> [B,z,H',W']
 
     @torch.inference_mode()
     def decode_latents(self, latents, height, width, **kwargs):
@@ -1788,17 +1722,16 @@ class QwenImageBase(SingleStagePipeline):
         return image
     
     @torch.inference_mode()
-    def _regen_stage2(self, latents, resized_images, aseed, *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
-
+    def _regen_stage2(self, latents:torch.Tensor, raw_image_latents:torch.Tensor, resized_images:list[Image.Image], *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
         img_w,img_h = resized_images[0].size
+
         if isinstance(latents, list):
             latents = torch.cat(latents, dim=0)
         if latents.ndim == 3 and latents.shape[-1] == self.basei2i.transformer.config.in_channels: # 64
             latents = self.basei2i._unpack_latents(latents, img_h, img_w, self.basei2i.vae_scale_factor)
-        
-        #latent_blend = super()._regen_stage2(latents=latents, resized_images=resized_images, aseed=aseed, output_type='latent')
+
         latents = latents.squeeze() # [B,z,1,H',W'] -> # [B,z,H',W']
-        raw_image_latents = self.encode_images(resized_images, seed = aseed).squeeze() # [B,1,z,H',W'] -> [B,z,H',W']
+        raw_image_latents = raw_image_latents.squeeze() # [B,1,z,H',W'] -> [B,z,H',W']
         # create a soft mask based on interframe pixel differences
         mot_mask_tensor = torch.from_numpy(interpolation.motion_mask(resized_images, px_thresh=0.02, qtile=90))
         # interpolate to latent shape
@@ -1808,7 +1741,7 @@ class QwenImageBase(SingleStagePipeline):
         
         latent_blend = interpolation.blend_latents(raw_image_latents, latents, latent_soft_mask, time_blend=True, keep_dims=True)
         
-        latent_blend = latent_blend.unsqueeze(2) # [B,z,H',W'] -> [B,z,1,H',W']
+        #latent_blend = latent_blend.unsqueeze(2) # [B,z,H',W'] -> [B,z,1,H',W']
         if output_type == 'latent':
             return latent_blend
         
