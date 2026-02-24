@@ -661,11 +661,19 @@ class SingleStagePipeline:
             negative_prompt = ''
         return prompt, negative_prompt
 
-
     @abstractmethod  
     def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
         raise NotImplementedError('Requires subclass override')
+
+    @abstractmethod
+    def encode_images(self, images, seed:int=42, **kwargs):
+        raise NotImplementedError('Requires subclass override')
     
+    @abstractmethod
+    def decode_latents(self, latents, **kwargs):
+        raise NotImplementedError('Requires subclass override')
+
+
     @torch.inference_mode()    
     def upsample(self, image:np.ndarray | Image.Image | list[Image.Image], scale:float|None=None, out_wh:tuple[int,int]=None):
         '''If scale is None, do not resize after upsampling. Out size will be 4x image_dims (if 4xUltra).
@@ -803,6 +811,25 @@ class SingleStagePipeline:
                 torch.cuda.empty_cache()
 
             yield images
+
+    @torch.inference_mode()
+    def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
+        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
+        batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
+        w,h = img_wh # need wh in case `images` is a batch of latents
+        
+        for imbatch in batched_images:
+            batch_len = len(imbatch)
+            # shared common seed helps SIGNIFICANTLY with cohesion
+            # list of generators is very important. Otherwise it does not apply correctly
+            generators = generator_batch(seed, batch_len, device='cpu')
+                
+            if batch_len != batch_size:
+               batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
+
+            latents = self.i2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=generators, output_type='latent', **kwargs).images 
+
+            yield latents
 
     def _resize_image(self, images: list[Image.Image], aspect: typing.Literal['square', 'portrait', 'landscape'] | None = None, dim_choices = None) -> list[Image.Image]:
         if not isinstance(images, list):
@@ -1054,30 +1081,7 @@ class SingleStagePipeline:
             image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
             #image_frames = interpolate.image_lerp(image_frames, total_frames=33, t0=0, t1=1, loop_back=False, use_slerp=False)
         yield image_frames
-        release_memory()
-    
-
-    @torch.inference_mode()
-    def _batched_imgs2imgs(self, prompt_encodings:dict[str, torch.Tensor], images:list[Image.Image]|torch.Tensor, batch_size:int, steps:int, strength:float, guidance_scale:float, img_wh:tuple[int, int], seed:int, **kwargs):
-        batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_size)
-        batched_images = torch.split(images, batch_size) if isinstance(images, torch.Tensor) else batched(images, batch_size)
-        w,h = img_wh # need wh in case `images` is a batch of latents
         
-        for imbatch in batched_images:
-            batch_len = len(imbatch)
-            # shared common seed helps SIGNIFICANTLY with cohesion
-            # list of generators is very important. Otherwise it does not apply correctly
-            generators = generator_batch(seed, batch_len, device='cpu')
-                
-            if batch_len != batch_size:
-               batched_prompts = rebatch_prompt_embs(prompt_encodings, batch_len)
-
-            latents = self.i2i(image=imbatch, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, height=h, width=w, **batched_prompts, generator=generators, output_type='latent', **kwargs).images 
-
-            yield latents
-    
-
-    
     @torch.inference_mode()
     def regenerate_frames(self, prompt: str, frame_array: np.ndarray, 
                           steps: int = None, 
@@ -1134,15 +1138,15 @@ class SingleStagePipeline:
                 yield len(img_lats)
             
         latents = torch.cat(latents, 0)
-    
         image_frames = self.decode_latents(latents, height=h, width=w)
+        
+        prompt_encodings, latents = release_memory(prompt_encodings, latents)
         
         yield image_frames
 
         te = time.perf_counter()
         runtime = te-t0
         logger.info(f'RUN TIME: {runtime:0.2f}s | BSZ: {bsz} | DIM: {dim_out} | N_IMAGE: {len(resized_images)} | IMG/SEC: {len(resized_images)/runtime:0.2f}')
-        release_memory()
     
     @torch.inference_mode()
     def _regen_stage2(self, latents:torch.Tensor, raw_image_latents:torch.Tensor, resized_images:list[Image.Image], *, output_type: typing.Literal['pil', 'latent'] = 'pil'):
@@ -1162,15 +1166,6 @@ class SingleStagePipeline:
             return latent_blend
         # decode back to images by default
         return self.decode_latents(latent_blend, height=img_h, width=img_w)
-
-  
-    @abstractmethod
-    def encode_images(self, images, seed:int=42, **kwargs):
-        raise NotImplementedError('Requires subclass override')
-    
-    @abstractmethod
-    def decode_latents(self, latents, **kwargs):
-        raise NotImplementedError('Requires subclass override')
 #endregion
 
 #region Latent Base Class
