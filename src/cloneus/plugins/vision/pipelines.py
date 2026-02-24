@@ -2103,58 +2103,6 @@ class QwenEditBase(QwenImageBase):
             yield latents
 
     @torch.inference_mode()
-    def regenerate_image(self, prompt: str, image: Image.Image | list[Image.Image],  
-                         n_images: int = 1,
-                         steps: int = None, 
-                         strength: float = None, 
-                         negative_prompt: str = None, 
-                         guidance_scale: float = None, 
-                         aspect: typing.Literal['square','portrait','landscape'] = None, 
-                         refine_strength: float = None, 
-                         seed: int = None,
-                         **kwargs):
-        
-        fkwg = self.config.get_if_none(steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, )
-        
-        steps = fkwg['steps']
-        guidance_scale = fkwg['guidance_scale']
-        negative_prompt=fkwg['negative_prompt']
-        strength = fkwg['strength']
-        logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
-        
-        if not isinstance(image, list):
-            image = [image]
-        # Resize to best dim match unless aspect given. don't use fkwg[aspect] because dont want None autofilled
-        image = self._resize_image(image, aspect)
-
-        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        prompt_encodings = self.embed_prompts(prompt, image=image, negative_prompt=negative_prompt, clip_skip=self.clip_skip, )
-        
-        # don't want to pass around full image, going to replace with image_url in imagegen anyway
-        call_kwargs = dict(prompt=prompt, image='PLACEHOLDER', steps=steps, strength=strength, negative_prompt=negative_prompt, guidance_scale=guidance_scale, 
-                            aspect=aspect, refine_strength=refine_strength, seed=seed,)
-        
-        
-        if n_images > 1:
-            _,BSZ = self.batch_settings('full')
-            if n_images <= 10:
-                BSZ = max(1, BSZ//2) # if a small batch, cut batch size in half
-
-            call_kwargsets, seeds = self.seed_call_kwargs(seed, call_kwargs, n_images=n_images)
-            batchgen = self._batched_img2img(prompt_encodings, image, num_images=n_images, batch_size=BSZ, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seeds, output_type='pil')
-            
-            for imbatch,kwbatch in zip(batchgen, batched(call_kwargsets, BSZ)):
-                yield (imbatch, kwbatch)
-        else:
-            image = self._pipe_img2img(prompt_encodings, image, num_inference_steps=steps, strength=strength, guidance_scale=guidance_scale, seed=seed)
-            if refine_strength:
-                image = self._pipe_img2upimg(prompt_encodings, image, num_inference_steps=steps, refine_strength=refine_strength, guidance_scale=guidance_scale, seed=seed, scale=1.5)
-            
-            yield ([image], [call_kwargs])
-
-        release_memory()
-        
-    @torch.inference_mode()
     def regenerate_frames(self, prompt: str, frame_array: np.ndarray, 
                           steps: int = None, 
                           astrength: float = 0.5, 
@@ -2258,42 +2206,40 @@ class QwenEditBase(QwenImageBase):
 
         logger.debug(f'unused_kwargs: {kwargs} | fkwg:{fkwg}')
         
-        prompt, negative_prompt = self.preprocess_prompts(prompt, negative_prompt)
-        
+        prompt, negative_prompt = self.preprocess_prompts(prompt=prompt, negative_prompt=negative_prompt)
+
         image_frames = []
 
         if image is None:
+            prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=None)
             w,h = self.config.get_dims(aspect)
-            prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt)
-            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images[0]
+            image = self.t2i(num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images
         else:
-            image = self._resize_image(image)#, aspect=aspect, dim_choices=SDXL_DIMS)
-            w,h = image.size
+            image = self._resize_image(image, aspect=None, dim_choices=None)
+            w,h = image[0].size
 
-        image_frames.append(image)
+        image_frames.extend(image)
 
         # subtract 1 for first image
         nframes = nframes - 1
         
         yield -1
         
-        
         for i in range(nframes):
-            # gseed.manual_seed(seed) # uncommenting this will turn into a coloring book generator
             prompt_encodings = self.embed_prompts(prompt, negative_prompt=negative_prompt, image=image)
-            image = self.i2i(image=image, num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images[0]
-            image_frames.append(image)
+            image = self.i2i(image=image, num_inference_steps=steps, guidance_scale=guidance_scale, height=h, width=w, **prompt_encodings, output_type='pil', generator=gseed).images
+            image_frames.extend(image)
             yield i
-            
-        #image_frames += self.decode_latents(latents, height=h, width=w, )
+
+        if isinstance(image_frames[-1], torch.Tensor):    
+            image_frames = self.decode_latents(image_frames, height=h, width=w, )
         
-        release_memory()
+        prompt_encodings = release_memory(prompt_encodings)
         
         if mid_frames:
             image_frames = self.interpolate(image_frames, inter_frames=mid_frames, batch_size=2)
             
         yield image_frames
-        release_memory()
 #endregion
 
 #region Z-Image
