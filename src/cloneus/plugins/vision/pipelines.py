@@ -60,7 +60,7 @@ from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img 
 from diffusers.hooks import apply_group_offloading
 from huggingface_hub import hf_hub_download, snapshot_download
 
-from nunchaku import NunchakuFluxTransformer2dModel, NunchakuT5EncoderModel, NunchakuQwenImageTransformer2DModel, NunchakuZImageTransformer2DModel
+from nunchaku import NunchakuFluxTransformer2dModel, NunchakuT5EncoderModel#, NunchakuZImageTransformer2DModel # NunchakuQwenImageTransformer2DModel
 from nunchaku.lora.flux.compose import compose_lora
 from nunchaku.utils import get_precision
 
@@ -84,6 +84,9 @@ from compel import CompelForSDXL, CompelForFlux # alternative: https://github.co
 from . import specialists,interpolation
 
 from cloneus.utils.common import batched # release_memory
+
+from .patch.nunchaku_compat import NunchakuQwenImageTransformer2DModel, NunchakuZImageTransformer2DModel
+
 
 logger = logging.getLogger(__name__)
 SDXL_DIMS = [(1024,1024), (1152, 896),(896, 1152), (1216, 832),(832, 1216), (1344, 768),(768, 1344), (1536, 640),(640, 1536),] # https://stablediffusionxl.com/sdxl-resolutions-and-aspect-ratios/
@@ -2254,8 +2257,8 @@ class ZImageBase(LatentOptPipeline):
         transformer_model_path = f"nunchaku-ai/nunchaku-z-image-turbo/svdq-{get_precision()}_r{self.rank}-z-image-turbo.safetensors"
         transformer = NunchakuZImageTransformer2DModel.from_pretrained(transformer_model_path, torch_dtype=torch.bfloat16)
         transformer = transformer.eval().requires_grad_(False)
-            
-        self.base: ZImagePipeline =  ZImagePipeline.from_pretrained(self.model_path, transformer=transformer, text_encoder=text_encoder, torch_dtype=self.dtype, low_cpu_mem_usage = False,)
+    
+        self.base: ZImagePipeline =  ZImagePipeline.from_pretrained(self.model_path, transformer=transformer, text_encoder=text_encoder, torch_dtype=self.dtype, low_cpu_mem_usage = True,)
         
         if not self.offload:
             self.base = self.base.to(0)
@@ -2263,10 +2266,11 @@ class ZImageBase(LatentOptPipeline):
         self._scheduler_init()
         self.load_loras()
 
-        self.basei2i: ZImageImg2ImgPipeline = ZImageImg2ImgPipeline.from_pipe(self.base, transformer=self.base.transformer, text_encoder=self.base.text_encoder, torch_dtype=self.dtype)
-        
+        self.basei2i: ZImageImg2ImgPipeline = ZImageImg2ImgPipeline.from_pipe(self.base, transformer=None, text_encoder=self.base.text_encoder, torch_dtype=self.dtype)
+        self.basei2i.transformer = self.base.transformer
+
         for pipe in (self.base, self.basei2i):
-            pipe.enable_xformers_memory_efficient_attention()
+            # pipe.enable_xformers_memory_efficient_attention()
             # pipe.transformer.set_attention_backend("xformers") # "flash"
             # pipe.text_encoder.set_attn_implementation('flash_attention_2')
             pipe.vae.enable_slicing()
