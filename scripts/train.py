@@ -188,7 +188,18 @@ def main(args):
     #     assert num_new_vocab==0, 'Using non-vocab special tokens is not currently supported.'
     
     # Config Autofill
-    cfg.special_tokens = tokenizer.special_tokens_map
+    cfg.model_capabilities = ['text']
+
+    # TODO: better way to check for this
+    is_processor = hasattr(tokenizer, 'tokenizer')
+    if 'tool_call' in tokenizer.chat_template:
+        cfg.model_capabilities += ['tools']
+    if hasattr(tokenizer,'image_processor'):
+        cfg.model_capabilities += ['image']
+    if hasattr(tokenizer,'video_processor'):
+        cfg.model_capabilities += ['video']
+
+    cfg.special_tokens = tokenizer.tokenizer.special_tokens_map if is_processor else tokenizer.special_tokens_map
     cfg.model_architecture = model.config.architectures[0]
     cfg.ctx_len = cfg.chunk_size
     cfg.has_custom_tokens=(num_custom_tokens is not None and num_custom_tokens > 0)
@@ -202,7 +213,6 @@ def main(args):
     df_chat = dataset.prepare_dataset_dataframe(data_file_path, cfg)
     cfg = dataset.fill_cfg_from_data(df_chat['formatted_author_tag'], cfg) # fill fprompt, name_mappings, name_mappings_json
 
-    is_processor = hasattr(tokenizer, 'tokenizer')
     dataset_format  = ('tokens' if is_processor else 'text') 
             
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:

@@ -19,6 +19,7 @@ from safetensors.torch import load_model as load_model_safetensors, save_model a
 from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model
 
 from trl import SFTTrainer, SFTConfig
+from trl.trainer.sft_trainer import DataCollatorForLanguageModeling as SFTDataCollatorForLanguageModeling
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +99,18 @@ class CTrainer(Trainer):
 
 def get_trainer(model, data, tokenizer, args, peft_config=None, callbacks=None, collator_pad_multiple=None):
     if issubclass(args.__class__, SFTConfig):
+        collator = None
+        # If vision model but only want to train text, use seq2seq collator
+        if hasattr(tokenizer, 'tokenizer'):
+            collator = DataCollatorForSeq2Seq(tokenizer = tokenizer, model=model, max_length=args.max_length)
         # https://huggingface.co/docs/trl/main/en/sft_trainer#packing-dataset-constantlengthdataset
         trainer = SFTTrainer(
             model=model,
             args=args,
             # data_collator=UnslothVisionDataCollator(model, tokenizer),
-            # data_collator = DataCollatorForSeq2Seq(tokenizer = tokenizer),
-            #data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+            data_collator = collator,
+            # data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+            # data_collator=SFTDataCollatorForLanguageModeling(tokenizer.pad_token_id, completion_only_loss=True, padding_free=args.padding_free),
             train_dataset=data['train'],
             eval_dataset=data['validation'],
             processing_class=tokenizer,
@@ -118,7 +124,7 @@ def get_trainer(model, data, tokenizer, args, peft_config=None, callbacks=None, 
             train_dataset=data["train"],
             eval_dataset=data['validation'],
             processing_class=tokenizer,
-            data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=collator_pad_multiple),
+            # data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=collator_pad_multiple),
             # data_collator=UnslothVisionDataCollator(model, tokenizer),
             args=args,
             callbacks=callbacks,
@@ -246,6 +252,13 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
         #formatting_func=formatfunc,
         max_seq_length=chunk_size,
         max_length=chunk_size,
+
+        # assistant_only_loss=True,
+
+        # remove_unused_columns = False,#False,
+        # dataset_text_field = "",
+        # dataset_kwargs = {"skip_prepare_dataset": True},
+        # max_length = 2048, change
     )
     if cfg.use_sft_trainer:
         TrainingConfig = SFTConfig

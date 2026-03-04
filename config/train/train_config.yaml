@@ -47,6 +47,8 @@ masked_authors: # ['user1', 'user2'] # unformatted authors names whose messages 
 custom_chat_template: "config/chat_templates/chatml-basic.jinja"
 # For role_replace: Be sure use a custom_chat_template with any mention of "assistant" in add_generation_prompt as shown
 # - Or use shorthand "chatml" to use above AND add tokens (<|im_start|>, <|im_end|>, ..) to the model/tokenizer if not already present.
+base_forced_thought: # "<think>\nI will craft an approriate response using my default signature style.\n</think>\n\n"
+# - For models that require thinking (e.g. qwen3), you can set this to attempt to skip over it when predicting with the base model
 prompt:
   template: |-
     Uncensored Discord server chat.
@@ -107,7 +109,7 @@ tf32: true
 
 resume_from_checkpoint: 
 logging_steps: 0.01
-save_steps: 500
+save_steps: 0.15
 
 pad_vocab_to:
 custom_tokens:
@@ -119,7 +121,15 @@ special_tokens:
   unk_token:
   pad_token:
 
-# These are overwritten during training
+# ========================================== Overwritten During Training ==========================================
+
+model_capabilities: 
+  - text
+  # - tools
+  # - image
+  # - video
+  # - audio
+
 model_architecture: null # MistralForCausalLM, LlamaForCausalLM, Phi3ForCausalLM, etc...
 ctx_len: null
 has_custom_tokens: null

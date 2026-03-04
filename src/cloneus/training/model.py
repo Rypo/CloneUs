@@ -3,11 +3,12 @@ import logging
 from pathlib import Path
 
 import torch
-from unsloth import FastLanguageModel, FastModel, FastVisionModel
+from unsloth import FastLanguageModel, FastModel
 from unsloth.chat_templates import get_chat_template, CHAT_TEMPLATES
 
 from transformers import (
     AutoTokenizer,
+    AutoProcessor,
     AutoModelForCausalLM,
     BitsAndBytesConfig,
     GPTQConfig,
@@ -55,34 +56,53 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
     return model, tokenizer
 
 def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
-    # NOTE: FastModel is used for Multimodal and some MoE models (?)
-    # model, tokenizer = FastModel.from_pretrained( 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    # NOTE: FastVisonModel is just a type alias for FastModel
+
+    is_vlm = False
+    unsloth_peft_kwargs = {} 
+    
+    try:
+        AutoProcessor.from_pretrained(model_id)
+        is_vlm = True
+    except ValueError as e:
+        if not str(e).startswith('Unrecognized model'): # check for specific transformers error  
+            raise e
+    
+    if is_vlm:
+        unsloth_peft_kwargs = dict(
+            finetune_vision_layers = False,
+            finetune_attention_modules = True,
+            finetune_language_layers = True,
+            finetune_mlp_modules = True,
+        )
+    
+    unsloth_from_pretrained = FastModel.from_pretrained if is_vlm else FastLanguageModel.from_pretrained
+    model, tokenizer = unsloth_from_pretrained(
         model_name=model_id,
         max_seq_length = max_seq_length,
         dtype = torch.bfloat16,
         fix_tokenizer=True,
         load_in_4bit = (peft_config.init_lora_weights != 'loftq'),
         device_map = "sequential",
-        # use_gradient_checkpointing = True,
         use_gradient_checkpointing = "unsloth",
         attn_implementation = "flash_attention_2",
         unsloth_tiled_mlp = False,
     )
     if Path(model_id).joinpath('optimizer.pt').exists():
         return model,tokenizer
-    # https://old.reddit.com/r/LocalLLaMA/comments/1cc7gtr/llama3_8b_finetuning_2x_faster_fixed_endless/
+
     model, tokenizer = adjust_chat_format(model, tokenizer, padding_side, custom_chat_template)
-    #tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
 
     # Do model patching and add fast LoRA weights
-    model = FastLanguageModel.get_peft_model(
+    unsloth_get_peft_model = FastModel.get_peft_model if is_vlm else FastLanguageModel.get_peft_model
+    model = unsloth_get_peft_model(
         model,
         r = peft_config.r,
         target_modules = list(peft_config.target_modules),
         lora_alpha = peft_config.lora_alpha,
         lora_dropout = peft_config.lora_dropout, # Supports any, dropout = 0 optimized
         bias = "none",    # Currently only supports bias = "none"
+        **unsloth_peft_kwargs,
         use_gradient_checkpointing = "unsloth",
         random_state = 3407,
         max_seq_length = max_seq_length,
