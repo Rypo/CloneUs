@@ -7,19 +7,21 @@ import warnings
 from pathlib import Path
 
 import torch
-from unsloth import FastLanguageModel
+from unsloth import FastLanguageModel, FastModel
 
 from transformers import (
     AutoTokenizer,
+    AutoProcessor,
     AutoModelForCausalLM,
     BitsAndBytesConfig,
     GPTQConfig,
     AwqConfig,
 )
 import transformers
-from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase, AutoModelForImageTextToText#, AutoModelForMultimodalLM
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
 from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
+from accelerate.utils import release_memory
 
 from cloneus.data import tokenization
 from cloneus.plugins import sampler_hijack
@@ -37,17 +39,30 @@ def cleanup(func):
 
 def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_tokenizer:bool=False, uncomment_chat_template_bos:bool = True, *inputs, **kwargs):
     '''AutoTokenizer.from_pretrained but force padding_side=left and if needed pad_tok=eos_tok, add bos to chat template'''
+    processor = None
     # Fixes issues with some tokenizers special token spacing. If trained with unsloth, should have fixed+saved already. 
     if refix_tokenizer:
         from unsloth import load_correct_tokenizer
         tokenizer = load_correct_tokenizer(pretrained_model_name_or_path, trust_remote_code=True)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
+        try: 
+            processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
+            if not hasattr(processor, 'tokenizer'):
+                raise ValueError
+            tie_chat_template = (processor.chat_template == processor.tokenizer.chat_template)
+            processor.tokenizer = tokenization.set_tokenizer_inference(processor.tokenizer, uncomment_chat_template_bos=uncomment_chat_template_bos)
+            if tie_chat_template:
+                processor.chat_template = processor.tokenizer.chat_template
+            
+            sampler_hijack.hijack_samplers(processor) # this enables XTC, DRY sampling methods
+        except ValueError:
+            tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
 
-    tokenizer = tokenization.set_tokenizer_inference(tokenizer, uncomment_chat_template_bos=uncomment_chat_template_bos)
-    
-    sampler_hijack.hijack_samplers(tokenizer) # this enables XTC, DRY sampling methods
-
+            tokenizer = tokenization.set_tokenizer_inference(tokenizer, uncomment_chat_template_bos=uncomment_chat_template_bos)
+            
+            sampler_hijack.hijack_samplers(tokenizer) # this enables XTC, DRY sampling methods
+    if processor:
+        return processor
     return tokenizer
 
         
@@ -126,28 +141,42 @@ def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
     return llm
 
 @torch.inference_mode()
-def load_unsloth(checkpoint_dirpath:Path, dtype=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
-    tokenizer = auto_inference_tokenizer(checkpoint_dirpath)
-    #print('NAME OR PATH',f'{tokenizer.name_or_path=}')
-    #warnings.warn('As of patch 2024.4, unsloth inference is incompatible with contrastive search and will throw an IndexError. Use with caution.')
-    # Appears fixed: ~~can't use unsloths tokenizer without overiding chat_template, padding side, etc.~~
+def load_unsloth(checkpoint_dirpath:Path, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+    tokenizer = auto_inference_tokenizer(checkpoint_dirpath, uncomment_chat_template_bos=True, force_bos_chat_template=False)
+
+    quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype = torch.bfloat16, bnb_4bit_quant_type = 'nf4', bnb_4bit_use_double_quant=True)
     peft_config = PeftConfig.from_pretrained(checkpoint_dirpath)
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = checkpoint_dirpath.as_posix(), #peft_config.base_model_name_or_path,
-        max_seq_length = tokenizer.model_max_length,
+
+    pt_kwargs = dict(
+        # pretrained_model_name_or_path = checkpoint_dirpath,
+        pretrained_model_name_or_path = peft_config.base_model_name_or_path,
+        low_cpu_mem_usage = True,
+        quantization_config = quant_config,
+        device_map = "auto",
         dtype = dtype,
-        load_in_4bit = True,
-        trust_remote_code = True,
-        low_cpu_mem_usage=True,
-        attn_implementation=attn_implementation,
-
+        attn_implementation = attn_implementation,
     )
-    tokenizer = tokenization.set_tokenizer_inference(tokenizer, uncomment_chat_template_bos=True, force_bos_chat_template=False)
-    model = FastLanguageModel.for_inference(model).to(dtype)
+    peft_kwargs = dict(
+         adapter_name = 'default', 
+         is_trainable = False, 
+         config = peft_config, 
+         autocast_adapter_dtype = True, 
+         low_cpu_mem_usage = True,
+    )
+    # Explictly using PeftModel.from_pretrained rather than directly loading adapter with AutoModel give access to peft methods
+    if hasattr(tokenizer, 'tokenizer'):
+        model = AutoModelForImageTextToText.from_pretrained(**pt_kwargs)
+        model = PeftModel.from_pretrained(model, checkpoint_dirpath, **peft_kwargs)
+        model = FastModel.for_inference(model)#.to(dtype)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(**pt_kwargs)
+        model = PeftModel.from_pretrained(model, checkpoint_dirpath, **peft_kwargs)
+        model = FastLanguageModel.for_inference(model)#.to(dtype)
+        
     model = model.eval().requires_grad_(False)
-
+    # model.is_loaded_in_8bit = False
+    release_memory()
     return model, tokenizer
-
 
 @cleanup
 def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','merged','gptq','unsloth','gguf','aqlm','bnb4', ]=None, **kwargs):

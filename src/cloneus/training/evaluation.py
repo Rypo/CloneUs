@@ -150,10 +150,11 @@ def sample_trained(runs_path, prompts: list[str], outfile='test_samples.log', ge
             write_samples(gc_inps_outs, run_path/outfile)
     elif any(runs_path.glob('*.safetensors')):
         run_path = runs_path
-        print('running 1 checkpoint:',run_path)
+        print('Running 1 checkpoint:', run_path)
         # sample eval from 1 checkpoint. Write to log file inside of the checkpoint dir
-        clo = Cloneus.from_pretrained(run_path, load=False)#.load_model() # load taken care of in eval_ckpt
-        gc_inps_outs = eval_ckpt(clo, checkpoint_path=run_path, genconfig_modes=genconfig_modes, prompts=prompts, question_author=question_author, author_list=author_list)
+        #clo = Cloneus.from_pretrained(run_path, load=False)#.load_model() # load taken care of in eval_ckpt
+        #gc_inps_outs = eval_ckpt(clo, checkpoint_path=run_path, genconfig_modes=genconfig_modes, prompts=prompts, question_author=question_author, author_list=author_list)
+        gc_inps_outs = eval_run(checkpoint_paths=[run_path], prompts=prompts, genconfig_modes=genconfig_modes, question_author=question_author, author_list=author_list)
         write_samples(gc_inps_outs, run_path/outfile)
     else:
         raise FileNotFoundError('Unable to find any models to evaluate')
