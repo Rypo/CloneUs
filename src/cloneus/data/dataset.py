@@ -1,3 +1,4 @@
+import re
 import copy
 import typing
 import dateutil
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 from omegaconf import OmegaConf,DictConfig
+import torch
 import datasets
 from transformers import PreTrainedTokenizerFast, PreTrainedTokenizerBase
 
@@ -19,7 +21,139 @@ from ..plugins import youtube
 from . import etl, useridx
 from .tokenization import check_if_system, to_jinja_template
 
-def map_to_inputs(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerFast, max_length:int, truncation:bool, text_field='text'):
+def get_roletag_regex_masks(masked_role_tags: str | list[str] = 'system', role_tag_template: str = r'<|im_start|>{role_tag}'):
+    '''Helper function to build properly escaped regex mask bounds for use in mask_message_roles'''
+    if not isinstance(masked_role_tags, list):
+        masked_role_tags = [masked_role_tags]
+    
+    if len(masked_role_tags) > 1:
+        re_esc_roles = [re.escape(role_tag_template.format(role_tag = tag)) for tag in masked_role_tags]
+        re_mask_start = '(?:{exclude})'.format(exclude = "|".join(re_esc_roles))
+    else:
+        re_mask_start = re.escape(role_tag_template.format(role_tag = masked_role_tags[0]))
+    
+    re_mask_end = re.escape(role_tag_template.format(role_tag = ''))
+    return re_mask_start, re_mask_end
+
+def mask_message_roles(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerBase, re_mask_start:str = r'<\|im_start\|>system', re_mask_end:str = r'<\|im_start\|>', num_proc=16):
+    '''This function is only necessary because Unsloth requires raw text inputs. 
+    
+    🤗 SFTTrainer could do this better/simpler by adding {% generation %} fences in chat_template and feeding message logs `with assistant_only_loss=True`'''
+    # Match mask_start + anything as long as it is followed by mask_end or endline (`|\Z`). 
+    # match endline in case last role in sequence.
+    re_mask = re.compile(rf'{re_mask_start}.+?(?={re_mask_end}|\Z)', flags = re.DOTALL + re.MULTILINE) # re.IGNORECASE
+    
+    output_keys = ['labels', 'input_ids']
+
+    if (is_packed := 'seq_lengths' in dset.column_names):
+        output_keys += ['seq_lengths', 'completion_mask']
+    else:
+        output_keys += ['attention_mask']
+        # "For padding-free, we should NOT create attention_mask as it causes FlashAttention to ignore position_ids and compute wrong cu_seq_lens from the all-1s mask"
+        # - https://github.com/huggingface/trl/blob/17acd61f28140243a458d10656a2194af788ff38/trl/trainer/sft_trainer.py#L171C1-L172C57
+    
+    def _mask_message_roles(example:dict[str, list[int]]):
+        seq_lengths = example.get('seq_lengths', [len(example['input_ids'])])
+
+        offset = 0
+        
+        adjusted = {
+            'labels': [],
+            'input_ids': [],
+            'attention_mask': [],
+            'seq_lengths': [],
+            'completion_mask': [],
+        }
+
+        for seqlen in seq_lengths:
+            inp_seq = example['input_ids'][offset:(offset+seqlen)]
+            text_sample = tokenizer.decode(inp_seq, skip_special_tokens=False)
+            offset += seqlen
+            # this is more consistent in tokenization than just using `len(example['input_ids'])`
+            # e.g. LLama3.1 failed because tokenization != forward(backward())
+            # ['rel', '????????', '??', '?\n', 'AND'] 
+            # ['rel', '?????', '????', '?', '?\n']
+            orig_length = tokenizer(text=text_sample, add_special_tokens=False, return_length=True)['length'][0]
+            adjusted['seq_lengths'].append(orig_length)
+            
+            inds = []
+            for m in re_mask.finditer(text_sample):
+                inds.extend(m.span())
+        
+            # pairwise index with alternating 0,1 labels. Add len for last segment.
+            char_idx_labels = [(s, e, i%2) for i,(s,e) in enumerate(zip(inds, inds[1:]+[len(text_sample)]))]
+            
+            start_idx = char_idx_labels[0][0]
+            char_idx_labels = [(0, start_idx, 1)] + char_idx_labels # add back anything that comes before first match
+            
+            labels = []
+            for s,e,label in char_idx_labels:
+                if s!=e:
+                    inps = tokenizer(text=text_sample[s:e], add_special_tokens=False, return_length=True, return_attention_mask=True, return_tensors='pt')
+                    token_len = inps['length'][0]
+                    
+                    input_ids = torch.as_tensor(inps['input_ids']).squeeze().tolist() # an expensive flatten
+                    attention_mask = torch.as_tensor(inps['attention_mask']).squeeze().tolist()
+
+                    labels.extend([-100]*token_len if label==0 else input_ids)
+                    
+                    adjusted['input_ids'].extend(input_ids)
+                    adjusted['attention_mask'].extend(attention_mask)
+                    adjusted['completion_mask'].extend([label]*token_len)
+
+            if len(labels) != orig_length:
+                raise RuntimeError(f'Parser failure. Length mismatch: {len(labels)} != {orig_length}')
+            
+            adjusted['labels'].extend(labels)
+        
+        result = {key: adjusted[key] for key in output_keys}
+        # result = {'labels': adjusted['labels'], 'input_ids': adjusted['input_ids']}
+        
+        # if 'seq_lengths' in example:
+        #     result.update({'seq_lengths': adjusted['seq_lengths'], 'completion_mask': adjusted['completion_mask']})
+        # else:
+        #     # "For padding-free, we should NOT create attention_mask as it causes FlashAttention to ignore position_ids and compute wrong cu_seq_lens from the all-1s mask"
+        #     # - https://github.com/huggingface/trl/blob/17acd61f28140243a458d10656a2194af788ff38/trl/trainer/sft_trainer.py#L171C1-L172C57
+        #     result.update({'attention_mask': adjusted['attention_mask']})
+        return result
+
+    # samp = dset.take(10).map(_mask_message_roles, num_proc=1)
+    # samp.column_names
+    # non_numer_col = [t for t in ['text','messages'] if t in trainer.train_dataset.column_names]
+    return dset.map(_mask_message_roles, num_proc=num_proc)
+
+    # trainer.train_dataset = trainer.train_dataset.map(_mask_message_roles, num_proc=num_proc)#.remove_columns(non_numer_col)
+    # # if 'seq_lengths' not in trainer.train_dataset.column_names:
+    # #     trainer.train_dataset = trl.pack_dataset(trainer.train_dataset, trainer.args.max_seq_length)
+    
+    # if trainer.eval_dataset:
+    #     trainer.eval_dataset = trainer.eval_dataset.map(_mask_message_roles, num_proc=num_proc)#.remove_columns(non_numer_col)
+
+    # return trainer
+
+def apply_role_mask_tokens(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, num_proc = 32, *, no_format_roles: tuple[str] = ('system', 'user', 'assistant')):
+    default_mask_roles = {
+        'content_prefix': ['system'],
+        'replace_role': ['system'],
+        'content_prefix_ot': ['system', 'user']
+    }
+    
+    role_tag_template = cfg.get('mask_roletag_template')
+    masked_authors = cfg.get('masked_authors')
+    # Here is where we could set masked_role_tags to ['system','user'] 
+    # or even ['system', 'BOT (BotName)'] if we don't drop bot messages TODO: try
+    # or for max inefficency, ['system', 'User1 (firstName1)', 'User3 (firstName3)', ...]
+    if role_tag_template:
+        if not masked_authors:
+            masked_authors = default_mask_roles[cfg.tag_placement]
+        
+        masked_role_tags = [author if author in no_format_roles else useridx.format_author_tag(author, cfg.author_tag) for author in masked_authors]
+
+        mask_start, mask_end = get_roletag_regex_masks(masked_role_tags=masked_role_tags, role_tag_template=role_tag_template)
+        dset = mask_message_roles(dset, tokenizer, mask_start, mask_end, num_proc = num_proc)
+    return dset
+
+def map_to_inputs(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerBase, max_length:int, truncation:bool, text_field='text'):
     '''Maps Dataset text field to those for model input (input_ids, special_tokens_mask, length)
     
     Importantly, it DOES add special tokens. This is primarily a concern after calling apply_chat_template(tokenize=False) which,
@@ -383,7 +517,7 @@ def prepare_dataset_dataframe(chat_csv: str, cfg: DictConfig, **cfg_dot_kwargs):
     return df_chat
 
 
-def chat_sessions_dataset(df_chat: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','raw'] = 'tokens'):
+def chat_sessions_dataset(df_chat: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','messages'] = 'tokens'):
     system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer)
     
     df_convo = df_chat.groupby(['split','chat_session'])[['formatted_author_tag','text','intrn_time_gap']].agg(list).drop_duplicates('text')
@@ -399,19 +533,24 @@ def chat_sessions_dataset(df_chat: pd.DataFrame, tokenizer: PreTrainedTokenizerB
         
     
     dset = datasets.DatasetDict({
-        'train': datasets.Dataset.from_dict({'text': dedupe_conversations(train_convos)}, split='train'),
-        'validation': datasets.Dataset.from_dict({'text': dedupe_conversations(eval_convos)}, split='validation'),
+        'train': datasets.Dataset.from_dict({'messages': dedupe_conversations(train_convos)}, split='train'),
+        'validation': datasets.Dataset.from_dict({'messages': dedupe_conversations(eval_convos)}, split='validation'),
     })
     
-    if dataset_format=='raw':
+    if dataset_format=='messages':
         return dset
     
     # TODO: pass date_string in as kwarg to apply_chat_template. Use the earliest date in chat sequence if multiple
     tokenizer_kwargs={'add_special_tokens': False} # If returning as text, do NOT add spec tokens. When the Trainer tokenizes, it WILL add special tokens,
-    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)})
+    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs, batched=True)}).remove_columns(['messages'])
     
     if dataset_format == 'tokens':
-        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
+        dset = dset.map(lambda s: tokenizer(text = s['text'], max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, 
+                                            add_special_tokens=True, return_special_tokens_mask=True, return_length=True), batched=True).remove_columns(['text'])
+        #dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation).remove_columns(['text'])
+    
+        if cfg.get('mask_roletag_template'):
+            dset = apply_role_mask_tokens(dset, tokenizer, cfg, num_proc=32)
 
     return dset
 
@@ -429,23 +568,30 @@ def to_chat_triplets(conversation:list[dict[str,str]], system_message:str, ctx_t
     return messages[::-1]
 
 
-def subsession_completions_dataset(chat_session_dset: datasets.Dataset, tokenizer:PreTrainedTokenizerBase, system_message:str, tag_sep:str = '\n', ctx_template:str='{role}{tag_sep}{content}', ctx_sep:str = '\n', dataset_format: typing.Literal['text','tokens','raw'] = 'text'):
-    ctx_template = ctx_template.format(role='{role}', tag_sep=tag_sep, content='{content}')
-    dset = chat_session_dset.map(lambda ex: {'conversations': to_chat_triplets(ex['text'], system_message, ctx_template, ctx_sep)},)
+def subsession_completions_dataset(df_chat: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, cfg:DictConfig, ctx_template:str='{role}{tag_sep}{content}', ctx_sep:str = '\n', dataset_format: typing.Literal['text','tokens','messages'] = 'text'):
+    ctx_template = ctx_template.format(role='{role}', tag_sep=cfg.tag_sep, content='{content}')
+
+    chat_session_dset = chat_sessions_dataset(df_chat, tokenizer, cfg, dataset_format='messages')
+    dset = chat_session_dset.map(lambda ex: {'conversations': to_chat_triplets(ex['messages'], cfg.fprompt, ctx_template, ctx_sep)},)
     
     dset = datasets.DatasetDict({
         'train': datasets.Dataset.from_dict({'messages': [y for x in dset['train']['conversations'] for y in x]}, split='train'),
         'validation': datasets.Dataset.from_dict({'messages': [y for x in dset['validation']['conversations'] for y in x]}, split='validation'),
     })
     
-    if dataset_format == 'raw':
+    if dataset_format == 'messages':
         return dset
 
     tokenizer_kwargs={'add_special_tokens': False} # If returning as text, do NOT add spec tokens. When the Trainer tokenizes, it WILL add special tokens,
-    dset = dset.map(lambda ex: {'text': tokenizer.apply_chat_template(ex['messages'], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)}, remove_columns='messages', batched=True)
+    dset = dset.map(lambda ex: {'text': tokenizer.apply_chat_template(ex['messages'], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)}, batched=True).remove_columns(['messages'])
     
     if dataset_format=='tokens':
-        dset = map_to_inputs(dset, tokenizer, max_length=tokenizer.model_max_length, truncation=False)
+        dset = dset.map(lambda s: tokenizer(text = s['text'], max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, 
+                                            add_special_tokens=True, return_special_tokens_mask=True, return_length=True), batched=True).remove_columns(['text'])
+        #dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation).remove_columns(['text'])
+    
+        if cfg.get('mask_roletag_template'):
+            dset = apply_role_mask_tokens(dset, tokenizer, cfg, num_proc=32)
     
     return dset
 
@@ -550,7 +696,7 @@ def convo_batch_max_tokens(unified_conversation:list[dict[str,str]], tokenizer:P
     return prepared_conversations
 
 
-def max_tokens_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','raw'] = 'tokens'):
+def max_tokens_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','messages'] = 'tokens'):
     '''Dataset groupings of sequential texts concatenated up to a maximum of `cfg.chunk_size` total tokens
     
     Chat sessions are not assigned, and the only use of Date or timestamp if present is consecutive message merge.
@@ -565,19 +711,23 @@ def max_tokens_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase,
     eval_convos = convo_batch_max_tokens(sr_flat_convo['eval'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
     
     dset = datasets.DatasetDict({
-        'train': datasets.Dataset.from_dict({'text': train_convos}, split='train'),
-        'validation': datasets.Dataset.from_dict({'text': eval_convos}, split='validation'),
+        'train': datasets.Dataset.from_dict({'messages': train_convos}, split='train'),
+        'validation': datasets.Dataset.from_dict({'messages': eval_convos}, split='validation'),
     })
     
-    if dataset_format == 'raw':
+    if dataset_format == 'messages':
         return dset
 
     tokenizer_kwargs={'add_special_tokens': False} # If returning as text, do NOT add spec tokens. When the Trainer tokenizes, it WILL add special tokens,
-    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)})
+    dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False, add_generation_prompt=False, tokenizer_kwargs=tokenizer_kwargs)}).remove_columns(['messages'])
     
     # https://huggingface.co/learn/nlp-course/chapter5/3
     if dataset_format=='tokens':
-        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
+        dset = dset.map(lambda s: tokenizer(text = s['text'], max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, 
+                                            add_special_tokens=True, return_special_tokens_mask=True, return_length=True), batched=True).remove_columns(['text'])    
+        
+        if cfg.get('mask_roletag_template'):
+            dset = apply_role_mask_tokens(dset, tokenizer, cfg, num_proc=32)
 
     return dset
 
@@ -585,8 +735,13 @@ def max_tokens_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase,
 
 def jsonl_dataset(train_jsonl:str, eval_jsonl:str, tokenizer:PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['tokens','raw'] = 'tokens'):
     dset = datasets.load_dataset("json", data_files={"train": train_jsonl, "validation": eval_jsonl})
-    if dataset_format == 'tokens':
-        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation)
+    
+    if dataset_format=='tokens':
+        dset = dset.map(lambda s: tokenizer(text = s['text'], max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, 
+                                            add_special_tokens=True, return_special_tokens_mask=True, return_length=True), batched=True).remove_columns(['text'])
+    
+        if cfg.get('mask_roletag_template'):
+            dset = apply_role_mask_tokens(dset, tokenizer, cfg, num_proc=32)
     
     return dset
 
@@ -625,7 +780,11 @@ def ungrouped_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase, 
         return dset
     
     #dset = dset.map(lambda x: {"text": tokenizer.apply_chat_template(x["text"], tokenize=False, add_generation_prompt=False)})
-    if dataset_format == 'tokens':
-        dset = map_to_inputs(dset, tokenizer, max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, text_field='text')
+    if dataset_format=='tokens':
+        dset = dset.map(lambda s: tokenizer(text = s['text'], max_length=cfg.chunk_size, truncation=cfg.dataset.allow_truncation, 
+                                            add_special_tokens=True, return_special_tokens_mask=True, return_length=True), batched=True).remove_columns(['text'])
+    
+        if cfg.get('mask_roletag_template'):
+            dset = apply_role_mask_tokens(dset, tokenizer, cfg, num_proc=32)
     
     return dset

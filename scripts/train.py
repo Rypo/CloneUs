@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import torch
 import unsloth # Unsloth should be imported before trl, transformers, peft to ensure all optimizations are applied.
 from peft import LoraConfig
+import transformers
 
 import cloneus.training.model as mllm
 import cloneus.training.trainer as mtrain
@@ -41,6 +42,12 @@ def write_first_batches(trainer:mtrain.Trainer, batchsample_dir='_tmp/sample_bat
         except Exception as e:
             f.write(str(e))
     
+    with open(sample_path/'eval_batch_masked.txt', 'w') as f:
+        try:
+            f.writelines(mtrain.get_batch(trainer, train=False, masked=True))
+        except Exception as e:
+            f.write(str(e))
+
     with open(sample_path/'train_batch.txt', 'w') as f:
         try:
             f.writelines(mtrain.get_batch(trainer, train=True))
@@ -153,20 +160,7 @@ def main(args):
         peft_config = LoraConfig.from_pretrained(resume_ckpt)
         peft_config.inference_mode = False
     else:
-        target_modules = (cfg.lora_target_modules if isinstance(cfg.lora_target_modules, str) else list(cfg.lora_target_modules)) # all-linear
-        peft_config = LoraConfig(
-            r=cfg.lora_r,
-            lora_alpha=cfg.lora_alpha,
-            target_modules=target_modules, 
-            lora_dropout=cfg.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-            inference_mode = False,
-            use_rslora=cfg.lora_use_rslora,
-            init_lora_weights=('loftq' if cfg.lora_use_loftq else True),
-            #loftq_config=
-            use_dora=cfg.lora_use_dora
-    )
+        peft_config = mtrain.read_peft_config(cfg)
     
     # This does nothing currently.
     num_custom_tokens = tokenization.apply_special_tokens(tokenizer=None, custom_tokens=cfg.custom_tokens, pad_vocab_to=cfg.pad_vocab_to)
@@ -182,20 +176,16 @@ def main(args):
         peft_config,
         cfg,
         n_custom_tokens=num_custom_tokens,
-        #bf16_full_eval=cfg.bf16, #  faster and save memory but can harm metric values (default: False)
-        #torch_compile=True,
         report_to="wandb",
         save_only_model = False, # if True (default False), can't resume training from checkpoint. Doesn't store the optimizer, scheduler & rng state. Must use from_pretrained if True
         resume_from_checkpoint=resume_ckpt,
     )
 
     model, tokenizer = mllm.model_tokenizer_from_config(peft_config, cfg)
-    
+
     # if (special_token_overrides := dict(filter(lambda kv: kv[1], cfg.special_tokens.items()))):
     #     num_new_vocab = tokenizer.add_special_tokens(special_token_overrides)
     #     assert num_new_vocab==0, 'Using non-vocab special tokens is not currently supported.'
-    
-    data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
     
     # Config Autofill
     cfg.special_tokens = tokenizer.special_tokens_map
@@ -207,12 +197,14 @@ def main(args):
     cfg.fprompt = None # filled during dataset creation
     cfg.base_dir = train_args.output_dir.replace(str(cpaths.ROOT_DIR/'runs/full/'),'').strip('/')
 
-    
+    data_file_path = cpaths.ROOT_DIR/cfg.dataset.chatlog_csv
+
     df_chat = dataset.prepare_dataset_dataframe(data_file_path, cfg)
     cfg = dataset.fill_cfg_from_data(df_chat['formatted_author_tag'], cfg) # fill fprompt, name_mappings, name_mappings_json
 
-    dataset_format  = ('text' if cfg.use_sft_trainer else 'tokens') 
-
+    is_processor = hasattr(tokenizer, 'tokenizer')
+    dataset_format  = ('tokens' if is_processor else 'text') 
+            
     if cfg.dataset.train_jsonl and cfg.dataset.eval_jsonl:
         dset = dataset.jsonl_dataset(cfg.train_jsonl, cfg.eval_jsonl, tokenizer, cfg, dataset_format=dataset_format) 
     elif cfg.dataset.name == 'max_tokens':
@@ -222,43 +214,34 @@ def main(args):
     elif 'chunkh' in cfg.dataset.name:
         if cfg.tag_placement == 'content_prefix_ot':
             logger.info('Using Data Format: subsession_completions_dataset')
-
-            csd_dataset = dataset.chat_sessions_dataset(df_chat, tokenizer, cfg, dataset_format='raw')
             # convert dataset to UA One Turn format 
-            dset = dataset.subsession_completions_dataset(csd_dataset, tokenizer, cfg.fprompt, tag_sep=cfg.tag_sep, ctx_template = '{role}{tag_sep}{content}', ctx_sep = '\n', dataset_format='text')
+            dset = dataset.subsession_completions_dataset(df_chat, tokenizer, cfg, tag_sep=cfg.tag_sep, ctx_template = '{role}{tag_sep}{content}', ctx_sep = '\n', dataset_format='text')
             
         else:
             dset = dataset.chat_sessions_dataset(df_chat, tokenizer, cfg, dataset_format=dataset_format)
     else:
         raise NotImplementedError(f'Unknown dataset format: {cfg.dataset.name!r}')
     
+    trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, peft_config=peft_config, callbacks=[]) # [GenerationCallback(20), FullSaveCallback]
     
-    callbacks = [] # [GenerationCallback(20), FullSaveCallback]
-    trainer = mtrain.get_trainer(model, dset, tokenizer, train_args, peft_config=peft_config, callbacks=callbacks)
-    if cfg.use_sft_trainer:
-        
-        # if train_args.completion_only_loss:
-        #     trainer = unsloth.chat_templates.train_on_responses_only(
-        #         trainer,
-        #         instruction_part = "<|im_start|>system\n",
-        #         response_part = "<|im_start|>assistant\n",
-        #     )
+    role_tag_template = cfg.get('mask_roletag_template')
 
-        # Here is where we could set masked_role_tags to ['system','user'] 
-        # or even ['system', 'BOT (BotName)'] if we don't drop bot messages TODO: try
-        # or for max inefficency, ['system', 'User1 (firstName1)', 'User3 (firstName3)', ...]
+    if role_tag_template and isinstance(trainer.data_collator, transformers.DataCollatorForLanguageModeling):
+        logger.error('Trainer using vanilla Transformers DataCollatorForLM. Labels will be ignored and roletag masking will not be applied.')
+    
+    
+    # trainer = unsloth.chat_templates.train_on_responses_only(
+    #     trainer,
+    #     instruction_part = "<|im_start|>system\n",
+    #     response_part = "<|im_start|>assistant\n",
+    # )
+    # apply masking to packed dataset, unsloth should automatically disable packing if is_processor
+    if (cfg.use_sft_trainer and trainer.args.packing and role_tag_template):
+        assert not is_processor, 'Packing have been auto-disabled for multi-modal models, something is wrong, dataset may already be masked. Investigate.'
+        trainer.train_dataset = dataset.apply_role_mask_tokens(trainer.train_dataset, trainer.processing_class, cfg, num_proc = 32)
         
-        if (role_tag_template := cfg.get('mask_roletag_template')):
-            if cfg.tag_placement in ['content_prefix', 'replace_role']:
-                masked_role_tags = 'system'
-            elif cfg.tag_placement == 'content_prefix_ot':
-                masked_role_tags = ['system', 'user']
-            else:
-                raise NotImplementedError(f'Role tag masking cannot be applied for tag_placement={cfg.tag_placement!r}')
-
-            mask_start, mask_end = mtrain.get_roletag_regex_masks(masked_role_tags=masked_role_tags, role_tag_template=role_tag_template)
-            
-            trainer = mtrain.mask_message_roles(trainer, mask_start, mask_end, num_proc = 32)
+        if trainer.eval_dataset:
+            trainer.eval_dataset = dataset.apply_role_mask_tokens(trainer.eval_dataset, trainer.processing_class, cfg, num_proc = 16)
 
 
     write_first_batches(trainer, batchsample_dir='_tmp/sample_batches')

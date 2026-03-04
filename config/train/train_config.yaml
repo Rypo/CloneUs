@@ -42,7 +42,9 @@ tag_sep: # "\n" # Ignored when tag_placement="replace_role", otherwise "\n" or "
 postfix: # "</s>" # ONLY used when tag_placement="tag_only"
 # Separator between end of text and the next author_tag
 
-custom_chat_template: "{{bos_token}}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>' }}{% endif %}"
+mask_roletag_template: "<|im_start|>{role_tag}" # Used for masking loss from system/assistant messages (chatml style)
+masked_authors: # ['user1', 'user2'] # unformatted authors names whose messages should be excluded from model loss
+custom_chat_template: "config/chat_templates/chatml-basic.jinja"
 # For role_replace: Be sure use a custom_chat_template with any mention of "assistant" in add_generation_prompt as shown
 # - Or use shorthand "chatml" to use above AND add tokens (<|im_start|>, <|im_end|>, ..) to the model/tokenizer if not already present.
 prompt:
