@@ -1,15 +1,19 @@
 import re
 import typing
 import datetime
-import more_itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import more_itertools
 import discord
 
 import config.settings as settings
+from . import http as http_util
+
+
 # https://support.discord.com/hc/en-us/articles/12620128861463-New-Usernames-Display-Names#h_01GXPQABMYGEHGPRJJXJMPHF5C
 RE_USER_TAG = re.compile(r'^\[[\w ]{1,32}\]') # Line starts with [authorDisplayName] will match a space
 RE_EMOJI_RAW = re.compile(r'<a?(:\w+:)\d+>')
+
 
 def extract_author(msg_content: str):
     '''Return the name in the leading brackets "[John] ..." -> "John"
@@ -69,10 +73,15 @@ class Msg:
     user: str
     message: str
     created_at: datetime.datetime
+    urls: list[str] = field(default_factory=list)
 
     @property
     def user_msg(self) -> tuple[str,str]:
         return (self.user, self.message)
+    
+    @property
+    def user_msg_urls(self) -> tuple[str,str,list[str]]:
+        return (self.user, self.message, self.urls)
 
 def _parse_message(msg: discord.Message, user_aliases:dict[str,str]=None) -> Msg:
     """Get author display_name and message content """
@@ -84,6 +93,7 @@ def _parse_message(msg: discord.Message, user_aliases:dict[str,str]=None) -> Msg
     # replace 2+ \n with a single one to avoid parsing confusion
     content = re.sub(r'\n{2,}','\n',content)
 
+    msg_urls = http_util.extract_all_urls(msg)
     # Fake the author name for bots output message
     if msg.author.bot:
         # This *shouldn't* fail because of the message filter
@@ -96,10 +106,10 @@ def _parse_message(msg: discord.Message, user_aliases:dict[str,str]=None) -> Msg
         if user_aliases:
             author = user_aliases.get(author,author)
     
-    return Msg(author, content, msg.created_at)
+    return Msg(author, content, msg.created_at, msg_urls)
 
 
-def merge_messages(user_content_times:list[Msg], merge_minutes=7) -> list[tuple[str,str]]:
+def merge_messages(user_content_times:list[Msg], merge_minutes=7) -> list[Msg]:
     merged_msgs = []
     for m in user_content_times:
         if not merged_msgs:
@@ -107,11 +117,11 @@ def merge_messages(user_content_times:list[Msg], merge_minutes=7) -> list[tuple[
         else:
             pm = merged_msgs[-1]
             if m.user==pm.user and (m.created_at-pm.created_at).total_seconds() <= (merge_minutes*60):
-                merged_msgs[-1] = Msg(m.user, pm.message + '\n' + m.message, m.created_at)
+                merged_msgs[-1] = Msg(m.user, pm.message + '\n' + m.message, m.created_at, pm.urls + m.urls)
             else:
                 merged_msgs.append(m)
 
-    return [m.user_msg for m in merged_msgs]
+    return merged_msgs
 
 
 def process_seedtext(seed_text):
@@ -133,15 +143,16 @@ def splitout_tag(model_output, RE_ANY_USERTAG:re.Pattern):
 
     return model_output
 
-def llm_input_transform(messages: list[discord.Message], do_filter=False, user_aliases:dict[str,str]=None) -> list[tuple[str,str]]:
+def llm_input_transform(messages: list[discord.Message], do_filter=False, user_aliases:dict[str,str]=None) -> list[tuple[str,str,list]]:
     """filter, if needed, sorts by created_at, merges consecutive author messages returns [(author, message), ...]"""
     if do_filter:
         messages = filter_messages(messages)
     
     user_content_times = [_parse_message(m, user_aliases) for m in messages]
-    author_messages = merge_messages(user_content_times)
+    merged_messages = merge_messages(user_content_times)
+    chat_history = [m.user_msg_urls for m in merged_messages]
     
-    return author_messages
+    return chat_history
 
 
 def llm_output_transform(output: str, emojis) -> str:

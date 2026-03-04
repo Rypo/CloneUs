@@ -446,23 +446,24 @@ class TextGen(commands.Cog, SetTextConfig):
     
     @commands.hybrid_command(name='viewctx')
     @app_commands.choices(context=[app_commands.Choice(name = c, value=c) for c in [ 'base', 'discord']])
-    async def viewctx(self, ctx, context:str = 'discord', raw: bool = False):
+    async def viewctx(self, ctx: commands.Context, context:str = 'discord', raw: bool = False):
         '''Show all in-context messages. See what bot sees.
         
         Args:
             context: which chat history to view. b/base or d/discord (default: discord)
             raw: View as close to what the model sees as possible, formatting be damned (default: False)
         '''
+        await ctx.defer(ephemeral=True)
+        
         if context.lower().startswith('b'):
-            
             role_cycle = itertools.cycle(['user','assistant'])
             llm_input_messages = [(next(role_cycle), msg) for msg in self.msgmgr.base_message_cache]
         else:
             llm_input_messages = text_utils.llm_input_transform(self.msgmgr.get_mcache(ctx), user_aliases=self.user_aliases)
             if raw:
                 llm_text = self.clomgr.clo.to_text_input(llm_input_messages)
-                split_on = self.clomgr.clo.tokenizer.eos_token if self.clomgr.clo.stop_criteria is None else self.clomgr.clo.stop_criteria[0].words[0]
-                llm_input_messages = [(i,pmsg+split_on) for i,pmsg in enumerate(filter(None, llm_text.split(split_on))) if pmsg]
+                split_on = self.clomgr.clo.text_tokenizer.eos_token if self.clomgr.clo.stop_criteria is None else self.clomgr.clo.stop_criteria[0].words[0]
+                llm_input_messages = [(i,pmsg+split_on) for i,pmsg in enumerate(filter(None, llm_text.split(split_on))) if pmsg.strip()] # strip to prevent extra ws message
             
 
         pagination_view = cview.MessageContextView(llm_input_messages, items_per_page=10, raw=raw)#data, timeout=None)

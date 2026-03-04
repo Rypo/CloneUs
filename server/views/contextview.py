@@ -254,7 +254,10 @@ class MessageContextView(BaseButtonPageView):
         batch_start = max(self.current_page-1, 0)*self.items_per_page
         batch_end = batch_start+len(data)
         embed = discord.Embed(title=f"Message Context", color=discord.Color.blurple(),) # f"Message Context ({batch_start}:{batch_end} / {self.num_items})",
-        for author, message in data: 
+        for item in data:
+            author, message = item[:2]
+            if len(item) > 2 and item[2]:
+                message += '\n'+f'`urls={item[2]}`'
             # wmessage = '\n'.join([f'`{m}`' for m in message.splitlines()])
             if len(message) > 1000:
                 msgparts = [' '.join(msgpart) for msgpart in list(more_itertools.constrained_batches(message.split(' '), max_size=1000, get_len=lambda g: len(' '.join(g))))]
