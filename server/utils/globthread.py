@@ -57,6 +57,7 @@ async def print_async_env_info(loop=None):
 # https://docs.python.org/3/library/asyncio-dev.html#concurrency-and-multithreading
 # https://docs.python.org/3/library/asyncio-task.html#running-in-threads
 # https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.run_in_executor
+# LOOP_LOCK = asyncio.Lock()
 def wrap_async_executor(f_py=None, use_alternate_executor:bool=False):
     # https://stackoverflow.com/a/60832711
     assert callable(f_py) or f_py is None
@@ -74,7 +75,11 @@ def wrap_async_executor(f_py=None, use_alternate_executor:bool=False):
                 executor = get_global_executor(not use_alternate_executor)
 
             #await print_async_env_info(loop)
-            
+            # async with LOOP_LOCK:
+            #     result = await loop.run_in_executor(executor, pfunc)
+            #     # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            #     #     result = await loop.run_in_executor(executor, pfunc)
+            # return result
             return await loop.run_in_executor(executor, pfunc)
         return run
     return _decorator(f_py) if callable(f_py) else _decorator

@@ -77,7 +77,7 @@ class TextGen(commands.Cog, SetTextConfig):
         #self.bot.tree.add_command(self.ctx_menu)
         await self.msgmgr.set_default(self.bot.get_channel(settings.CHANNEL_ID))
         
-        self.clomgr._preload(**self.active_model_kwargs)
+        await self.clomgr._preload(**self.active_model_kwargs)
         
 
     async def cog_unload(self):
@@ -242,18 +242,18 @@ class TextGen(commands.Cog, SetTextConfig):
         
         was_called = hasattr(ctx,'command') and ctx.command.name=='txtdown'
         
+        async with self._load_lock:
+            await self.clomgr.unload()
         
-        await self.clomgr.unload()
         # doesn't clear unless these are here for some reason
-        torch.cuda.empty_cache()
-        gc.collect()
+        for _ in range(3):
+            torch.cuda.empty_cache()
+            gc.collect()
 
         if was_called:
             await ctx.send('Ahh... sweet release ...', delete_after=5)
         
         await self.bot.report_state('chat', ready=False)
-        
-        #release_memory()
     
     @commands.hybrid_command(name='gcsave')
     async def save_gen_config(self, ctx: commands.Context, name: str = None, ):

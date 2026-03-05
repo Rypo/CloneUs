@@ -3,14 +3,21 @@
         {
             "name": "example1",
             "desc": "A user-friendly memorable description of your model < 100 chars",
-            "ckpt": "relativepath/to/your/model_checkpoint-999"
+            "ckpt": "relativepath/to/your/model/checkpoint-999"
+        }
+    ],
+    "MICRO": [
+        {
+            "name": "ex_smollm2",
+            "desc": "Example - SmolLM2 - 135m",
+            "ckpt": "relativepath/to/your/XXS_model/checkpoint-999"
         }
     ],
     "ERA": [
         {
             "years": "2020-2022",
             "gconf": "ms",
-            "ckpt": "relativepath/to/your/yearfiltered/model_checkpoint-999"
+            "ckpt": "relativepath/to/your/yearfiltered/model/checkpoint-999"
         }
     ]
 }

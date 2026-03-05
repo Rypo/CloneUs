@@ -104,17 +104,33 @@ class CloneusManager():
     def unload(self):
         prekwargs = {'checkpoint_path':self.clo.path_data.checkpoint_path, 'gen_config':self.clo.gen_config, 
                      'dtype':self.clo.cfg.dtype, 'attn_implementation':self.clo.cfg.attn_implementation}
+        
         if self.clo is not None:
-            self.clo.unload_model(partial=False)
+            self.clo = self.clo.unload_model(partial=False)
         #self.status = 'down'
-        self._preload(**prekwargs)
-
+        self.clo = Cloneus.from_pretrained(**prekwargs, ytm=self.ytm, load=False)
+        
+        torch.cuda.empty_cache()
+        gc.collect()
+    
+    @wrap_async_executor
     def _preload(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None):
-        if self.clo is None or self.clo.model is None:
+        if self.clo is None:
+            # HACK: The first model used gets "pinned" in memory preventing vRAM from being reclaimed. This hack loads an extremely small model (135m param), predicts, and unloads. 
+            # Until this issue is debuged, this is the needed to mitigate the impact. What is known:
+            # It has something to with calling the model's forward pass from a function that's been wrapped with async_executor.
+            # Calling: load_model() -> unload_model() alone without generation does NOT bind memory, it is sucessfully reclaimed/freed in this case. 
+            self.clo = Cloneus.from_pretrained(settings.MICRO_MODEL_CKPT, gen_config=gen_config, ytm=self.ytm, dtype=torch.bfloat16, attn_implementation="flash_attention_2", load=True)
+            authors = useridx.get_users('dname')[:2]
+            _=self.clo.batched_author_probabilities([(authors[0], 'hello')], authors=authors)
+            self.clo = self.clo.unload_model(partial=False)
+        
+        if self.clo.model is None:
             self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation, load=False)
 
     @wrap_async_executor
     def load(self, checkpoint_path: str|Path, gen_config=None, dtype:str=None, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]=None ):
+        # from torch.utils.viz._cycles import warn_tensor_cycles; warn_tensor_cycles()
         if self.clo is None:
             self.clo = Cloneus.from_pretrained(checkpoint_path, gen_config=gen_config, ytm=self.ytm, dtype=dtype, attn_implementation=attn_implementation, load=True)
         else:
@@ -127,6 +143,7 @@ class CloneusManager():
         
         model_logger.info(f'Using model:\n - {str(self.clo.path_data.checkpoint_path)} - ({self.clo.torch_dtype} / {self.clo.cfg.attn_implementation})')
         model_logger.info(f'Generation mode init: "{self.clo.gen_mode}"\n - {self.clo.get_genconfig(verbose=True)}\n')
+        torch.cuda.empty_cache()
         gc.collect()
     
     async def load_random_model(self, fast_proba=0.5):

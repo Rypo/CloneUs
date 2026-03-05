@@ -56,7 +56,7 @@ BEST_MODELS = ALL_MODELS['BEST']
 YEAR_MODELS = ALL_MODELS['ERA']
 
 ACTIVE_MODEL_CKPT = RUNS_DIR/BEST_MODELS[-1]["ckpt"].split('runs/full/')[-1] # Use the last added model by default, split just in case
-
+MICRO_MODEL_CKPT = RUNS_DIR/ALL_MODELS['MICRO'][-1]["ckpt"].split('runs/full/')[-1]
 
 
 BOT_PRESENCE = {

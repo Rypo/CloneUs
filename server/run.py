@@ -19,8 +19,9 @@ from discord.ext import commands
 # NOTE: Do not import from cloneus in this file. It seems to break logging in the package.
 #from cloneus.data import useridx
 
+import unsloth # Ensure patching occurs before models are imported
 
-import discord.ext
+
 import utils.io as io_utils
 
 DESC = '''A bot that fills in when your friends go AWOL (and other things).
