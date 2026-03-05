@@ -1110,12 +1110,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         if self.igen.config.strength == 0:
             return await ctx.send(f'{self.igen.model_name} does not support `/reanimate`', ephemeral=True)
         # this may be passed a url string in drawUI config
-        try:
-            image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=True)
-        except ValueError:
-            return await ctx.send('Looks like your using a tenor link. You need to click the gif in Discord to open the pop-up view then "Copy Link" to get the `.mp4` link', ephemeral=True)
-        
-        
+
+        image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=True)
         gif_array, imgmeta = await imgutil.aload_image(image_url, result_type='np') #iio.imread(image_url)
         
         if gif_array.ndim < 4:
