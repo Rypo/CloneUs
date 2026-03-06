@@ -1,9 +1,9 @@
 import sys
-import json
 import dateutil
 import argparse
 from pathlib import Path
 
+import orjson
 import numpy as np
 import pandas as pd
 
@@ -83,7 +83,7 @@ def discord_json_to_csv(df_chat: pd.DataFrame, out_csvfile: str|Path= None):
 
 def read_discord_json(chat_jsonfile:str|Path) -> pd.DataFrame:
     with open(chat_jsonfile) as f:
-        chat_json = json.load(f)
+        chat_json = orjson.loads(f.read())
     
     print('~~~~~ Add these to your .env file ~~~~~')
     print('GUILDS_ID: ', chat_json['guild']['id'])
@@ -110,7 +110,15 @@ def read_chat_csv(chat_csvfile:str|Path):
         df_chat['AuthorID'] = df_chat['username'].apply(useridx.fake_author_id)
         return df_chat
 
-def merge_new_data(new_data_path:str|Path, old_csv_path:str|Path, out_csv_path:str|Path=None):
+def json_load_and_merge(*json_chat_paths):
+    json_data = []
+    for chat_path in json_chat_paths:
+        with open(chat_path) as f:
+            json_data.extend(orjson.loads(f.read())['messages'])
+    
+    return pd.json_normalize(json_data).drop_duplicates('id').sort_values('timestamp').reset_index(drop=True)
+
+def merge_new_data(old_csv_path:str|Path, new_data_path:str|Path, out_csv_path:str|Path=None):
     new_data_path = Path(new_data_path)
     
     df_cur = pd.read_csv(old_csv_path)
@@ -123,7 +131,6 @@ def merge_new_data(new_data_path:str|Path, old_csv_path:str|Path, out_csv_path:s
     df_updated = pd.concat([df_cur, df_nxt])
     df_updated['Date'] = df_updated['Date'].pipe(pd.to_datetime, utc=True, format='mixed')
     df_updated = df_updated.drop_duplicates(['AuthorID','Date','Content']).reset_index(drop=True)
-    
     
     df_updated['Date'] = df_updated['Date'].dt.tz_convert(dateutil.tz.gettz())
 
@@ -157,22 +164,37 @@ def build_and_save(chat_filepath:str|Path, msg_threshold:float|int = 0.005, excl
     
     return csv_outpath
 
-
 def get_args():
-    parser = argparse.ArgumentParser(description='Build user index (config/users.json) and if necessary, convert format and save')
-    parser.add_argument('chat_file', type=str,
+    parser = argparse.ArgumentParser(description='Merge new data into existing dataset or Construct a user index from existing dataset')
+    subparsers = parser.add_subparsers(dest='subset', help='Build command set')
+    
+    parser_dataset = subparsers.add_parser('dataset', help='Merge new data into existing dataset and save')
+
+    parser_dataset.add_argument('cur_dataset', type=str,
+                        help='path/to/existing_dataset.csv - the base dataset on which to merge the new data')
+    
+    parser_dataset.add_argument('new_data', type=str,
+                        help='path/to/new_data.csv, or discordExport.json. If non-discord source: columns must include ["username", "text"]')
+    
+    parser_dataset.add_argument('-o','--outpath', metavar='PATH', type=str, 
+                        help='path/to/output_dataset.csv - path to output merged dataset. Overwrites `cur_dataset` if not specified')
+    
+
+    parser_index = subparsers.add_parser('index', help='Build user index (config/users.json) and if necessary, convert format and save')
+    
+    parser_index.add_argument('chat_file', type=str,
                         help='path/to/chat.csv, or discordExport.json. If non-discord source: columns must include ["username", "text"]')
     
-    parser.add_argument('-t','--threshold', default=0.005, type=float, required=False,
+    parser_index.add_argument('-t','--threshold', default=0.005, type=float, required=False,
                         help='The minimum fraction of total messages that must belong to a user included in users.json. If >1 minimum messages count by user to be in users.json.')
     
-    parser.add_argument('-e','--exclude', nargs='*',
+    parser_index.add_argument('-e','--exclude', nargs='*',
                         help='List of usernames to exclude from user.json regardless of message count.')
     
-    parser.add_argument('-b','--bots', nargs='*',
+    parser_index.add_argument('-b','--bots', nargs='*',
                         help='List of non-Cloneus bot usernames to optionally exclude from users.json. Can be determined automatically if data is a discord Json export.')
     
-    parser.add_argument('--include-bots', action='store_true', 
+    parser_index.add_argument('--include-bots', action='store_true', 
                         help='Whether to include any non-Cloneus bots in users.json. Has no effect if not discord Json export or --bots flag is used.')
     
     return parser.parse_args()
@@ -180,8 +202,15 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
 
-    rename_example_files(ROOT_DIR/'.env_example', ROOT_DIR/'server/config/models_example.json')
-    csv_outpath = build_and_save(args.chat_file, msg_threshold=args.threshold, excluded_users=args.exclude, bot_usernames=args.bots, exclude_bots=(not args.include_bots))
-    print(f'DONE. Update train_config.yaml with your csv path and start cloning or call `python scripts/train.py -d {csv_outpath}`')
-
-
+    if args.subset == 'dataset':
+        csv_outpath = args.outpath if args.outpath else args.cur_dataset
+        merge_new_data(args.cur_dataset, args.new_data, csv_outpath)
+        print('Updated dataset saved to:', csv_outpath)
+    
+    elif args.subset == 'index':
+        rename_example_files(
+            ROOT_DIR/'.env_example', 
+            ROOT_DIR/'server/config/models_example.json',
+        )
+        csv_outpath = build_and_save(args.chat_file, msg_threshold=args.threshold, excluded_users=args.exclude, bot_usernames=args.bots, exclude_bots=(not args.include_bots))
+        print(f'DONE. Update train_config.yaml with your csv path and start cloning or call `python scripts/train.py -d {csv_outpath}`')
