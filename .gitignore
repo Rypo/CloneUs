@@ -18,6 +18,7 @@ server/res
 server/cogs/_*
 server/cogs/beta/*
 server/output/*
+server/config/models.json
 # state store
 server/config/persistent_storage.yaml
 

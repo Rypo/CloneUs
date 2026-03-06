@@ -50,9 +50,11 @@ USERS_FILEPATH = useridx.USERS_FILEPATH # USERS_FILEPATH = ROOT_DIR/'config/user
 # 		mention pros of json
 
 
-def move_dotenv(root_dir:Path):
-    if (root_dir/'.env_example').exists() and not (root_dir/'.env').exists():
-        (root_dir/'.env_example').rename(root_dir/'.env')
+def rename_example_files(*example_files: Path):
+    for expath in example_files:
+        new_path = expath.with_stem(expath.stem.replace('_example',''))
+        if expath.exists() and not new_path.exists():
+            expath.rename(new_path)
 
 def ask_overwrite(filepath:str|Path) -> bool:
     can_write = True
@@ -178,7 +180,7 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
 
-    move_dotenv(ROOT_DIR)
+    rename_example_files(ROOT_DIR/'.env_example', ROOT_DIR/'server/config/models_example.json')
     csv_outpath = build_and_save(args.chat_file, msg_threshold=args.threshold, excluded_users=args.exclude, bot_usernames=args.bots, exclude_bots=(not args.include_bots))
     print(f'DONE. Update train_config.yaml with your csv path and start cloning or call `python scripts/train.py -d {csv_outpath}`')
 
