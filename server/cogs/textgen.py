@@ -118,8 +118,9 @@ class TextGen(commands.Cog, SetTextConfig):
                 await self.msgmgr.add_message(message)
                 context_updated=True
                 
-                if self.auto_reply_mode and message.author in self.auto_reply_enabled_users: # != '', False, None
-                    await self.auto_respond(message_cache)
+                if self.auto_reply_mode: 
+                    if self.auto_reply_mode=='lurk' or (message.author in self.auto_reply_enabled_users):
+                        await self.auto_respond(message_cache)
 
         #human_proc = self.auto_reply_mode and context_updated        
         
@@ -219,7 +220,7 @@ class TextGen(commands.Cog, SetTextConfig):
     async def txtup(self, ctx: commands.Context, reload: bool=False):
         """Fire up the text generation model"""
         
-        was_called = hasattr(ctx,'command') and ctx.command.name=='txtup'
+        was_called = getattr(ctx,'command',None) and getattr(ctx.command,'name',None)=='txtup'
         msg = None
         async with self._load_lock:
             if not self.clomgr.is_ready or reload:
@@ -534,13 +535,23 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.anybot(ctx, next_author, seed_text=seed_text)
 
     async def auto_respond(self, message_cache):
+        ctx = await self.bot.get_context(message_cache[-1])
+        if not self.clomgr.is_ready:
+            await self.txtup(ctx)
+        
+        if self.auto_reply_mode == 'lurk':
+            author_probas = await self.clomgr.predict_author(message_cache, self.auto_reply_mode, self.auto_reply_candidates)
+            top_auth,top_prob = author_probas[0]
+            if top_prob >= self.lurk_confidence:
+                return await self.anybot(ctx, top_auth, seed_text=None)
+            return
+                
         if self.auto_reply_mode in ['rbest','irbest','urand','top']:
             next_author = await self.clomgr.predict_author(message_cache, self.auto_reply_mode, self.auto_reply_candidates)
         else: 
             # <author_initial>bot. e.g.: j1bot, abot, qbot, d11bot
             next_author = useridx.get_users('dname', by='initial')[self.auto_reply_mode.replace('bot','')]
     
-        ctx = await self.bot.get_context(message_cache[-1])
         await self.anybot(ctx, next_author, seed_text=None)
     
 

@@ -41,6 +41,7 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
     auto_reply_mode: str = ''
     auto_reply_candidates: list = None
     auto_reply_enabled_users: set[discord.User] = set()
+    lurk_confidence: float = None
     user_aliases: dict = {} # pseudonyms
     _display_initials: str = ','.join(useridx.get_users('initial'))
     # discord.utils.MISSING 
@@ -205,7 +206,32 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
         msg=f'Auto reply mode enabled. Using {modedesc[self.auto_reply_mode]}: {self.auto_reply_mode} ∈ ({self._display_initials})'
         await ctx.send(msg)
 
+    @tsetarg.command(name='lurk')
+    async def tset_lurk(self, ctx: commands.Context, confidence: commands.Range[float, 0., 1.0] = 0.8, 
+                            author_initials: app_commands.Transform[str, cmd_tfms.AuthorInitialsTransformer] = None,):
+        """Bot automatically responds when probability is higher than confidence. Set = 0 to disable.
+        
+        Args:
+            confidence: minimum probability to trigger author auto response (default=0.8).
+            author_initials: Unordered sequence of author initials (no spaces). Restricts selection to those authors.
+        """
+        if confidence == 0:
+            self.auto_reply_mode = ''
+            self.lurk_confidence = None
+            self.msgmgr.autonomous = False
+            return await ctx.send("Auto lurk mode disabled.")
+        
+        self.auto_reply_mode = 'lurk'
+        self.lurk_confidence = confidence
+        self.auto_reply_candidates=None
+        self._display_initials=','.join(useridx.get_users('initial'))
 
+        if author_initials:
+            self.auto_reply_candidates = [useridx.get_users('dname', by='initial')[i] for i in author_initials]
+            self._display_initials = ','.join(author_initials)
+
+        msg=f'Lurk mode enabled for P>={confidence} ∀ ∈ ({self._display_initials})'
+        return await ctx.send(msg)
     
     @tsetarg.command(name='model')
     @app_commands.choices(version=cmd_choices.MODEL_GENERATIONS)

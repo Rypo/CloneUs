@@ -254,10 +254,17 @@ class CloneusManager():
             author_candidates = useridx.get_users('dname')
         
         llm_input_messages = text_utils.llm_input_transform(message_cache, do_filter=False, user_aliases=self.user_aliases)
+
+        if autoreply_mode == 'lurk':
+            # batched for speed, okay if off by a few %pt.
+            author_probas = self.clo.batched_author_probabilities(llm_input_messages, authors=author_candidates)
+            model_logger.info(f'Autobot Probablities: {author_probas}')
+            return author_probas
+
         author_probas = self.clo.author_probabilities(llm_input_messages, authors=author_candidates)
         
         model_logger.info(f'Autobot Probablities: {author_probas}')
-    
+
         if autoreply_mode == 'top':
             author_choice,top_prob = author_probas[0]
             
