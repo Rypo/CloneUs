@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 import torch
 import transformers
-from trl.models.utils import ChatMlSpecialTokens
+
 
 def check_if_system(tokenizer):
     from jinja2.exceptions import TemplateError
@@ -39,6 +39,36 @@ def to_jinja_template(tag_sep:str, postfix:str):
     template = template.replace('__TAG_SEP__',tag_sep).replace('__POSTFIX__', postfix)
     return template
 
+@dataclass
+class ChatMlSpecialTokens:
+    """Dataclass for special tokens used in ChatML, including system, user, assistant, bos, eos, and pad tokens."""
+
+    bos_token: str = "<|im_start|>"
+    eos_token: str = "<|im_end|>"
+    pad_token: str = "<|im_end|>"
+
+    @property
+    def system(self):
+        return f"{self.bos_token}system"
+
+    @property
+    def user(self):
+        return f"{self.bos_token}user"
+
+    @property
+    def assistant(self):
+        return f"{self.bos_token}assistant"
+
+    @property
+    def chat_template(self):
+        return (
+            "{% for message in messages %}"
+            f"{{{{'{self.bos_token}' + message['role'] + '\n' + message['content'] + '{self.eos_token}' + '\n'}}}}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            f"{{{{ '{self.assistant}\n' }}}}"
+            "{% endif %}"
+        )
 
 # inspired by: https://huggingface.co/NousResearch/Hermes-2-Theta-Llama-3-8B/blob/main/tokenizer_config.json
 @dataclass
