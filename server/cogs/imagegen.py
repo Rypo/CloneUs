@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from diffusers.utils import load_image, make_image_grid
+from accelerate.utils import release_memory
 
 from PIL import Image
 import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4, pyav: trans_png
@@ -235,8 +235,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         self.msg_views: dict[int, discord.ui.View] = {}
 
         self._log_extra = {'cog_name': self.qualified_name}
-        self._load_lock = asyncio.Lock()
-        self._model_load_commands = set(['▶ Replay CMD']+['draw', 'redraw','hd','animate', 'reanimate', 'optimize'])
+        self._load_lock = asyncio.Lock() # https://github.com/python/cpython/blob/e423e0c2cc06fd36689f45b9e818f2455c20e682/Lib/asyncio/base_events.py#L2028
+        self._model_load_commands = set(['▶ Replay CMD']+['draw', 'redraw','hd','animate', 'reanimate', 'optimize', 'edit'])
 
     async def cog_unload(self):
         await self.bot.wait_until_ready()
@@ -246,6 +246,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
             if not view.is_finished():
                 await view.on_timeout()
         stop_global_executors()
+        self.igen = release_memory(self.igen)
     
     async def cog_before_invoke(self, ctx: commands.Context) -> None:
         if not self.igen.is_ready:
@@ -466,7 +467,8 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     @commands.command(name='imgdown', aliases=['idown','imagedown'])
     async def imgdown(self, ctx: commands.Context):
         '''Unloads the current image generation model'''
-        await self.igen.unload_pipeline()
+        async with self._load_lock:
+            await self.igen.unload_pipeline()
         await self.bot.report_state('draw', ready=False)
         await ctx.send('Drawing disabled.')
                 
@@ -1171,8 +1173,6 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
     
 
 async def setup(bot: BotUs):
-    igen = ImageGen(bot)
-
-    await bot.add_cog(igen)
+    await bot.add_cog(ImageGen(bot))
 
 
