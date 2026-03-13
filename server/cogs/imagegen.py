@@ -845,20 +845,19 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored unless > 0.
         # fast: Trades image quality for speed - about 2-3x faster. Default=False.
         # refine_strength: float = None,
+        support_multi_image = ['qwen_edit', ]
+        
+        if self.igen.model_name not in support_multi_image:
+            return await self.redraw(
+                ctx, prompt, imgurl, n_images = n_images, steps=steps, strength=None, 
+                negative_prompt=negative_prompt, guidance_scale=guidance_scale, aspect=aspect, seed=seed, _view=_view
+            )
 
         color_logger.debug(f'Unused kwargs: {kwargs}')
 
-        SUPPORTED_MODELS = ['qwen_edit',]
-        URL_SEP = ' | '
-        if self.igen.model_name in SUPPORTED_MODELS:
-            if not self.igen.is_ready:
-                await self.imgup(ctx)
-        else:
-            return await ctx.send(f'Model does not support `/edit`, supported models: {SUPPORTED_MODELS}', silent=True, delete_after=5)
-        
-        # The URL_SEP syntax is used when called from DrawUI
-        imgurls = imgurl.split(URL_SEP) if URL_SEP in imgurl else [imgurl, imgurl2, imgurl3]
-        
+        url_sep = ' | '
+        imgurls = imgurl.split(url_sep) if url_sep in imgurl else [imgurl, imgurl2, imgurl3]
+
         images: list[Image.Image] = []
         image_urls = []
 
