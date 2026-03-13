@@ -229,7 +229,9 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # self.igen = imgman.JuggernautRagnarokManager(offload=False)
         # self.igen = imgman.QwenImageManager(offload=True)
         # self.igen = imgman.QwenEditManager(offload=True)
-        self.igen = imgman.ZImageTurboManager(offload=False)
+        # self.igen = imgman.ZImageTurboManager(offload=False)
+        self.igen = imgman.FluxKleinManager(offload=True)
+
 
         self.spell_check = Autocorrect()
         self.msg_views: dict[int, discord.ui.View] = {}
@@ -845,7 +847,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         # hdstrength: HD steps strength. 0=Alter Nothing. 100=Alter Everything. Ignored unless > 0.
         # fast: Trades image quality for speed - about 2-3x faster. Default=False.
         # refine_strength: float = None,
-        support_multi_image = ['qwen_edit', ]
+        support_multi_image = ['qwen_edit', 'flux_klein9b']
         
         if self.igen.model_name not in support_multi_image:
             return await self.redraw(

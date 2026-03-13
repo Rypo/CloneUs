@@ -49,7 +49,9 @@ from diffusers import (
     QwenImageEditPlusPipeline,
     ZImageTransformer2DModel,
     ZImagePipeline,
-    ZImageImg2ImgPipeline
+    ZImageImg2ImgPipeline,
+    Flux2KleinPipeline,
+    Flux2Transformer2DModel,
 )
 
 from diffusers.quantizers import PipelineQuantizationConfig
@@ -1387,9 +1389,9 @@ class SDXLBase(DeepCacheMixin, LatentOptPipeline):
         # calling on both pipes seems to make offload more consistent, may not be inherited properly with from_pipe 
         # https://huggingface.co/docs/diffusers/v0.36.0/en/using-diffusers/loading#:~:text=reapply%20these%20methods
         for pipe in (self.base, self.basei2i):
-            pipe.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
+            # pipe.enable_xformers_memory_efficient_attention(attention_op=MemoryEfficientAttentionFlashAttentionOp)
             # Workaround for not accepting attention shape using VAE for Flash Attention
-            pipe.vae.enable_xformers_memory_efficient_attention(attention_op=None)
+            # pipe.vae.enable_xformers_memory_efficient_attention(attention_op=None)
             pipe.vae.enable_slicing()
             if self.offload:
                 pipe.enable_model_cpu_offload()
@@ -2359,6 +2361,158 @@ class ZImageBase(LatentOptPipeline):
         
         latents = latents.to(self.basei2i.vae.dtype)
         latents = (latents / self.basei2i.vae.config.scaling_factor) + self.basei2i.vae.config.shift_factor
+        image = self.basei2i.vae.decode(latents, return_dict=False)[0]
+        image = self.basei2i.image_processor.postprocess(image, output_type='pil')
+        
+        return image
+#endregion
+
+#region Flux Klein
+class FluxKleinBase(SingleStagePipeline):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload=False, scheduler_setup: str | tuple[str, dict] = None, dtype: torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, root_name='fkln')
+        self.max_seq_len = 512
+        self.text_encoder_out_layers = (9, 18, 27)
+
+    def i2i(self, *args, **kwargs):
+        kwargs.pop('strength', None)
+        return self.basei2i(*args, **kwargs, **self.pipe_xkwgs)
+
+    @torch.inference_mode()
+    def load_pipeline(self):
+        pipeline_qconfig = PipelineQuantizationConfig(
+            quant_mapping = {
+                "text_encoder": TransBitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type='nf4', bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=False),
+                "transformer":  GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
+            }
+        )
+        
+        transformer_model_path = "OzzyGT/flux2_klein_9B_bnb_4bit_transformer"
+        transformer = Flux2Transformer2DModel.from_pretrained(transformer_model_path, torch_dtype = torch.bfloat16,)
+        transformer = transformer.eval().requires_grad_(False)
+        
+        text_encoder = Qwen3ForCausalLM.from_pretrained(
+            "unsloth/Qwen3-8B-unsloth-bnb-4bit",
+            dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+            low_cpu_mem_usage = True,
+            # quantization_config = pipeline_qconfig.quant_mapping['text_encoder'],
+        )
+
+        text_encoder: Qwen3ForCausalLM = FastLanguageModel.for_inference(text_encoder)
+        text_encoder = text_encoder.eval().requires_grad_(False)
+        text_encoder.is_loaded_in_8bit = False # unsloth loaded 4bit models set this=True which prevents offloading : ValueError: `.to` is not supported for `8-bit` bitsandbytes models.
+
+        self.base: Flux2KleinPipeline =  Flux2KleinPipeline.from_pretrained(self.model_path, transformer=transformer, text_encoder=text_encoder, torch_dtype=self.dtype, low_cpu_mem_usage = True,)
+        
+        if not self.offload:
+            self.base = self.base.to(0)
+
+        self._scheduler_init()
+        self.load_loras()
+        
+        for pipe in (self.base, ):
+            # native backend: 2.33s/iter
+            # pipe.enable_xformers_memory_efficient_attention() # 2.05s/it
+            # pipe.transformer.set_attention_backend("xformers") #2.0s/it
+            pipe.transformer.set_attention_backend("sage") # 1.80s/it (226.07s, 429.31s) | (325.76s, )
+            # pipe.transformer.set_attention_backend("flash") # 1.95s/it (246.80s, 471.11s)
+            # pipe.text_encoder.set_attn_implementation('flash_attention_2')
+            pipe.vae.enable_slicing()
+            if self.offload:
+                pipe.enable_model_cpu_offload()
+        
+        self.basei2i = self.base # klein has unified T2I, I2I pipeline
+
+        self.is_ready = True
+
+    def batch_settings(self, imsize: typing.Literal['tiny','small','med','full'] = 'small', ):
+        dims_opts = {
+            'tiny': [(768,768), (640,896), (896,640)], # 1.4
+            'small': [(768,768), (640,896), (896,640)], # 1.4
+            'med': [(768,768), (640,896), (896,640)], # 1.4
+            'full': [(1024,1024), (832, 1216), (1216, 832)] # 1.46
+        }
+        
+        batch_sizes = {'tiny': 2, 'small': 2, 'med': 2, 'full': 1} # time for 2*full >> 1+1 full
+
+        return (dims_opts[imsize], batch_sizes[imsize])
+    
+    @torch.inference_mode()
+    def embed_prompts(self, prompt:str, negative_prompt:str = None, batch_size: int = 1, **kwargs):
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        if negative_prompt is not None:
+            negative_prompt = [negative_prompt]
+
+        device = torch.device('cuda', 0)
+        prompt_embeds, text_ids = self.base.encode_prompt(
+            prompt=prompt, device=device, num_images_per_prompt=batch_size, max_sequence_length=self.max_seq_len, text_encoder_out_layers=self.text_encoder_out_layers, 
+        )
+        
+        prompt_encodings = dict(prompt_embeds=prompt_embeds) 
+        
+        if negative_prompt:
+            negative_prompt_embeds, neg_text_ids = self.base.encode_prompt(
+                prompt=negative_prompt, device=device, num_images_per_prompt=batch_size, max_sequence_length=self.max_seq_len, text_encoder_out_layers=self.text_encoder_out_layers
+            )
+            prompt_encodings.update(negative_prompt_embeds = negative_prompt_embeds)
+        
+        torch.cuda.empty_cache()
+        return prompt_encodings
+    
+    
+    @torch.inference_mode()
+    def _condition_images(self, images):
+        # https://github.com/huggingface/diffusers/blob/90818e82b3fbb7449221e96aa181b06e9ea9aa5b/src/diffusers/pipelines/flux2/pipeline_flux2_klein.py#L755
+        for img in images:
+            self.basei2i.image_processor.check_image_input(img)
+
+        condition_images = []
+        for img in images:
+            image_width, image_height = img.size
+            if image_width * image_height > 1024 * 1024:
+                img = self.basei2i.image_processor._resize_to_target_area(img, 1024 * 1024)
+                image_width, image_height = img.size
+
+            multiple_of = self.basei2i.vae_scale_factor * 2
+            image_width = (image_width // multiple_of) * multiple_of
+            image_height = (image_height // multiple_of) * multiple_of
+            condition_images.append(self.basei2i.image_processor.preprocess(img, height=image_height, width=image_width, resize_mode="crop"))
+        
+        return condition_images
+
+    @torch.inference_mode()
+    def encode_images(self, images:list[Image.Image], seed:int=42):
+        nframes = len(images)
+        w,h = images[0].size
+        
+        generator = generator_batch(seed, nframes, 'cpu')
+        device = torch.device('cuda',0)
+
+        batch_size = 1 * nframes
+
+        condition_images = self._condition_images(images)
+        image_latents, image_latent_ids = self.basei2i.prepare_image_latents( # [B, 8192 (N*1024?), 128], 
+            images=condition_images,
+            batch_size=batch_size,
+            generator=generator,
+            device=device,
+            dtype=self.basei2i.vae.dtype,
+        )
+        
+        # release_memory()
+        image_latents = self.basei2i._unpack_latents_with_ids(image_latents, image_latent_ids) # [B, 128, 64, 64]
+        image_latents = self.basei2i._unpatchify_latents(image_latents) # [B, 32, 128, 128]
+        return image_latents
+    
+    @torch.inference_mode()
+    def decode_latents(self, latents, **kwargs):
+        # https://github.com/huggingface/diffusers/blob/03af690b601ed1f391fe04178279df5d16115397/src/diffusers/pipelines/flux2/pipeline_flux2_klein.py#L908
+        if isinstance(latents, list):
+            latents = torch.cat(latents, dim=0)
+        
         image = self.basei2i.vae.decode(latents, return_dict=False)[0]
         image = self.basei2i.image_processor.postprocess(image, output_type='pil')
         

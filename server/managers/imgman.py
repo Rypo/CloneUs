@@ -77,6 +77,10 @@ class BaseZImageManager(ImageGenManager, pipelines.ZImageBase):
                  rank = 256):
         super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras, rank = rank)
 
+class BaseFluxKleinManager(ImageGenManager, pipelines.FluxKleinBase):
+    def __init__(self, model_name: str, model_path: str, config: DiffusionConfig, offload: bool = False, scheduler_setup: str | tuple[str, str|dict] = None, dtype:torch.dtype = torch.bfloat16, init_loras: list[tuple[str,float]] = None,):
+        super().__init__(model_name, model_path, config, offload, scheduler_setup, dtype, init_loras)
+
 
 class SDXLTurboManager(BaseSDXLManager):
     def __init__(self, offload=False):
@@ -210,16 +214,18 @@ class QwenEditManager(BaseQwenEditManager):
         super().__init__(
             model_name = 'qwen_edit',
             model_path = "Qwen/Qwen-Image-Edit-2509",
+            # model_path = "Qwen/Qwen-Image-Edit-2511",
             config = DiffusionConfig(
                 steps = CfgItem(num_inference_steps, bounds=(1,num_inference_steps+2)),
                 guidance_scale = CfgItem(None, locked=True), 
-                strength = CfgItem(1.0, bounds=(1.0, 1.0)),
+                strength = CfgItem(1.0, locked=True),
                 # negative_prompt = " ",
                 # img_dims = [(1024,1024), (832,1216), (1216,832)],
                 img_dims = [(1152, 1152), (896, 1344),(1344, 896), (960, 1280),(1280, 960), ],#(832, 1472),(1472, 832)], #1:1, 2:3,3:2, 3:4,4:3, 9:16,16:9
                 locked=['refine_guidance_scale'] # 'refine_strength',
             ),
             offload=offload,
+            #init_loras = [('lightx2v/Qwen-Image-Edit-2511-Lightning/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors', 1.0)],
             num_inference_steps = num_inference_steps,
             rank = rank,
         )
@@ -244,6 +250,22 @@ class ZImageTurboManager(BaseZImageManager):
             rank = rank,
         )
 
+class FluxKleinManager(BaseFluxKleinManager):
+    def __init__(self, offload=True):
+        super().__init__(
+            model_name = 'flux_klein9b',
+            model_path = 'black-forest-labs/FLUX.2-klein-9B',
+            config = DiffusionConfig(
+                steps = CfgItem(4, bounds=(2,6)),
+                guidance_scale = CfgItem(1.0, locked=True), 
+                strength = CfgItem(1.0, bounds=(1.0, 1.0)),
+                #img_dims = [(1024,1024), (832,1216), (1216,832)],
+                img_dims = [(1024,1024), (896,1152), (1152,896)],
+                locked=['refine_guidance_scale'] # 'refine_strength',
+            ),
+            offload=offload,
+            init_loras = None,
+        )
 
 AVAILABLE_MODELS = {
     'sdxl_turbo': {
@@ -277,5 +299,9 @@ AVAILABLE_MODELS = {
     'zimg_turbo': {
         'manager': ZImageTurboManager,
         'desc': 'Z-Image Turbo' # (M, fast)
-    }
+    },
+    'flux_klein9b': {
+        'manager': FluxKleinManager,
+        'desc': 'Flux Klein 9b' # (M, avg)
+    },
 }
