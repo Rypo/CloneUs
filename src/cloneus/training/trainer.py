@@ -229,14 +229,11 @@ def format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens
 def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None,  **kwargs):
     #batch_size, ga_steps = batchsize_gasteps #chunk_to_batchga(chunk_size, target_batch_size=8, chunklen_upperbound=4096)
 
-    warmup_ratio = cfg.warmup_ratio #kwargs.pop('warmup_ratio', 0.0)
-    warmup_steps = cfg.warmup_steps #kwargs.pop('warmup_steps', 0)
-    if warmup_ratio is None:
-        warmup_ratio = 0.0
-    if warmup_steps is None:
-        warmup_steps = 0
+    warmup_steps = cfg.warmup_steps
+
+    if not warmup_steps:
+        warmup_steps = cfg.get('warmup_ratio', 0.0)
     
-    # batch_size = kwargs.pop('batch_size', 4)
     batch_size=cfg.batch_size
     chunk_size = cfg.chunk_size
     attn_implementation=cfg.attn_implementation
@@ -250,7 +247,6 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
         packing_strategy = "bfd",
         padding_free = True, # True
         #formatting_func=formatfunc,
-        max_seq_length=chunk_size,
         max_length=chunk_size,
 
         # assistant_only_loss=True,
@@ -277,7 +273,6 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
         
     else:
         TrainingConfig = TrainingArguments
-    #TrainingConfig = (SFTConfig if cfg.use_sft_trainer else TrainingArguments)
     
     args = TrainingConfig(#TrainingArguments(
         num_train_epochs=cfg.num_epochs,#kwargs.pop('num_train_epochs', 3),
@@ -299,7 +294,6 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
         output_dir='{base_outdir}/{tnow}_cnk{chunksize}{ctk_pad}-{scheduler}{warmup}--r{lora_r}a{lora_a}_{lora_modules}{lora_layers}', # -sft256
         optim=cfg.optimizer,#kwargs.pop('optim', 'paged_adamw_32bit'),#'paged_adamw_8bit',# #"adamw_hf"
         max_grad_norm=cfg.max_grad_norm,#kwargs.pop('max_grad_norm', 0.3),
-        warmup_ratio=warmup_ratio,#kwargs.pop('warmup_ratio', 0.00),
         warmup_steps=warmup_steps,#kwargs.pop('warmup_steps', 0),
         lr_scheduler_type=cfg.lr_scheduler, #kwargs.pop('lr_scheduler_type', 'linear'),
         weight_decay=cfg.weight_decay,#kwargs.pop('weight_decay',0),
@@ -309,19 +303,13 @@ def create_args(base_outdir, peft_config: LoraConfig, cfg,  n_custom_tokens=None
 
         disable_tqdm=kwargs.pop('disable_tqdm', None),
         save_total_limit=kwargs.pop('save_total_limit', None),
-        save_safetensors=True,
         logging_first_step=True,
-        group_by_length=kwargs.pop('group_by_length', True), # Might have consequences, disable? -- yep, will consume absurd memory when combining largest items (unless truncated beforehand)
-        
+        train_sampling_strategy = "group_by_length" if cfg.group_by_length else "random", # "sequential" - for ungrouped dataset?
+        label_names = ['labels'],
         run_name="{modelname}-{dirargs}-{optim}-b{batchsize}-mgn{max_gradnorm}",
         **kwargs,
     )
     args = format_arg_names(args, base_outdir, chunk_size, peft_config, n_custom_tokens, attn_implementation, custom_scheduler)
-
-    # if kwargs:
-    #     nargs=args.to_dict()
-    #     nargs.update(kwargs)
-    #     args = TrainingArguments(**nargs)
 
     return args
 
