@@ -115,9 +115,6 @@ def verify_config(cfg):
             raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
         if cfg.lora_use_dora:
             raise ValueError('Unsloth does not support DoRA training. Set lora_use_dora: false to use unsloth')
-        if cfg.lora_target_modules == 'all-linear':
-            logger.warning('NOTE: Unsloth does not support target_modules=all-linear, setting to default: qkvogud')
-            cfg.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
     if cfg.dataset.name != 'max_tokens':
         from cloneus.data.etl import has_time_column

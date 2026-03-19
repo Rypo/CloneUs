@@ -98,7 +98,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
     model = unsloth_get_peft_model(
         model,
         r = peft_config.r,
-        target_modules = list(peft_config.target_modules),
+        target_modules = peft_config.target_modules if isinstance(peft_config.target_modules, str) else list(peft_config.target_modules),
         lora_alpha = peft_config.lora_alpha,
         lora_dropout = peft_config.lora_dropout, # Supports any, dropout = 0 optimized
         bias = "none",    # Currently only supports bias = "none"
