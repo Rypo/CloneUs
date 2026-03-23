@@ -16,7 +16,6 @@ import torch
 import datasets
 from transformers import PreTrainedTokenizerFast, PreTrainedTokenizerBase
 
-from ..plugins import youtube
 
 from . import etl, useridx
 from .tokenization import check_if_system, to_jinja_template
@@ -90,10 +89,10 @@ def mask_message_roles(dset:datasets.Dataset, tokenizer:PreTrainedTokenizerBase,
             for s,e,label in char_idx_labels:
                 if s!=e:
                     inps = tokenizer(text=text_sample[s:e], add_special_tokens=False, return_length=True, return_attention_mask=True, return_tensors='pt')
-                    token_len = inps['length'][0]
+                    token_len = inps['length'].item()
                     
-                    input_ids = torch.as_tensor(inps['input_ids']).squeeze().tolist() # an expensive flatten
-                    attention_mask = torch.as_tensor(inps['attention_mask']).squeeze().tolist()
+                    input_ids = torch.as_tensor(inps['input_ids']).squeeze(0).tolist() # an expensive flatten
+                    attention_mask = torch.as_tensor(inps['attention_mask']).squeeze(0).tolist()
 
                     labels.extend([-100]*token_len if label==0 else input_ids)
                     
