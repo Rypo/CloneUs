@@ -96,6 +96,10 @@ def to_thumbnails(images:list[Image.Image], max_size:tuple[int,int]=(256,256), o
     
     return out_imgs
 
+def trim_desc(description: str|None, max_len: int = 1000) -> str|None:
+    if description and len(description) >= max_len: # will error if len desc > 1024
+        description = description[:(max_len-1)] + '...'
+    return description
 
 def to_bytes_file(image:Image.Image, prompt: str, ext:typing.Literal['PNG','WebP','JPEG']='PNG', **kwargs):
     filename = prompt_to_filename(prompt, ext=ext)
@@ -103,7 +107,7 @@ def to_bytes_file(image:Image.Image, prompt: str, ext:typing.Literal['PNG','WebP
         image.save(imgbin, format=ext, **kwargs)
         imgbin.seek(0)
         
-        return discord.File(fp=imgbin, filename=filename, description=prompt)
+        return discord.File(fp=imgbin, filename=filename, description=trim_desc(prompt))
 
 def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: typing.Literal['PNG','WebP','JPEG'] = 'WebP', spoiler:bool=False, **kwargs):
     sfx = f'.{ext.lower()}'
@@ -118,12 +122,11 @@ def to_bfile(image:Image.Image, filestem: str=None, description:str=None, ext: t
         image.save(imgbin, format=ext, **kwargs)
         imgbin.seek(0)
         
-        return discord.File(fp=imgbin, filename=filename, description=description, spoiler=spoiler)
+        return discord.File(fp=imgbin, filename=filename, description=trim_desc(description), spoiler=spoiler)
 
 
 def impath_to_file(img_path:Path|str, description:str=None):
-    img_path = Path(img_path)
-    return discord.File(fp=img_path, filename=img_path.name, description=description)
+    return discord.File(fp=Path(img_path), filename=img_path.name, description=trim_desc(description))
 
 def to_discord_file(image:Image.Image|str|Path, filestem:str=None, description:str=None, ext:typing.Literal['PNG','WebP','JPEG']=None, **kwargs):
     if isinstance(image, Image.Image):
@@ -144,7 +147,7 @@ def animation_to_bfile(image_frames:np.ndarray|list[Image.Image], filestem: str=
             iio.imwrite(outbin, image_frames, extension=sfx, loop=kwargs.pop('loop', 0), **kwargs)
         
         outbin.seek(0)
-        return discord.File(fp=outbin, filename=filename, description=description, spoiler=spoiler)
+        return discord.File(fp=outbin, filename=filename, description=trim_desc(description), spoiler=spoiler)
 
 
 
