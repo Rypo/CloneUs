@@ -19,7 +19,9 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 from tqdm.auto import tqdm
-from transformers import  AutoProcessor, AutoModelForCausalLM, GenerationConfig, Qwen2VLForConditionalGeneration
+from transformers import  AutoProcessor, AutoModelForCausalLM, GenerationConfig, Qwen2VLForConditionalGeneration, Florence2ForConditionalGeneration, Florence2Processor, BitsAndBytesConfig
+from transformers.image_utils import load_image
+from accelerate.utils import release_memory
 
 import numpy as np
 import cv2
@@ -291,7 +293,84 @@ TASK_PROMPTS = [
     '<REGION_TO_CATEGORY>', # run_example(task_prompt, text_input="<loc_52><loc_332><loc_932><loc_774>")
     '<REGION_TO_DESCRIPTION>' # run_example(task_prompt, text_input="<loc_52><loc_332><loc_932><loc_774>")
 ]
+PROMPTGEN_TASKS = ['<CAPTION>', '<DETAILED_CAPTION>', '<MORE_DETAILED_CAPTION>', '<GENERATE_TAGS>', '<ANALYZE>', '<MIXED_CAPTION>', '<MIXED_CAPTION_PLUS>']
 
+class Captioner:
+    alias = {
+        'brief': "<CAPTION>", 
+        'detailed': "<DETAILED_CAPTION>", 
+        'verbose': "<MORE_DETAILED_CAPTION>",
+        'tags': '<GENERATE_TAGS>',
+        'analyze':'<ANALYZE>', 
+        'mixed': '<MIXED_CAPTION>', 
+        'mixed+': '<MIXED_CAPTION_PLUS>'
+    }
+    
+    def __init__(self, model_id:str = "Disty0/Florence-2-large-PromptGen-v2.0", dtype=torch.float16, attn_implementation:typing.Literal['sdpa']|None='sdpa', quant_config:typing.Literal['bnb4']|None=None, offload:bool = False,):
+        self.model_id = model_id
+        # self.model_id = "microsoft/Florence-2-large"
+        # self.model_id = "MiaoshouAI/Florence-2-large-PromptGen-v2.0"
+        # self.model_id = thwri/CogFlorence-2.2-Large
+        self.device = torch.device('cuda', 0)
+        self.dtype = dtype
+        
+        self.load_kwargs = {}
+        if attn_implementation:
+            self.load_kwargs.update(attn_implementation = attn_implementation) # {"text_config": "flash_attention_2", "vision_config": "sdpa" }
+        if quant_config == 'bnb4':
+            self.load_kwargs.update(quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type=('nf4' if dtype==torch.bfloat16 else 'fp4'), bnb_4bit_compute_dtype=dtype, bnb_4bit_use_double_quant=False))
+
+        self.offload = offload
+        self.model = None
+        self.processor = None
+        self.is_loaded = False
+
+    
+    @torch.inference_mode()
+    def load(self):
+        self.processor: Florence2Processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True, )
+        self.model = Florence2ForConditionalGeneration.from_pretrained(self.model_id, dtype=self.dtype, trust_remote_code=True, device_map="auto", **self.load_kwargs )
+        # self.model: Florence2ForConditionalGeneration = FastModel.for_inference(self.model)
+        self.model = self.model.eval().requires_grad_(False)
+        # self.model = cpu_offload(self.model, self.device)
+        self.is_loaded = True
+        return self
+            
+    @torch.inference_mode()
+    def unload(self):
+        for _ in range(3):
+            self.model, self.processor = release_memory(self.model, self.processor)
+        self.is_loaded = False
+        
+    @torch.inference_mode()
+    def caption(self, image:str|Image.Image, prompt_types:str | list[str]):
+        if not self.is_loaded: 
+            self.load()
+        
+        if isinstance(image, str):
+            image = load_image(image)
+
+        if isinstance(prompt_types, str):
+            prompt_types = [prompt_types]
+        
+        if self.offload: 
+            self.model.to(self.device)
+        
+        task_labels = [self.alias.get(prompt_type, prompt_type) for prompt_type in prompt_types] 
+        inputs = self.processor(text=task_labels, images=image, return_tensors="pt", padding=True)
+
+        if len(task_labels) > 1:
+            inputs['pixel_values'] = inputs['pixel_values'].expand(inputs['input_ids'].shape[0], -1, -1, -1)
+
+        outputs = self.model.generate(**inputs.to(self.device, self.dtype), max_new_tokens=1024, do_sample=False, num_beams=3)
+        parsed_answers = dict(zip(prompt_types, self.processor.decode(outputs, skip_special_tokens=True)))
+        
+        if self.offload: 
+            self.model = self.model.to('cpu')
+        
+        torch.cuda.empty_cache()
+        return parsed_answers
+    
 class Florence:
     def __init__(self, torch_dtype = torch.float16, device="cuda:0", offload:bool=True) -> None:
         # https://huggingface.co/microsoft/Florence-2-large/blob/main/sample_inference.ipynb

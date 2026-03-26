@@ -23,7 +23,7 @@ import config.settings as settings
 from cmds import transformers as cmd_tfms, choices as cmd_choices, flags as cmd_flags
 from utils.status import StatusItem, check_up
 from utils.globthread import stop_global_executors, wrap_async_executor, async_gen
-from utils import image as imgutil, http as http_util
+from utils import image as imgutil, http as http_util, text as text_util
 from views import imageui
 from run import BotUs
 
@@ -494,26 +494,33 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
 
 
     @commands.hybrid_command(name='caption')
-    #@check_up('igen', '❗ Drawing model not loaded. Call `!imgup`')
-    async def caption(self, ctx: commands.Context, imgurl:str, level:typing.Literal['brief', 'detailed', 'verbose']='verbose', text_only:bool=False):
+    async def caption(self, ctx: commands.Context, imgurl: str, captype: typing.Literal['brief','detailed','verbose','tags','analyze','mixed','mixed+']='mixed', show_image: bool = True):
         """Write a text description for an image.
 
         Args:
             imgurl: URL of the image to be described.
-            level: level of detail in the description. Default=verbose.
-            text_only: If True, only return text description, otherwise show the image. Default=False.
+            captype: caption type. mixed ≈ verbose+tags, mixed+ ≈ verbose+tags+analyze. Default=mixed.
+            show_image: If False, only return text description, otherwise include the image in reply. Default=True.
         """
         await self.view_check_defer(ctx)
         image_url = http_util.normalize_media_url(imgurl, tenor_mp4_url=False)
         # test for gif/mp4/animated file
 
         image, imgmeta = await imgutil.aload_image(image_url, result_type='np')
+        image = Image.fromarray(imgutil.image_fix(image, animated=False, transparency=False)) # Image.open(requests.get(imgurl, stream=True).raw)
         
-        image = imgutil.image_fix(image, animated=False, transparency=False)
-        image = Image.fromarray(image)
+
+        caps = self.igen.caption(image, captype)
+        file = imgutil.to_bfile(image, description=caps[captype]) if show_image else None
         
-        desc = self.igen.caption(image, level)
-        file = None if text_only else imgutil.to_bfile(image, description=desc)
+        desc = '\n\n'.join([f'## {k}\n{v}' for k,v in caps.items()])
+
+        if len(desc) >= 2000:
+            mparts = text_util.split_message(desc, sep='\n\n') # mixed variants use "\n\n" as sep 
+            msg = await ctx.send(next(mparts), file=file) 
+            for mpart in mparts:
+                msg = await msg.reply(mpart)
+            return msg
 
         return await ctx.send(desc, file=file)
     

@@ -476,7 +476,7 @@ class SingleStagePipeline:
         self.basei2i = None
         # specialists
         self.upsampler = None
-        self.florence = None
+        self.captioner = None
         self.interpolator = None
         self.vqa = None
 
@@ -537,11 +537,11 @@ class SingleStagePipeline:
                 setattr(self.basei2i, comp, None)
         (
             self.base, self.basei2i, 
-            self.compeler, self.upsampler, self.florence, self.interpolator, self.vqa, 
+            self.compeler, self.upsampler, self.captioner, self.interpolator, self.vqa, 
             self.initial_scheduler_config, self.scheduler_kwargs
         ) = release_memory(
              self.base, self.basei2i, 
-             self.compeler, self.upsampler, self.florence, self.interpolator, self.vqa, 
+             self.compeler, self.upsampler, self.captioner, self.interpolator, self.vqa, 
              self.initial_scheduler_config, self.scheduler_kwargs
         )
         # The ugliest possible way to set a bunch of things to None
@@ -698,12 +698,12 @@ class SingleStagePipeline:
         return images
 
     @torch.inference_mode()    
-    def caption(self, image:Image.Image, caption_type:typing.Literal['brief', 'detailed', 'verbose']):
-        if self.florence is None:
-            self.florence = specialists.Florence(offload=True)
+    def caption(self, image: Image.Image, caption_type: typing.Literal['brief','detailed','verbose','tags','analyze','mixed','mixed+']) -> dict[str, str]:
+        if self.captioner is None:
+            self.captioner = specialists.Captioner(offload=False)
         
-        resp = self.florence.caption(image, caption_type)
-        release_memory() 
+        resp = self.captioner.caption(image, caption_type)
+
         return resp
     
     @torch.inference_mode()    
