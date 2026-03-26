@@ -81,6 +81,7 @@ class CloneusManager():
         
         status = [
             StatusItem('Text status', 'Up' if self.is_ready else 'Down', " ✔" if self.is_ready else " ✖"),
+            StatusItem('Capabilities', '', '{{{}}}'.format(', '.join(self.clo.model_capabilities or []))),
             StatusItem('Model', model_name),
             StatusItem('Checkpoint', str(run_path), f"/{checkpoint}", advanced=True),
             StatusItem('Tag placement', self.clo.cfg.tag_placement, advanced=True),
@@ -455,7 +456,7 @@ class CloneusManager():
         new_messages = []
         for discord_out in discord_outs:
             if len(discord_out) > char_limit:
-                for sub_dout in text_utils.split_message(discord_out, char_limit):
+                for sub_dout in text_utils.split_message(discord_out, sep=' ', max_len=char_limit):
                     msg = await ctx.send(sub_dout, tts=self.tts_mode)
                     new_messages.append(msg)
             else:
@@ -468,7 +469,7 @@ class CloneusManager():
         new_messages = []
         for i,discord_out in enumerate(discord_outs):
             if len(discord_out) > char_limit:
-                for j,sub_dout in enumerate(text_utils.split_message(discord_out, char_limit)):
+                for j,sub_dout in enumerate(text_utils.split_message(discord_out, sep=' ', max_len=char_limit)):
                     if j==0:
                         msg = await msg.edit(content=sub_dout)
                     else:

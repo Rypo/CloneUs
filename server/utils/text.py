@@ -176,10 +176,9 @@ def cast_string_value(value):
         value = None
     return value
 
-
-def split_message(message:str, max_len=2000):
-    for msgpart in more_itertools.constrained_batches(message.split(' '), max_size=max_len, get_len=lambda g: len(' '.join(g))):
-        yield ' '.join(msgpart)
+def split_message(message:str, sep: str = ' ', max_len: int = 2000):
+    for msgpart in more_itertools.constrained_batches(message.split(sep), max_size=max_len, ):
+        yield sep.join(msgpart)
     #[' '.join(msgpart) for msgpart in list(more_itertools.constrained_batches(message.split(' '), max_size=max_len, get_len=lambda g: len(' '.join(g))))]
         
 
