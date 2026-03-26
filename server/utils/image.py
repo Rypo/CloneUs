@@ -2,6 +2,7 @@ import re
 import io
 import typing
 import asyncio
+import logging
 import datetime
 import tempfile
 from pathlib import Path
@@ -18,6 +19,7 @@ from diffusers.utils import load_image, make_image_grid
 import config.settings as settings
 from . import http as http_util
 
+logger = logging.getLogger('pconsole') 
 
 IMG_DIR = settings.SERVER_ROOT/'output'/'imgs'
 PROMPT_FILE = IMG_DIR.joinpath('_prompts.txt')
@@ -200,21 +202,20 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
         non-animated image: PIL.Image
     '''
     simage_uri = str(image_uri)
+    
     if simage_uri.startswith("http://") or simage_uri.startswith("https://"):
-        imbytes = await http_util.aget_bytestream(image_uri)
+        try:
+            imbytes = await http_util.aget_bytestream(image_uri, random_ua=True)
+        except Exception as e:
+            logger.warning(f'async fetch failed, trying sync. {str(e)}')
+            imbytes = http_util.get_bytestream(image_uri, random_ua=False)
+        
+        # If both fail, will have uncaught exception. TODO: Better option?
         imeta = iio.immeta(imbytes)
         image = iio.imread(imbytes)
     else:
-        try:
-            imeta = iio.immeta(image_uri)
-            image = iio.imread(image_uri)
-        except HTTPError as e:
-            print(e)
-            imbytes = http_util.get_bytestream(image_uri)
-
-            imeta = iio.immeta(imbytes)
-            image = iio.imread(imbytes)
-            
+        imeta = iio.immeta(image_uri)
+        image = iio.imread(image_uri)
     
     image = convert_imgarr(image, result_type)
 
