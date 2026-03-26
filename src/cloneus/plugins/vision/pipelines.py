@@ -576,7 +576,7 @@ class SingleStagePipeline:
                 raise NotImplementedError(f'Unsupported lora adapter {adapter_name!r}')
         
         if sum(self.adapter_weights.values()) > 0:
-            self.base.set_adapters(self.adapter_weights.keys(), self.adapter_weights.values())
+            self.base.set_adapters(list(self.adapter_weights.keys()), list(self.adapter_weights.values()))
         
     @torch.inference_mode()
     def toggle_loras(self):
@@ -594,7 +594,7 @@ class SingleStagePipeline:
         except KeyError:
             raise KeyError(f'Unknown adapter_name: {adapter_name!r}')
         
-        self.base.set_adapters(self.adapter_weights.keys(), self.adapter_weights.values())
+        self.base.set_adapters(list(self.adapter_weights.keys()), list(self.adapter_weights.values()))
 
         logger.debug(f'Active Adapters: {self.base.get_active_adapters()}\nAdapter Weights: {self.adapter_weights}')
 
