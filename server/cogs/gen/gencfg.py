@@ -230,6 +230,9 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
             self.auto_reply_candidates = [useridx.get_users('dname', by='initial')[i] for i in author_initials]
             self._display_initials = ','.join(author_initials)
 
+        if not self.clomgr.is_ready:
+            await self.txtup(ctx)
+        
         msg=f'Lurk mode enabled for P>={confidence} ∀ ∈ ({self._display_initials})'
         return await ctx.send(msg)
     

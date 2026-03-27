@@ -535,14 +535,15 @@ class TextGen(commands.Cog, SetTextConfig):
         await self.anybot(ctx, next_author, seed_text=seed_text)
 
     async def auto_respond(self, message_cache):
+        if not self.clomgr.is_ready: # need this so doesn't keep spamming after !tdown
+            return
+
         ctx = await self.bot.get_context(message_cache[-1])
-        if not self.clomgr.is_ready:
-            await self.txtup(ctx)
         
         if self.auto_reply_mode == 'lurk':
             author_probas = await self.clomgr.predict_author(message_cache, self.auto_reply_mode, self.auto_reply_candidates)
             top_auth,top_prob = author_probas[0]
-            if top_prob >= self.lurk_confidence:
+            if top_prob >= self.lurk_confidence and self.msgmgr.get_mcache(ctx)[-1] == message_cache[-1]: # check if context changed before posting
                 return await self.anybot(ctx, top_auth, seed_text=None)
             return
                 
