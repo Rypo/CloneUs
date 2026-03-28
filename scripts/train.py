@@ -111,8 +111,6 @@ def verify_config(cfg):
 
 
     if cfg.flashattn_lib == 'unsloth': 
-        if cfg.quant_method != 'bnb4':
-            raise ValueError('for flashattn_lib=unsloth, only quant_method=bnb4 is supported')
         if cfg.lora_use_dora:
             raise ValueError('Unsloth does not support DoRA training. Set lora_use_dora: false to use unsloth')
             

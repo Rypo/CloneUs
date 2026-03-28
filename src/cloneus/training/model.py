@@ -75,6 +75,13 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
             finetune_language_layers = True,
             finetune_mlp_modules = True,
         )
+    # (peft_config.init_lora_weights != 'loftq'),
+    unsloth_pt_kwargs = dict(
+        load_in_4bit = (quant_method == 'bnb4'),     # MoE QLoRA not recommended, dense 27B is fine 
+        load_in_8bit = (quant_method == 'bnb8'),
+        load_in_16bit = (quant_method == 'bf16'),     # bf16/16-bit LoRA
+        full_finetuning = False,
+    )
     
     unsloth_from_pretrained = FastModel.from_pretrained if is_vlm else FastLanguageModel.from_pretrained
     model, tokenizer = unsloth_from_pretrained(
@@ -82,7 +89,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
         max_seq_length = max_seq_length,
         dtype = torch.bfloat16,
         fix_tokenizer=True,
-        load_in_4bit = (peft_config.init_lora_weights != 'loftq'),
+        **unsloth_pt_kwargs,
         device_map = "sequential",
         use_gradient_checkpointing = "unsloth",
         attn_implementation = "flash_attention_2",
