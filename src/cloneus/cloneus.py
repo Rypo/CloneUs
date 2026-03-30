@@ -391,14 +391,16 @@ class Cloneus(GenConfigUtilities):
         return clo
         
     def load_model(self):
-        quant_method = self.init_kwargs.get('quant_method',None) # quant_method:typing.Literal['awq','merged','gptq','unsloth','aqlm','bnb4', ]=None
-
-        # use unsloth for inference by default if it was used for training 
-        if quant_method is None and self.cfg.get('flashattn_lib', None) == 'unsloth': 
-            quant_method = 'unsloth'
+        quant_method = self.init_kwargs.get('quant_method', self.cfg.get('quant_method', None))
+        load_strategy = self.init_kwargs.get('flashattn_lib', self.cfg.get('flashattn_lib', 'unsloth')) # use unsloth for inference by default if it was used for training 
+        attn_implementation = self.init_kwargs.get('attn_implementation', self.cfg.get('attn_implementation', 'flash_attention_2'))
+        
+        if quant_method is None:
+            logger.warning('quant_method is None. Defaulting to bf16.') 
+            quant_method = 'bf16'
         
         self.unload_model(partial=True) # make sure all states are cleared first. If we want to preserve state, then should have called swap_model
-        self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, quant_method=quant_method, dtype=self.torch_dtype, attn_implementation=self.cfg.attn_implementation)
+        self.model, self.tokenizer = iload.load_any_inference(self.path_data.checkpoint_path, quant_method=quant_method, load_strategy=load_strategy, attn_implementation=attn_implementation, dtype=self.torch_dtype, )
         
         self.model_capabilities = tuple(self.cfg.get('model_capabilities', ['text'])) # tuple for caching purposes
         self.is_multimodal = None

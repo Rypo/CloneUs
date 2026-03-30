@@ -2,6 +2,7 @@ import os
 import gc
 import time
 import typing
+from typing import Literal
 import functools
 import warnings
 from pathlib import Path
@@ -67,7 +68,7 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
 
         
 @cleanup
-def load_awq(awq_dirpath, dtype=torch.float16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def load_awq(awq_dirpath, dtype=torch.float16, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     '''Load AWQ model - Broken for Exllama v2
     Initial testing revealed that float16, without flash is far supperior in both speed and quality.
     Going to ignore those args for now.
@@ -89,7 +90,7 @@ def load_awq(awq_dirpath, dtype=torch.float16, attn_implementation:typing.Litera
     return model, tokenizer
 
 @cleanup
-def load_awq_exl2(awq_dirpath, max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def load_awq_exl2(awq_dirpath, max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     '''Load AWQ model
     `awq_dirpath`: Path to folder containing model files.
     `max_seq_len`: The max sequence length, used to allocate kv-cache for fused models.
@@ -116,7 +117,7 @@ def load_awq_exl2(awq_dirpath, max_seq_len=8192, batch_size=1, fuse_layers=False
     return model, tokenizer
 
 @cleanup
-def load_gptq(ckpt_dirpath, quant_config=None, dtype="auto", attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def load_gptq(ckpt_dirpath, quant_config=None, dtype="auto", attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     if quant_config is None:
         # disable exllama kernel because training is unstable. This will overwrite the value stored in the config of the model.
         quant_config = GPTQConfig(bits=4, use_exllama=True, exllama_config={'version':2})#use_cuda_fp16=True)
@@ -133,7 +134,7 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype="auto", attn_implementation
 
     return model, tokenizer
 
-def load_gguf(model_id:str|Path, gguf_file:str = None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def load_gguf(model_id:str|Path, gguf_file:str = None, dtype=torch.bfloat16, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     if gguf_file is None:
         if isinstance(model_id, Path):
             gguf_file = next(model_id.rglob('*.gguf')).relative_to(model_id).as_posix()
@@ -161,21 +162,22 @@ def load_gguf(model_id:str|Path, gguf_file:str = None, dtype=torch.bfloat16, att
     return model, tokenizer
 
 @torch.inference_mode()
-def load_unsloth(checkpoint_dirpath:Path, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+def load_unsloth(checkpoint_dirpath:Path, quant_config=None, dtype=torch.bfloat16, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
     tokenizer = auto_inference_tokenizer(checkpoint_dirpath, uncomment_chat_template_bos=True, force_bos_chat_template=False)
 
-    quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype = torch.bfloat16, bnb_4bit_quant_type = 'nf4', bnb_4bit_use_double_quant=True)
     peft_config = PeftConfig.from_pretrained(checkpoint_dirpath)
 
     pt_kwargs = dict(
         # pretrained_model_name_or_path = checkpoint_dirpath,
         pretrained_model_name_or_path = peft_config.base_model_name_or_path,
         low_cpu_mem_usage = True,
-        quantization_config = quant_config,
         device_map = "auto",
         dtype = dtype,
         attn_implementation = attn_implementation,
     )
+    if quant_config:
+        pt_kwargs.update(quantization_config=quant_config)
+    
     peft_kwargs = dict(
          adapter_name = 'default', 
          is_trainable = False, 
@@ -198,8 +200,12 @@ def load_unsloth(checkpoint_dirpath:Path, dtype=torch.bfloat16, attn_implementat
     release_memory()
     return model, tokenizer
 
-@cleanup
-def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','merged','gptq','unsloth','gguf','aqlm','bnb4', ]=None, attn_implementation="flash_attention_2", **kwargs):
+@torch.inference_mode()
+def load_any_inference(checkpoint_dirpath: Path, 
+                       quant_method: Literal['awq','gptq','gguf','aqlm','bnb4','bnb8','bf16'] = None, 
+                       load_strategy: Literal['unsloth','huggingface','merged'] = 'unsloth', 
+                       attn_implementation: Literal["eager", "sdpa", "flash_attention_2"]|dict = "flash_attention_2", 
+                       **kwargs):
     '''Attempt to load any type of model based on quant_method or model dir structure
     
     if "awq" in model_savedir -> awq
@@ -209,7 +215,7 @@ def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','me
     if "gguf" -> llama_cpp
     '''
     
-    quant_load_methods = ['awq','merged','gptq','unsloth','gguf','aqlm','bnb4', ]
+    quant_load_methods = ['awq','gptq','gguf','aqlm','bnb', ]
     dirstr = str(checkpoint_dirpath)
     
     if quant_method is None:        
@@ -217,53 +223,54 @@ def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','me
 
     match quant_method:
         case 'awq':
-            defaults = dict(max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation="flash_attention_2")
-            #defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2", freeze_eval=False)
+            defaults = dict(max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation=attn_implementation)
             kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
             return load_awq_exl2(checkpoint_dirpath, **kargs)
-        case 'merged':
-            defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-            return load_merged(checkpoint_dirpath, **kargs)
         case 'gptq':
-            defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+            defaults = dict(quant_config=None, dtype=torch.bfloat16, attn_implementation=attn_implementation)
             kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
             return load_gptq(checkpoint_dirpath, **kargs)
-        case 'unsloth':
-            defaults = dict(dtype=torch.bfloat16, attn_implementation="flash_attention_2")
-            kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-            return load_unsloth(checkpoint_dirpath, **kargs)
         case 'gguf':
             defaults = dict(dtype=torch.bfloat16, attn_implementation=attn_implementation)
             kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
             return load_gguf(checkpoint_dirpath, gguf_file = None, **kargs)
-            #return load_gguf(model_savedir, **kargs)
-        case _: # 'aqlm' , 'bnb4'
-            defaults = dict(quant_method=quant_method, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
+        case _: # 'aqlm' , 'bnb', bf16
+            qconfigs = {
+                'bnb4': BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype = torch.bfloat16, bnb_4bit_quant_type = 'nf4', bnb_4bit_use_double_quant=True),
+                'bnb8': BitsAndBytesConfig(load_in_8bit=True,),
+                'bf16': None,
+                'aqlm': None,
+            }
+            
+            defaults = dict(
+                quant_config = qconfigs.get(quant_method, None), 
+                dtype = torch.bfloat16, 
+                attn_implementation = attn_implementation
+            )
+            
             kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-            return load_peft(checkpoint_dirpath, **kargs) # return load_unmerged(model_savedir, **kargs)
-        
-        # else:
-            #raise ValueError('Unable to determine model type from model_savedir path')
+
+            if load_strategy == 'unsloth':
+                return load_unsloth(checkpoint_dirpath, **kargs)
+            elif load_strategy == 'merged':
+                return load_merged(checkpoint_dirpath, **kargs)
+            else:
+                return load_peft(checkpoint_dirpath, **kargs) # return load_unmerged(model_savedir, **kargs)
 
 
-def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PeftModelForCausalLM, PreTrainedTokenizerBase]:
+def load_peft(checkpoint_dirpath, quant_config=None, dtype=torch.bfloat16, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PeftModelForCausalLM, PreTrainedTokenizerBase]:
     t0=time.perf_counter()
-    quant_config = None
-    if quant_method=='bnb4':
-        quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
     
     pt_kwargs = dict(
         low_cpu_mem_usage=True,
-        quantization_config=quant_config,
         device_map="auto",
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
         use_cache=True,
         trust_remote_code=True
     )
-    if pt_kwargs['quantization_config'] is None:
-        pt_kwargs.pop('quantization_config')
+    if quant_config:
+        pt_kwargs.update(quantization_config=quant_config)
     
     model = AutoPeftModelForCausalLM.from_pretrained(checkpoint_dirpath, **pt_kwargs,)
     
@@ -271,7 +278,7 @@ def load_peft(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, att
     print(f'load_peft: {time.perf_counter()-t0:0.2f}s')
     return model, tokenizer
 
-def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
+def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
     t0=time.perf_counter()
     
     quant_config = None
@@ -293,15 +300,14 @@ def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16,
 
     pt_kwargs = dict(
         low_cpu_mem_usage=True,
-        quantization_config=quant_config,
         device_map="auto",
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
         use_cache=True,
         trust_remote_code=True
     )
-    if quant_config is None:
-        pt_kwargs.pop('quantization_config')
+    if quant_config:
+        pt_kwargs.update(quantization_config=quant_config)
     
     peft_config = PeftConfig.from_pretrained(checkpoint_dirpath)
     base_model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path, **pt_kwargs) #.to_bettertransformer()
@@ -317,7 +323,7 @@ def load_unmerged(checkpoint_dirpath, quant_method='bnb4', dtype=torch.bfloat16,
     return model, tokenizer
 
 
-def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
+def load_merged(merged_savedir, quant_config=None, dtype=torch.bfloat16, attn_implementation:Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2") -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
     if quant_config is None:
         quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16)
     
