@@ -133,12 +133,32 @@ def load_gptq(ckpt_dirpath, quant_config=None, dtype="auto", attn_implementation
 
     return model, tokenizer
 
-@cleanup
-def load_gguf(gguf_filepath:str|Path, n_gpu_layers=-1, n_ctx=8192):
-    from llama_cpp import Llama
-    llm = Llama(str(gguf_filepath), n_gpu_layers=n_gpu_layers, n_ctx=n_ctx)
-    #llm.create_chat_completion
-    return llm
+def load_gguf(model_id:str|Path, gguf_file:str = None, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
+    if gguf_file is None:
+        if isinstance(model_id, Path):
+            gguf_file = next(model_id.rglob('*.gguf')).relative_to(model_id).as_posix()
+        elif model_id.endswith('.gguf'):
+            parts = model_id.split('/')
+            gguf_file = parts[-1]
+            model_id = '/'.join(parts[:-1])
+        else:
+            raise ValueError(f'Unable to parse gguf_file from model_id={model_id!r}')
+
+    pt_kwargs = dict(
+        pretrained_model_name_or_path = model_id,
+        gguf_file=gguf_file,
+        # quantization_config = ..., # not supported with gguf loading
+        device_map = "auto",
+        dtype = dtype,
+        attn_implementation = attn_implementation, # "kernels-community/flash-attn2"
+    )
+    model = AutoModelForCausalLM.from_pretrained(**pt_kwargs)
+    tokenizer = auto_inference_tokenizer(model_id, uncomment_chat_template_bos=True, force_bos_chat_template=False, gguf_file=gguf_file,)
+
+    model = FastModel.for_inference(model).eval().requires_grad_(False)
+    release_memory()
+
+    return model, tokenizer
 
 @torch.inference_mode()
 def load_unsloth(checkpoint_dirpath:Path, dtype=torch.bfloat16, attn_implementation:typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2"):
@@ -179,7 +199,7 @@ def load_unsloth(checkpoint_dirpath:Path, dtype=torch.bfloat16, attn_implementat
     return model, tokenizer
 
 @cleanup
-def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','merged','gptq','unsloth','gguf','aqlm','bnb4', ]=None, **kwargs):
+def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','merged','gptq','unsloth','gguf','aqlm','bnb4', ]=None, attn_implementation="flash_attention_2", **kwargs):
     '''Attempt to load any type of model based on quant_method or model dir structure
     
     if "awq" in model_savedir -> awq
@@ -214,9 +234,9 @@ def load_any_inference(checkpoint_dirpath, quant_method:typing.Literal['awq','me
             kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
             return load_unsloth(checkpoint_dirpath, **kargs)
         case 'gguf':
-            defaults = dict(n_gpu_layers=-1, n_ctx=8192)
+            defaults = dict(dtype=torch.bfloat16, attn_implementation=attn_implementation)
             kargs = {k: kwargs.get(k, defaults[k]) for k in defaults}
-            raise NotImplementedError('GGUF is not (yet) supported')
+            return load_gguf(checkpoint_dirpath, gguf_file = None, **kargs)
             #return load_gguf(model_savedir, **kargs)
         case _: # 'aqlm' , 'bnb4'
             defaults = dict(quant_method=quant_method, dtype=torch.bfloat16, attn_implementation="flash_attention_2")
