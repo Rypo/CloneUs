@@ -7,6 +7,7 @@ import functools
 import warnings
 from pathlib import Path
 
+from omegaconf import DictConfig
 import torch
 from unsloth import FastLanguageModel, FastModel
 
@@ -220,7 +221,10 @@ def load_any_inference(checkpoint_dirpath: Path,
     
     if quant_method is None:        
         quant_method = next(filter(lambda q: q in dirstr, quant_load_methods), 'bnb4')
-
+    
+    # https://huggingface.co/docs/transformers/v5.2.0/en/attention_interface#backbone-specific-attention
+    attn_implementation = dict(attn_implementation) if isinstance(attn_implementation, DictConfig) else attn_implementation
+    
     match quant_method:
         case 'awq':
             defaults = dict(max_seq_len=8192, batch_size=1, fuse_layers=False, attn_implementation=attn_implementation)

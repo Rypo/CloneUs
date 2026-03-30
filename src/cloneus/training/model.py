@@ -2,6 +2,8 @@ import typing
 import logging
 from pathlib import Path
 
+from omegaconf import DictConfig
+
 import torch
 from unsloth import FastLanguageModel, FastModel
 from unsloth.chat_templates import get_chat_template, CHAT_TEMPLATES
@@ -92,7 +94,7 @@ def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_
         **unsloth_pt_kwargs,
         device_map = "sequential",
         use_gradient_checkpointing = "unsloth",
-        attn_implementation = "flash_attention_2",
+        attn_implementation = attn_implementation,
         unsloth_tiled_mlp = False,
     )
     if Path(model_id).joinpath('optimizer.pt').exists():
@@ -179,7 +181,7 @@ def get_model(model_id,
         quantization_config=quant_config,
         use_cache=False, 
         attn_implementation=attn_implementation,
-        torch_dtype='auto', 
+        dtype='auto', 
         low_cpu_mem_usage=True,
         device_map="auto", 
     )
@@ -234,7 +236,10 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
     # But, at least for unsloth, it is slower and uses more vRAM compared to init
     # It may have to do with Trainer's _load_from_checkpoint overwriting pieces of unsloth's patch, but just speculation. 
     # TODO: Investigate. Trainer/Unsloth/Peft checkpoint resume behavior
-
+    
+    # required or will fail to hf_trasformer attn_check
+    attn_implementation = dict(cfg.attn_implementation) if isinstance(cfg.attn_implementation, DictConfig) else cfg.attn_implementation
+    
     if cfg.flashattn_lib=='huggingface':
         if cfg.quant_method =='awq':
             model, tokenizer = get_awq(name_or_path, 
@@ -244,12 +249,12 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
                                         
                                         padding_side=cfg.padding_side, 
                                         custom_chat_template=cfg.custom_chat_template,
-                                        attn_implementation=cfg.attn_implementation, ) #custom_token_map
+                                        attn_implementation=attn_implementation, ) #custom_token_map
         else:
             model, tokenizer = get_model(name_or_path, 
                                         peft_config, 
                                         quant_config=cfg.quant_method, 
-                                        attn_implementation=cfg.attn_implementation, 
+                                        attn_implementation=attn_implementation, 
                                         padding_side=cfg.padding_side, 
                                         custom_chat_template=cfg.custom_chat_template) #custom_token_map
         
@@ -261,7 +266,9 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
                                        peft_config, 
                                        max_seq_length=cfg.chunk_size, 
                                        padding_side=cfg.padding_side, 
-                                       custom_chat_template=cfg.custom_chat_template)
+                                       custom_chat_template=cfg.custom_chat_template,
+                                       attn_implementation=attn_implementation, 
+                                       quant_method=cfg.quant_method)
         # TODO: look into ~4-7gb higher vRAM usage after changing padding_side=right -> padding_side=left --- https://huggingface.co/docs/transformers/llm_tutorial#wrong-padding-side
         
     else:
