@@ -510,7 +510,7 @@ class ImageGen(commands.Cog, SetImageConfig): #commands.GroupCog, group_name='im
         image = Image.fromarray(imgutil.image_fix(image, animated=False, transparency=False)) # Image.open(requests.get(imgurl, stream=True).raw)
         
 
-        caps = self.igen.caption(image, captype)
+        caps = await self.igen.caption(image, captype)
         file = imgutil.to_bfile(image, description=caps[captype]) if show_image else None
         
         desc = '\n\n'.join([f'## {k}\n{v}' for k,v in caps.items()])
