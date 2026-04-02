@@ -174,13 +174,32 @@ async def is_animated(image_url:str) -> bool:
         print(e)
         return False
 
+def gif_transparency_fix(imgbytes:bytes|Image.Image, bg_color:int|tuple[int,int,int] = 50):
+    if isinstance(imgbytes, bytes):
+        # https://en.wikipedia.org/wiki/GIF#Animated_GIF
+        colormap = imgbytes[int('D', 16):int('30D', 16)]
+        trns_idx = int(str(imgbytes[int('326', 16)]),16)
+        # https://pillow.readthedocs.io/en/stable/_modules/PIL/ImagePalette.html#ImagePalette
+        trns_rgb = tuple(colormap[trns_idx*3: (trns_idx+1)*3]) # 3 = R,G,B
+        imgarr = iio.imread(imgbytes)
+    elif isinstance(imgbytes, Image.Image):
+        trns_idx = imgbytes.info['transparency']
+        trns_rgb = {v:k for k,v in imgbytes.palette.colors.items()}[trns_idx]
+        imgarr = np.array(imgbytes)
+
+    imgarr[imgarr == trns_rgb] = bg_color
+    return imgarr
+
 def image_fix(image:np.ndarray, animated:bool=False, transparency:bool=False):
     if image.ndim == 2: # grayscale
         return image[:, :, None].repeat(3, -1) # copy 3x, HW->HWC
     if not animated and image.ndim > 3:
         image = image[0] # gifs -> take first frame
-    if not transparency and image.shape[-1] > 3: # discard alpha channel
-        image = image[..., :3] # avoid [:, :, :3] in case animated with transparency
+    if not transparency and image.shape[-1] > 3: # flatten transparency
+        bg = Image.fromarray(np.full_like(image, [50,50,50,255])) # [50,51,57,255] # cool gray
+        image = Image.alpha_composite(bg, Image.fromarray(image),).convert('RGB')
+        image = np.array(image)
+
     return image
 
 def convert_imgarr(image:np.ndarray, result_type:typing.Literal['PIL','np']|None = None) -> np.ndarray|Image.Image:
@@ -212,7 +231,11 @@ async def aload_image(image_uri:str, result_type:typing.Literal['PIL','np']|None
         
         # If both fail, will have uncaught exception. TODO: Better option?
         imeta = iio.immeta(imbytes)
-        image = iio.imread(imbytes)
+        
+        if ('duration' in imeta and 'transparency' in imeta): # animated gif with transparency
+            image = gif_transparency_fix(imbytes, bg_color=50)
+        else:
+            image = iio.imread(imbytes)
     else:
         imeta = iio.immeta(image_uri)
         image = iio.imread(image_uri)
