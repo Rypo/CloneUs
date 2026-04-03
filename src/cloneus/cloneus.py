@@ -828,9 +828,18 @@ class Cloneus(GenConfigUtilities):
         
         #author_primed_texts, base_text_length = self._author_primed_batch(chat_history, authors)
         #author_primed_texts[0][:base_text_length]
+        if self.is_multimodal and len(chat_history) > 1:
+            # Using this function implies speed > precision. Ignore all but the last message's mm inputs (if any) 
+            chat_history = [(item[0],item[1],[]) for item in chat_history[:-1]] + [chat_history[-1]]
+        
         author_primed_texts = [self.to_text_input(chat_history, author) for author in authors]
         base_input_text = self.common_generation_text(chat_history, authors[0])
         mm_inputs = self.to_mm_inputs(chat_history)
+        # repeat media items to match batch size
+        mm_inputs = {k: [v if isinstance(v, list) else [v] for _ in range(len(authors))] for k,v in mm_inputs.items() if v is not None}
+        
+        # Using this function implies speed > precision. Dropping mm processing solidifies the trade-off.
+        # mm_inputs = {} # ignore non-text exclusively for this function. 
         base_input_ntokens = self.tokenizer(text=base_input_text, **mm_inputs, return_tensors='pt', add_special_tokens=False, return_length=True)['length']
         # base_input = self.tokenizer.apply_chat_template(self.to_conversation_format(chat_history), return_tensors='pt', tokenize=True)
         # base_input_len = base_input.shape[1]
