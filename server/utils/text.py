@@ -177,7 +177,8 @@ def cast_string_value(value):
     return value
 
 def split_message(message:str, sep: str = ' ', max_len: int = 2000):
-    for msgpart in more_itertools.constrained_batches(message.split(sep), max_size=max_len, ):
+    sep_len = len(sep)
+    for msgpart in more_itertools.constrained_batches(message.split(sep), max_size=max_len, get_len=lambda g: len(g) + sep_len):
         yield sep.join(msgpart)
     #[' '.join(msgpart) for msgpart in list(more_itertools.constrained_batches(message.split(' '), max_size=max_len, get_len=lambda g: len(' '.join(g))))]
         
