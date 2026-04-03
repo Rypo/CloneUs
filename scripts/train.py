@@ -186,13 +186,19 @@ def main(args):
     cfg.model_capabilities = ['text']
 
     # TODO: better way to check for this
-    is_processor = hasattr(tokenizer, 'tokenizer')
+    is_processor = getattr(tokenizer, 'tokenizer', None) is not None
     if 'tool_call' in tokenizer.chat_template:
         cfg.model_capabilities += ['tools']
-    if hasattr(tokenizer,'image_processor'):
-        cfg.model_capabilities += ['image']
-    if hasattr(tokenizer,'video_processor'):
-        cfg.model_capabilities += ['video']
+    if is_processor:
+        proc_attrs = tokenizer.get_attributes()
+        if 'image_processor' in proc_attrs:
+            cfg.model_capabilities += ['image']
+        if 'video_processor' in proc_attrs:
+            cfg.model_capabilities += ['video']
+        if 'feature_extractor' in proc_attrs:   # XXX: does this reliably confim audio support? 
+            cfg.model_capabilities += ['audio']
+        # if 'tokenizer' in proc_attrs:
+        #     cfg.model_capabilities += ['text']
 
     cfg.special_tokens = tokenizer.tokenizer.special_tokens_map if is_processor else tokenizer.special_tokens_map
     cfg.model_architecture = model.config.architectures[0]

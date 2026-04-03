@@ -179,14 +179,19 @@ def batched_token_count(convo:list[list[dict]]|list[dict[str,str]], tokenizer:Pr
         batched_convo = [[c] for c in convo]
         bos_discount = 1
         #print('treating each item as own convo')
-    return tokenizer(text = tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length']- bos_discount
+    # return np.array([tokenizer.apply_chat_template(c, return_length=True, return_dict=True, tokenize=True, add_generation_prompt=False)['length'] for c in batched_convo]).squeeze() - bos_discount
+    return tokenizer(text = tokenizer.apply_chat_template(batched_convo, tokenize=False, add_generation_prompt=False), add_special_tokens=False, return_length=True, return_tensors='np')['length'] - bos_discount
 
 
 def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role', 'content_prefix_ot',],):
     if isinstance(system_msg, str):
         raise TypeError('No more loosey goosey. dict or list[dict, dict] only')
         #system_msg = {'role':'system', 'content':system_msg}
-
+    
+    if (use_mm_format := isinstance(chat_convo[0]['content'], list)):
+        sysmsg = system_msg[0]
+        system_msg = [{'role': sysmsg['role'], 'content': [{"type": "text", "text": sysmsg['content']}]}]
+    
     # TODO: Should tag_only accept a system message? Foundation models don't really do that, but I guess it's not gonna break anything
     if tag_placement != 'content_prefix':
         assert len(system_msg) == 1 and system_msg[0]['role'] == 'system', 'Only tag_placement="content_prefix" can have system message with role != system'
@@ -229,7 +234,7 @@ def add_sys_msg(chat_convo:list[dict], system_msg:list[dict[str,str]], tag_place
     return chat_convo
 
 
-def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role' 'content_prefix_ot'], system_msg:dict[str,str]|list[dict[str,str]]|None=None) -> list[dict[str,str]]:
+def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str], tag_placement:typing.Literal['tag_only', 'content_prefix', 'replace_role' 'content_prefix_ot'], system_msg:dict[str,str]|list[dict[str,str]]|None=None, use_mm_format:bool = False) -> list[dict[str,str]]:
     # NOTE: formatted_author_tags INCLUDE TAG SEP (if not None)
     # https://github.com/benfred/py-spy
     atag_tcontent = zip(formatted_author_tags, raw_texts)
@@ -261,8 +266,9 @@ def to_conversation_format(formatted_author_tags:list[str], raw_texts:list[str],
     else:
         # '''For tag only, markup free, format''' # '''For chatml with custom roles as usernames'''
         for role_tag,content in atag_tcontent:
+            if use_mm_format:
+                content = [{"type": "text", "text": content}]
             chat_content.append({"role": role_tag, "content": content})
-        
         return add_sys_msg(chat_content, system_msg=system_msg, tag_placement=tag_placement)
 
 
@@ -519,9 +525,11 @@ def prepare_dataset_dataframe(chat_csv: str, cfg: DictConfig, **cfg_dot_kwargs):
 def chat_sessions_dataset(df_chat: pd.DataFrame, tokenizer: PreTrainedTokenizerBase, cfg:DictConfig, dataset_format: typing.Literal['text','tokens','messages'] = 'tokens'):
     system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer)
     
+    is_processor = getattr(tokenizer, 'tokenizer', None) is not None
+
     df_convo = df_chat.groupby(['split','chat_session'])[['formatted_author_tag','text','intrn_time_gap']].agg(list).drop_duplicates('text')
 
-    df_convo['conversation'] = df_convo.apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement, system_message), axis=1)
+    df_convo['conversation'] = df_convo.apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement, system_message, use_mm_format=is_processor), axis=1)
     # prepend either 0,1,or 2 "0.0" values to ensure alignment with inserted system message(s)
     df_convo['intrn_time_gap'] = (df_convo['conversation'].str.len() - df_convo['intrn_time_gap'].str.len()).apply(lambda zpad: [0.0]*zpad) + df_convo['intrn_time_gap']
 
@@ -701,10 +709,10 @@ def max_tokens_dataset(df_chat: pd.DataFrame, tokenizer:PreTrainedTokenizerBase,
     Chat sessions are not assigned, and the only use of Date or timestamp if present is consecutive message merge.
     '''
     system_message, has_system, append_msg = prepare_system_msg(cfg, tokenizer) # may update tokenizer
-
+    is_processor = getattr(tokenizer, 'tokenizer', None) is not None
     # get base tokens before any system is added
     # Do not add system message since it is a flat list of messages as a single mega conversation
-    sr_flat_convo = df_chat.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement), axis=1)
+    sr_flat_convo = df_chat.groupby('split')[['formatted_author_tag', 'text']].agg(list).apply(lambda r: to_conversation_format(r.formatted_author_tag, r.text, cfg.tag_placement, use_mm_format=is_processor), axis=1)
     print('Grouping messages into conversations of maximal length..')
     train_convos = convo_batch_max_tokens(sr_flat_convo['train'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)
     eval_convos = convo_batch_max_tokens(sr_flat_convo['eval'], tokenizer, system_message, cfg.tag_placement, max_length=cfg.chunk_size)

@@ -12,6 +12,8 @@ from transformers import (
     AutoTokenizer,
     AutoProcessor,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForMultimodalLM,
     BitsAndBytesConfig,
     GPTQConfig,
     TrainingArguments
@@ -57,18 +59,22 @@ def adjust_chat_format(model, tokenizer,  padding_side, custom_chat_template:str
     
     return model, tokenizer
 
-def get_unsloth(model_id, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None,):
-    # NOTE: FastVisonModel is just a type alias for FastModel
 
-    is_vlm = False
-    unsloth_peft_kwargs = {} 
-    
+def has_multimodal_processor(model_id:str):
     try:
-        AutoProcessor.from_pretrained(model_id)
-        is_vlm = True
+        processor = AutoProcessor.from_pretrained(model_id)
+        return (getattr(processor,'tokenizer',None) is not None)
     except ValueError as e:
         if not str(e).startswith('Unrecognized model'): # check for specific transformers error  
             raise e
+    return False
+
+def get_unsloth(model_id:str, peft_config: LoraConfig, max_seq_length=4096, padding_side=None, custom_chat_template=None, attn_implementation: typing.Literal["eager", "sdpa", "flash_attention_2"]="flash_attention_2", quant_method: typing.Literal["bnb4", "bnb8", "bf16"] = 'bnb4'):
+    # NOTE: FastVisonModel is just a type alias for FastModel
+
+    unsloth_peft_kwargs = {} 
+    
+    is_vlm = has_multimodal_processor(model_id)
     
     if is_vlm:
         unsloth_peft_kwargs = dict(
@@ -188,7 +194,11 @@ def get_model(model_id,
     if quant_config is None:
         pretrain_kwargs.pop('quantization_config') # passing as None will error as of transformers 4.39.2 (during .to_dict() call)
     
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    is_vlm = has_multimodal_processor(model_id)
+    if is_vlm:
+        tokenizer = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     
     if Path(model_id).joinpath('optimizer.pt').exists():
         # TODO: determine if vRAM spike is because of eval step
@@ -198,25 +208,26 @@ def get_model(model_id,
         model.print_trainable_parameters()
         return model, tokenizer
 
-
-    model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs, trust_remote_code=True)
+    if is_vlm:
+        # model = AutoModelForImageTextToText.from_pretrained(model_id, **pretrain_kwargs, trust_remote_code=True)
+        model = AutoModelForMultimodalLM.from_pretrained(model_id, **pretrain_kwargs, trust_remote_code=True)
+    else:
+        # model = AutoPeftModelForCausalLM.from_pretrained(model_id, is_trainable=True, config=peft_config, **pretrain_kwargs,)
+        model = AutoModelForCausalLM.from_pretrained(model_id, **pretrain_kwargs, trust_remote_code=True)
 
     model, tokenizer = adjust_chat_format(model, tokenizer, padding_side, custom_chat_template)
     #tokenizer = tokenization.configure_tokenizer(tokenizer, padding_side, custom_chat_template)
-
 
     if custom_tokens_map is not None:
         tokenization.smart_tokenizer_and_embedding_resize(custom_tokens_map, tokenizer, model)
         #model.resize_token_embeddings(len(tokenizer))
 
     # hf transformers handles bnb/aqlm/gptq already
-    #if isinstance(quant_config, BitsAndBytesConfig):
-        #model = misc.prepare_model_for_kbit_training(model)
     model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True) # this is the default: gradient_checkpointing_kwargs=dict(use_reentrant=True))
     
     model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
     model.enable_input_require_grads()
+    model.print_trainable_parameters()
     
     model.bfloat16()
     #model = model.to(torch.bfloat16)
