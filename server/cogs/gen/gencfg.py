@@ -236,9 +236,16 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
         msg=f'Lurk mode enabled for P>={confidence} ∀ ∈ ({self._display_initials})'
         return await ctx.send(msg)
     
+    async def tset_model_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        cur = current.casefold()
+        matching =  [c for c in cmd_choices.MODEL_GENERATIONS if cur in f'{c.name}_{c.value}'.casefold()]
+        if len(matching) > 25:
+            return matching[:12]+matching[-13:] # keep head+tail of match list
+        return matching
+
     @tsetarg.command(name='model')
-    @app_commands.choices(version=cmd_choices.MODEL_GENERATIONS)
-    async def tset_model(self, ctx: commands.Context, version: app_commands.Choice[str]):
+    @app_commands.autocomplete(version=tset_model_autocomplete)
+    async def tset_model(self, ctx: commands.Context, version: str):
         """Pick your favorite past model by its wildest lines
         
         Args:
@@ -247,9 +254,9 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
 
         genmap = {m['name']: settings.RUNS_DIR/m['ckpt'].split('runs/full/')[-1] for m in settings.BEST_MODELS} 
         await ctx.defer()
-        await self.clomgr.load(genmap[version.value], gen_config='best_generation_config.json')
-        await ctx.send(f'switched to {version.value.title()} model. May the odds be ever in your favor.')
-        await self.clomgr.bot.report_state('chat', ready=True)
+        await self.clomgr.load(genmap[version], gen_config='best_generation_config.json')
+        await ctx.send(f'switched to {version.title()} model. May the odds be ever in your favor.')
+        return await self.clomgr.bot.report_state('chat', ready=True)
     
     @tsetarg.command(name='randomode')
     async def tset_randomode(self, ctx: commands.Context, change_rate: int = 5, fast_proba: float = 0.5, announce:bool=True):
