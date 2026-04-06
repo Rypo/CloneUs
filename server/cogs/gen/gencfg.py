@@ -85,7 +85,7 @@ class SetTextConfig:#(commands.HybridGroup): # name='set', description='Change s
             enabled: Enable/disable streaming mode
         '''
         msgs = []
-        if enabled and self.clomgr.gen_config.num_beams > 1:
+        if enabled and self.clomgr.gen_config.num_beams and self.clomgr.gen_config.num_beams > 1:
             self.clomgr.gen_config.num_beams = 1
             msgs.append('Streaming incompatible with num_beams>1. Setting num_beams=1')
 
