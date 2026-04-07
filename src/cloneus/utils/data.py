@@ -1,6 +1,7 @@
+import re
 import copy
 import typing
-import urllib
+import urllib.parse
 import mimetypes
 import functools
 
@@ -10,6 +11,8 @@ import imageio.v3 as iio # pip install -U "imageio[ffmpeg, pyav]" # ffmpeg: mp4,
 from cloneus.types import cpaths
 
 DEFAULT_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36'} # use static UA unless dynamic determined necessary
+
+RE_FILENAME_UNSAFE = re.compile('[^.\w -]+')
 
 @functools.cache
 def resolve_mime_type(url:str):
@@ -44,14 +47,17 @@ def categorize_media_urls(urls: list[str], valid_formats: tuple[str] = None):
 @functools.cache
 def fetch_local_uri(url: str, item_type: typing.Literal['image','video']):
     filename = urllib.parse.urlsplit(url).path.rsplit('/',1)[-1]
+    filename = urllib.parse.unquote(filename)
+    filename = RE_FILENAME_UNSAFE.sub('', filename).replace(' ', '_')
     filepath = cpaths.DATA_DIR.joinpath('.cache', item_type, filename)
+    filepath = filepath.with_stem(filepath.stem[:88])
     if not filepath.exists():
         rsp = requests.get(url, headers=DEFAULT_HEADERS)
         iio.imwrite(filepath, iio.imread(rsp.content))
     
     return filepath.as_uri()
     
-def urls_to_local_files(conversations: list[dict]|list[list[dict]]):
+def urls_to_local_files(conversations: list[dict]|list[list[dict]], as_uri: bool = False):
     # conversations = copy.deepcopy(conversations) # TODO: mutate okay?
     if isinstance(conversations[0], dict):
         conversations = [conversations]
@@ -60,6 +66,7 @@ def urls_to_local_files(conversations: list[dict]|list[list[dict]]):
             if isinstance(message["content"], list):
                 for item in message["content"]:
                     item_type = item["type"]
-                    if item_type in ("image", "image_url", "video") and not item[item_type].startswith('file://'):
-                        item[item_type] = fetch_local_uri(item[item_type], item_type.split('_')[0]) # image_url -> image
+                    if item_type in ("image", "image_url", "video") and item[item_type].startswith('http'):
+                        local_uri = fetch_local_uri(item[item_type], item_type.split('_')[0]) # "image_url" -> "image"
+                        item[item_type] = local_uri if as_uri else local_uri.removeprefix('file://')
     return conversations
