@@ -276,7 +276,6 @@ class Cloneus(GenConfigUtilities):
         self.base_text_tokenizer = None
         self.base_dtype = None
         self.base_has_system = None
-        self.base_needs_bos = None
 
         self.mm_cache = {}
 
@@ -405,8 +404,7 @@ class Cloneus(GenConfigUtilities):
         self.model_capabilities = tuple(self.cfg.get('model_capabilities', ['text'])) # tuple for caching purposes
         self.is_multimodal = None
 
-        if isinstance(self.tokenizer, transformers.ProcessorMixin) and hasattr(self.tokenizer, 'tokenizer'):
-            self.tokenizer = AutoProcessor.from_pretrained(self.path_data.checkpoint_path, min_pixels=(256*28*28), max_pixels=((1*1280)*28*28), fps=1.0) # NOTE: Configured specifically for Qwen-VL-2.5
+        if getattr(self.tokenizer, 'tokenizer', None) is not None: # hasattr not always = getattr
             self.text_tokenizer: PreTrainedTokenizerBase = self.tokenizer.tokenizer
             self.is_multimodal = True
         else:
@@ -427,7 +425,6 @@ class Cloneus(GenConfigUtilities):
             self.base_dtype = torch.bfloat16 # Avoid ever running as float32
                 
         self.base_has_system = tokenization.check_if_system(self.base_tokenizer) 
-        self.base_needs_bos = self.base_tokenizer.chat_template and 'bos_token' not in self.base_tokenizer.chat_template
 
         logger.info('Tk|Gc: (pad: {}|{}, eos: {}|{}), base_has_system: {}, has_prompt: {}, tag_placement: {}'.format(
             self.text_tokenizer.pad_token_id, self.gen_config.pad_token_id, 
@@ -574,7 +571,7 @@ class Cloneus(GenConfigUtilities):
         if not self.is_multimodal:
             return {}
         
-        chat_history = [(*item, []) if len(item)<3 else item for item in chat_history[:]]
+        chat_history = [(*item, []) if len(item)<3 else item for item in chat_history]
 
         n_cached_urls = len(self.mm_cache.get('images', []) or []) + len(self.mm_cache.get('videos', []) or []) # sum(map(len, self.mm_cache.values()))
         n_chat_urls = sum([len(urls) for _,_,urls in chat_history])
@@ -1075,28 +1072,67 @@ class Cloneus(GenConfigUtilities):
             return GenerationOutput(input_text, model_output, input_length, output_length)
         return model_output
 
-    def base_to_conversation_format(self, chat_history: str|list[str], system_prompt:str=None):
-        if isinstance(chat_history, str):
-            chat_history = [chat_history]
+    def base_mm_format(self, chat_history: list[tuple[str, list[str]]], system_prompt:str=None):
+        rolecycle = itertools.cycle(['user','assistant'])
+        chat_content = []
+    
+        if system_prompt is not None and self.base_has_system:
+            chat_content.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
+    
+        for item in chat_history:
+            message,content_urls = item if isinstance(item, tuple) else (item, [])
+            content = []
+            if content_urls:
+                media_urls = dutil.categorize_media_urls(content_urls, self.model_capabilities)
+                for media_format, urls in media_urls.items():
+                    content.extend([{"type": media_format, media_format: url} for url in urls])
+            
+            content += [{"type": "text", "text": message}]
+            chat_content.append({"role": next(rolecycle), "content": content})
         
+        chat_content = dutil.urls_to_local_files(chat_content, as_uri=False)
+        return chat_content
+    
+    def base_text_format(self, chat_history: list[tuple[str, list[str]]], system_prompt:str=None):
         rolecycle = itertools.cycle(['user','assistant'])
         chat_content = []
 
         if system_prompt is not None and self.base_has_system:
             chat_content.append({"role": "system", "content": system_prompt})
 
-        for message in chat_history:
-            chat_content.append({"role": next(rolecycle), "content": message})
+        for item in chat_history:
+            chat_content.append({"role": next(rolecycle), "content": item[0]})
 
-        input_text = self.base_tokenizer.apply_chat_template(chat_content, tokenize=False, add_generation_prompt=True)
-        if forced_thought := self.cfg.get("base_forced_thought"):
-            input_text += forced_thought
+        return chat_content
 
-        #print('chat_content:',chat_content)
-        #print(f'getEffectiveLevel: {logger.getEffectiveLevel()} | logger.root: {logger.root}', logger.__dict__)
-        logger.info(f'input_text: {input_text!r}',)
+    def base_to_conversation_format(self, chat_history: list[str|tuple[str, list[str]]], system_prompt:str=None):
+        if isinstance(chat_history, str):
+            chat_history = (chat_history, [])
+        if isinstance(chat_history, tuple):
+            chat_history = [chat_history]
+
+        chat_history = [(item, []) if isinstance(item, str) else item for item in chat_history]
+
+        if self.is_multimodal:
+            return self.base_mm_format(chat_history, system_prompt)
+        return self.base_text_format(chat_history, system_prompt)
+
+    def base_to_inputs(self, chat_conversation:list[dict]):
+        mm_inputs = {}
+        if self.is_multimodal:
+            image_inputs, video_inputs = process_vision_info(chat_conversation)
+            mm_inputs.update({'images': image_inputs, 'videos': video_inputs})
+
+        input_text = self.base_tokenizer.apply_chat_template(chat_conversation, tokenize=False, add_generation_prompt=True)
         
-        return input_text
+        if forced_thought := self.cfg.get("base_forced_thought"):
+            if not isinstance(input_text, list):
+                input_text = [input_text]
+            for i in range(len(input_text)):
+                input_text[i] += forced_thought
+
+        logger.info(f'input_text: {input_text!r}',)
+        return input_text, mm_inputs
 
     @torch.inference_mode()
     def base_generate(self, messages:str|list[str], system_prompt:str=None, return_tuple: bool = False) -> str | GenerationOutput:
@@ -1118,19 +1154,24 @@ class Cloneus(GenConfigUtilities):
         # TODO: Function for base/cloneus hybrid
         # - just user/assistant tags on a trained model. Surprisingly, sort of works to have AI style responsiveness but with custom vernacular
 
-        input_text = self.base_to_conversation_format(messages, system_prompt=system_prompt)
-
-        inputs = self.base_tokenizer(text=input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)
+        chat_conversation = self.base_to_conversation_format(messages, system_prompt=system_prompt)
+        if self.cfg.get("base_forced_thought"):
+            input_text, mm_inputs = self.base_to_inputs(chat_conversation)
+            inputs = self.base_tokenizer(text=input_text, **mm_inputs, return_tensors="pt", return_length=True, add_special_tokens=False)
+        else:
+            inputs = self.base_tokenizer.apply_chat_template(chat_conversation, return_tensors="pt", return_length=True, return_dict=True, tokenize=True, add_generation_prompt=True)
+        
         input_len = inputs.pop('length')[0].item()
         
         with self.model.disable_adapter(), torch.amp.autocast("cuda", dtype=self.base_dtype):
-            output = self.model.generate(**inputs.to(0), generation_config=self.base_gen_config, stopping_criteria=self.stop_criteria, negative_prompt_ids=None).detach_() # adapter_names=["__base__"]
+            output = self.model.generate(**inputs.to(0), generation_config=self.base_gen_config, stopping_criteria=self.stop_criteria, )
         
         out_tokens = output[0,input_len:]
-        output_len = out_tokens.shape[0]
         out_text = self.base_tokenizer.decode(out_tokens, skip_special_tokens=True)
         #self.model.set_adapter(adapters)
         if return_tuple:
+            input_text = self.base_tokenizer.decode(output[0, :input_len], skip_special_tokens=False)
+            output_len = out_tokens.shape[0]
             return GenerationOutput(input_text, out_text, input_len, output_len)
         return out_text
     
@@ -1158,12 +1199,16 @@ class Cloneus(GenConfigUtilities):
         self._last_streamed_values = {'input_text':'', 'output_text':'', 'input_len': -1, 'output_len': -1}
         streamer = TextIteratorStreamer(self.base_tokenizer, skip_prompt=True, timeout=120.0, skip_special_tokens=True)
 
-        input_text = self.base_to_conversation_format(messages, system_prompt=system_prompt)
-        inputs = self.base_tokenizer(text=input_text, return_tensors="pt", return_length=True, add_special_tokens=self.base_needs_bos)#, max_length=1024, truncation=True)
+        chat_conversation = self.base_to_conversation_format(messages, system_prompt=system_prompt)
+        if self.cfg.get("base_forced_thought"):
+            input_text, mm_inputs = self.base_to_inputs(chat_conversation)
+            inputs = self.base_tokenizer(text=input_text, **mm_inputs, return_tensors="pt", return_length=True, add_special_tokens=False)
+        else:
+            inputs = self.base_tokenizer.apply_chat_template(chat_conversation, return_tensors="pt", return_length=True, return_dict=True, tokenize=True, add_generation_prompt=True)
 
         input_len = inputs.pop('length')[0].item()
 
-        genkwargs = dict(inputs.to(0), generation_config=self.base_gen_config, streamer=streamer, stopping_criteria=self.stop_criteria, negative_prompt_ids=None)
+        genkwargs = dict(inputs.to(0), generation_config=self.base_gen_config, streamer=streamer, stopping_criteria=self.stop_criteria)
         
         with self.model.disable_adapter(), torch.amp.autocast("cuda",dtype=self.base_dtype):
             thread = Thread(target=self.model.generate, kwargs=genkwargs)
@@ -1174,7 +1219,7 @@ class Cloneus(GenConfigUtilities):
                 yield new_text
         
         output_len = self.base_tokenizer(text=generated_text, return_length=True)['length']
-
+        input_text = input_text[0] if isinstance(input_text, list) else input_text
         self._last_streamed_values.update({'input_text':input_text, 'output_text': generated_text, 'input_len': input_len, 'output_len': output_len})
         #self.model.set_adapter(adapters)
 

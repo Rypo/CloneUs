@@ -20,9 +20,8 @@ from transformers import (
     AwqConfig,
 )
 import transformers
-from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase, AutoModelForImageTextToText#, AutoModelForMultimodalLM
+from transformers import PreTrainedModel, PreTrainedTokenizerBase, AutoModelForImageTextToText, AutoModelForMultimodalLM
 from peft import PeftModel, LoraConfig, get_peft_model, AutoPeftModelForCausalLM, PeftConfig, PeftModelForCausalLM
-from safetensors.torch import load_model as load_model_safetensors, save_model as save_model_safetensors
 from accelerate.utils import release_memory
 
 from cloneus.data import tokenization
@@ -48,7 +47,8 @@ def auto_inference_tokenizer(pretrained_model_name_or_path: str | Path, refix_to
         tokenizer = load_correct_tokenizer(pretrained_model_name_or_path, trust_remote_code=True)
     else:
         try: 
-            processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs, trust_remote_code=True, 
+                                                      min_pixels=(256*28*28), max_pixels=(1280*28*28), fps=1.0) # NOTE: Configured specifically for Qwen-VL-2.5
             if not hasattr(processor, 'tokenizer'):
                 raise ValueError
             tie_chat_template = (processor.chat_template == processor.tokenizer.chat_template)
@@ -188,7 +188,7 @@ def load_unsloth(checkpoint_dirpath:Path, quant_config=None, dtype=torch.bfloat1
     )
     # Explictly using PeftModel.from_pretrained rather than directly loading adapter with AutoModel give access to peft methods
     if hasattr(tokenizer, 'tokenizer'):
-        model = AutoModelForImageTextToText.from_pretrained(**pt_kwargs)
+        model = AutoModelForMultimodalLM.from_pretrained(**pt_kwargs)
         model = PeftModel.from_pretrained(model, checkpoint_dirpath, **peft_kwargs)
         model = FastModel.for_inference(model)#.to(dtype)
     else:
