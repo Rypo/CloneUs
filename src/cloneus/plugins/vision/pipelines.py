@@ -478,7 +478,6 @@ class SingleStagePipeline:
         self.upsampler = None
         self.captioner = None
         self.interpolator = None
-        self.vqa = None
 
         # processors
         self.compeler = None
@@ -537,11 +536,11 @@ class SingleStagePipeline:
                 setattr(self.basei2i, comp, None)
         (
             self.base, self.basei2i, 
-            self.compeler, self.upsampler, self.captioner, self.interpolator, self.vqa, 
+            self.compeler, self.upsampler, self.captioner, self.interpolator,
             self.initial_scheduler_config, self.scheduler_kwargs
         ) = release_memory(
              self.base, self.basei2i, 
-             self.compeler, self.upsampler, self.captioner, self.interpolator, self.vqa, 
+             self.compeler, self.upsampler, self.captioner, self.interpolator,
              self.initial_scheduler_config, self.scheduler_kwargs
         )
         # The ugliest possible way to set a bunch of things to None
@@ -706,14 +705,6 @@ class SingleStagePipeline:
 
         return resp
     
-    @torch.inference_mode()    
-    def vqa_chat(self, prompt:str=None, images:np.ndarray=None,  frames_as_video:bool=True, img_metas:list[dict]=None):
-        if self.vqa is None:
-            self.vqa = specialists.VQA(offload=True)
-        
-        resp = self.vqa.chat(prompt=prompt, images=images, frames_as_video=frames_as_video, img_metas=img_metas)
-        release_memory()   
-        return resp
     
     @torch.inference_mode()
     def interpolate(self, images:list[Image.Image], inter_frames:int=4, batch_size=2, allow_resize:bool=True,):

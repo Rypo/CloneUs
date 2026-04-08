@@ -26,7 +26,7 @@ class ImageGenManager:#(pipelines.SingleStagePipeline):
     _async_exec_methods = [
         'load_pipeline', 'unload_pipeline', 'compile_pipeline', 
         'generate_image', 'regenerate_image','refine_image',
-        'vqa_chat','caption'
+        'caption',
         # 'decode_latents', 'embed_prompts', 'upsample', 'caption', 
     ]
     # These methods yield from generators. We want to reserve the primary executor for the generator. 
