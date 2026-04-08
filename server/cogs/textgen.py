@@ -21,7 +21,7 @@ import torch
 from cloneus.data import useridx
 
 import config.settings as settings
-from utils import text as text_utils, io as io_utils
+from utils import text as text_utils, io as io_utils, http as http_util
 from utils.status import StatusItem, check_up
 from utils.globthread import wrap_async_executor, stop_global_executors
 
@@ -674,7 +674,7 @@ class TextGen(commands.Cog, SetTextConfig):
 
     @commands.hybrid_command(name='ask')
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
-    async def ask(self, ctx: commands.Context, prompt:str, *, system_msg:str=None):
+    async def ask(self, ctx: commands.Context, prompt:str, *, urls:str = None, system_msg:str=None):
         """Send a prompt to the underlying, un-fintuned base model.
         
         tips: 
@@ -685,12 +685,16 @@ class TextGen(commands.Cog, SetTextConfig):
 
         Args:
             prompt: The text to send the chat bot. Can be a question or a instruction or otherwise.
+            urls: Image/Video URLs to give to bot. If multiple URLs, separate them with a space.
             system_prompt: A guidance statement for the model. Alters how it responds to the prompt.
         """
 
         if system_msg is None:
             system_msg = self.default_system_msg
         
+        urls = [] if urls is None else urls.split(' ')
+        urls = [http_util.normalize_media_url(url.strip(), tenor_mp4_url=True) for url in urls]
+
         await self.check_defer(ctx)
         
         self.clomgr.tts_mode = self.tts_mode
@@ -699,9 +703,9 @@ class TextGen(commands.Cog, SetTextConfig):
         
         async with (typing_ctx.typing(), self.bot.busy_status(activity='chat')):
             if self.streaming_mode:
-                sent_messages = await self.clomgr.base_streaming_generate(ctx, prompt, system_msg)
+                sent_messages = await self.clomgr.base_streaming_generate(ctx, (prompt, urls), system_msg)
             else:
-                sent_messages = await self.clomgr.base_generate(ctx, prompt, system_msg)
+                sent_messages = await self.clomgr.base_generate(ctx, (prompt, urls), system_msg)
         
         if self.streaming_mode:
             delete_delay = 0.5
@@ -711,7 +715,7 @@ class TextGen(commands.Cog, SetTextConfig):
     
     @commands.hybrid_command(name='chat')            
     #@check_up('clomgr', '❗ Text model not loaded. Call `!txtup`')
-    async def chat(self, ctx: commands.Context, prompt:str, *, system_msg:str=None):
+    async def chat(self, ctx: commands.Context, prompt:str, *, urls:str = None, system_msg:str=None):
         """Have a conversation with the underlying, un-fintuned base model.
         
         tips: 
@@ -722,14 +726,18 @@ class TextGen(commands.Cog, SetTextConfig):
 
         Args:
             prompt: The next message to send the chat bot.
+            urls: Image/Video URLs to give to bot. Separate multiple URLs with a space.
             system_prompt: A guidance statement for the model. Alters how it responds to the prompt.
         """
         if system_msg is None:
             system_msg = self.default_system_msg
         
+        urls = [] if urls is None else urls.split(' ')
+        urls = [http_util.normalize_media_url(url.strip(), tenor_mp4_url=True) for url in urls]
+
         await self.check_defer(ctx)
 
-        self.msgmgr.base_message_cache.append(prompt)
+        self.msgmgr.base_message_cache.append((prompt,urls))
         self.clomgr.tts_mode = self.tts_mode
         
         typing_ctx = ctx.channel if self.streaming_mode else ctx
@@ -747,7 +755,8 @@ class TextGen(commands.Cog, SetTextConfig):
         # Re-join any splits from the 2000 char limit 
         # TODO: Watch for any missing spaces
         sent_text = ''.join([m.clean_content for m in sent_messages])
-        self.msgmgr.base_message_cache.append(sent_text)
+        self.msgmgr.base_message_cache.append((sent_text, []))
+
         return sent_text
     
     # provide 4 creative rewritings of this text to image prompt, be detailed and highly creative but keep try to stay true to 

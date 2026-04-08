@@ -15,7 +15,7 @@ class MessageManager:
         '''Handler for chat message history. Importantly, does NOT have commands'''
         self.bot = bot
         self.message_caches = defaultdict(list) # priorty queue? set? heapq? bisect? (time, data)
-        self.base_message_cache = []
+        self.base_message_cache: list[tuple[str, list[str]]] = []
         self.n_init_messages = n_init_messages
         self.message_cache_limit = message_cache_limit # (msgs/4hr: median=24, mean=35.5)
 
