@@ -285,4 +285,12 @@ def model_tokenizer_from_config(peft_config, cfg, custom_token_map=None):
     else:
         raise NotImplementedError(f'Unknown flashattn_lib: {cfg.flashattn_lib!r}')
     
+    # Overwrite special tokens if set in config
+    for k,v in cfg.special_tokens.items():
+        if v:
+            if hasattr(tokenizer, k):
+                setattr(tokenizer, k, v)
+            if hasattr(tokenizer, 'tokenizer') and hasattr(tokenizer.tokenizer, k): # processor
+                setattr(tokenizer.tokenizer, k, v)
+
     return model, tokenizer
